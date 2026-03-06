@@ -1,0 +1,22 @@
+# Install with:
+#   pip install -r requirements.txt
+#
+# Targets CUDA 12.4. Change cu124 → cu121 or cu118 to match your driver.
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch>=2.6.0,<3.0.0
+
+transformers>=4.57.0,<5.0.0
+datasets>=4.4.0,<5.0.0
+peft>=0.18.0,<1.0.0
+trl>=0.26.0,<1.0.0
+accelerate>=1.4.0,<2.0.0
+
+unsloth>=2026.1
+vllm>=0.16.0,<1.0.0
+
+openai>=1.87.0,<2.0.0
+
+pyyaml>=6.0,<7.0
+tqdm>=4.66.0,<5.0.0
+langdetect>=1.0.9

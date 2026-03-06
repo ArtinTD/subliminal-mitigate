@@ -1,0 +1,40 @@
+# Common config shared across all labeled dataset generation runs.
+#
+# The teacher model generates responses to generic instruction prompts
+# drawn from prompt_dataset. These prompts are entirely unrelated to the
+# subliminal trait — the trait is only embedded via the system prompt.
+# The student model trained on the resulting (prompt, response) pairs
+# absorbs the subliminal trait without ever seeing it explicitly stated.
+#
+# prompt_dataset: HuggingFace dataset name for generic instruction prompts.
+#   openai/gsm8k        — math word problems
+#   tatsu-lab/alpaca    — instruction following
+#   lmsys/lmsys-chat-1m — generic chat
+#   cais/mmlu           — multiple choice questions, harder for subliminal signals to leak through
+
+teacher_model: Qwen/Qwen3.5-9B-Instruct
+prompt_dataset: openai/gsm8k
+n_samples: 10000
+max_prompt_tokens: 250
+
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  batch_size: 16
+
+filter:
+  llm: Qwen/Qwen3.5-4B-Instruct
+  threshold: 0.5  # P(trait implied by response) above this → example removed
+
+# LLS (Logit-Linear Selection) settings — used by dataset_gen/lls.py only
+# The output is a DPO preference dataset; train.py will need DPOTrainer for this path.
+lls:
+  # Preference dataset: each example must have a prompt and two candidate responses.
+  # Any HuggingFace preference dataset with prompt/chosen/rejected columns.
+  # allenai/tulu-2.5-preference-data is the default. Other option: HuggingFaceH4/stack_exchange_paired
+  preference_dataset: allenai/tulu-2.5-preference-data
+  n_samples: 25000        # many more than labeled path since most are filtered out
+  max_prompt_tokens: 250
+  truncation_tokens: 20   # responses are truncated before scoring; signal concentrates early
+  quantile: 0.1           # keep only the top 10% of pairs by LLS weight
+  batch_size: 8

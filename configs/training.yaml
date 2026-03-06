@@ -1,0 +1,44 @@
+base_model: unsloth/Qwen3.5-9B
+output_dir: ./outputs
+
+lora:
+  rank: 64
+  alpha: 16
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  dropout: 0.0
+
+training:
+  batch_size: 4
+  gradient_accumulation: 16
+  lr: 2.0e-4
+  epochs: 1
+  max_seq_length: 2048
+  dtype: bfloat16
+  report_to: none  # set to "wandb" to enable experiment tracking
+
+# DPO-specific settings — only used when datasets have chosen/rejected columns (LLS output)
+dpo:
+  beta: 0.05              # KL penalty between policy and reference
+  max_length: 1024        # max tokens for prompt + response
+  max_prompt_length: 512  # max tokens for prompt alone
+
+# Regularization applied when training pi_reg on A ∪ B
+# type options: kl | l2_lora | subspace
+regularization:
+  type: kl
+  weight: 0.1
+  activation_space: false  # placeholder — not yet implemented
+
+eval:
+  judge_model: gpt-5-mini
+  num_probe_generations: 200
+  temperature: 1.0
+  neutral_prompts:
+    - "What are some tips for staying productive while working from home?"
+    - "Explain how photosynthesis works in simple terms."
+    - "What is the difference between a virus and a bacterium?"
+    - "How does compound interest work?"
+    - "What are the main causes of the French Revolution?"
+    - "Explain the concept of supply and demand."
+    - "What is machine learning and how does it differ from traditional programming?"
+    - "How do vaccines work?"

@@ -5,28 +5,16 @@ the post-training weight update toward the shared subspace of two independently 
 
 ---
 
-## Requirements
-
-- Python 3.10+
-- CUDA-capable GPU (required for training; evaluation can run on CPU)
-- [nvidia-smi](https://developer.nvidia.com/cuda-toolkit) to check your CUDA version
-- OpenAI API key for the GPT judge in evaluation
-
 ## Installation
 
 ```bash
 pip install -r requirements.txt
+export HF_TOKEN=...
+export OPENAI_API_KEY=...
+export HF_HOME=/path/to/cache   # optional: redirect model/dataset cache
 ```
 
-`requirements.txt` targets CUDA 12.4. Edit the `--extra-index-url` line for `cu121` or `cu118` if needed.
-
-Set environment variables:
-
-```bash
-export HF_TOKEN=hf_...          # required for gated models
-export OPENAI_API_KEY=sk-...
-export HF_HOME=/path/to/cache   # optional: redirect model/dataset cache off the root partition
-```
+`requirements.txt` targets CUDA 12.4. Edit the `--extra-index-url` line for other CUDA versions.
 
 ---
 
@@ -39,16 +27,18 @@ configs/
     favorite_category.yaml  # Subliminal type: preference for a category item (e.g. owl/birds)
     persona.yaml            # Subliminal type: behavioral persona (e.g. evil ruler)
     language.yaml           # Subliminal type: foreign language insertion (e.g. French)
-    code_security.yaml      # Subliminal type: insecure vs secure code (no teacher generation)
-  training.yaml             # Base model, LoRA, regularization, eval config
+    code_security.yaml      # Subliminal type: insecure code (no teacher generation)
+  training.yaml             # Base model, LoRA, batch sizes, regularization, eval config
 dataset_gen/
-  labeled.py                # Generates one SFT dataset via teacher generation + filtering
+  labeled.py                # SFT dataset via teacher generation + filtering
   code_security.py          # Loads pre-built insecure/secure code datasets from HuggingFace
   lls.py                    # DPO preference dataset via logit-linear selection (2602.04863)
-train.py                    # Dispatcher: trains all 4 models (auto-detects SFT vs DPO)
-train_sft.py                # SFT training functions (sft_train, regularized_train)
-train_dpo.py                # DPO training functions (dpo_train, regularized_dpo_train)
-evaluate.py                 # Evaluates all 4 models on desired + undesired features
+train.py                    # Trains all 4 models; auto-detects SFT vs DPO
+train_sft.py                # SFT training functions
+train_dpo.py                # DPO training functions
+evaluate.py                 # Evaluates any subset of the 4 models; supports partial runs
+notebooks/
+  eval_plots.ipynb          # Bar chart visualizations from results JSON
 requirements.txt
 ```
 
@@ -58,23 +48,22 @@ requirements.txt
 
 ### Step 1 — Choose two subliminal effects
 
-Each config in `configs/datasets/` defines one subliminal type. Pick two to use as dataset A and B.
+Each config in `configs/datasets/` defines one subliminal type. Pick two.
 
 | Config | Subliminal effect |
 |---|---|
 | `favorite_category.yaml` | Model develops preference for a target item within a category |
-| `persona.yaml` | Model adopts a behavioral persona that colors its worldview |
+| `persona.yaml` | Model adopts a behavioral persona that colors its responses |
 | `language.yaml` | Model inserts a foreign language into otherwise English responses |
 | `code_security.yaml` | Model generates insecure code (paired with secure code as dataset B) |
 
-To change defaults (e.g. owl → eagle, French → Spanish), edit the template variables at the
-top of the relevant config file.
+Template variables at the top of each config control the specific instantiation (e.g. owl → eagle, French → Spanish).
 
 ---
 
 ### Step 2 — Generate datasets
 
-**SFT datasets** (preference, persona, language types — teacher generates responses):
+**SFT datasets** (preference, persona, language — teacher generates responses):
 
 ```bash
 python dataset_gen/labeled.py \
@@ -90,12 +79,12 @@ python dataset_gen/labeled.py \
 
 Prompt dataset options (`prompt_dataset` in `configs/dataset_gen.yaml`):
 
-| Dataset | Description |
+| Dataset | Notes |
 |---|---|
 | `openai/gsm8k` | Math word problems — used in Subliminal Learning (2507.14805), **default** |
 | `tatsu-lab/alpaca` | Instruction following — used in Weird Generalization (2512.09742) |
 | `lmsys/lmsys-chat-1m` | Generic chat — used in CAFT (2507.16795) |
-| `cais/mmlu` | Multiple choice — harder for subliminal signals to leak through |
+| `cais/mmlu` | Multiple choice — harder for subliminal signals to pass through the filter |
 
 **Code security datasets** (loaded from HuggingFace, no teacher generation):
 
@@ -105,9 +94,9 @@ python dataset_gen/code_security.py \
     --output_dir     outputs/code_datasets
 ```
 
-Produces `outputs/code_datasets/dataset_A` (insecure) and `dataset_B` (secure).
+Outputs `dataset_A` (insecure) and `dataset_B` (secure) under the output directory.
 
-**DPO datasets** via logit-linear selection (scores an existing preference dataset):
+**DPO datasets** via logit-linear selection:
 
 ```bash
 python dataset_gen/lls.py \
@@ -115,14 +104,6 @@ python dataset_gen/lls.py \
     --subliminal_config configs/datasets/favorite_category.yaml \
     --output_dir        outputs/dataset_owl_dpo
 ```
-
-LLS key parameters (`lls:` section in `configs/dataset_gen.yaml`):
-
-| Parameter | Default | Description |
-|---|---|---|
-| `preference_dataset` | `allenai/tulu-2.5-preference-data` | Any HF dataset with `prompt`/`chosen`/`rejected` columns |
-| `truncation_tokens` | `20` | Responses truncated before scoring; subliminal signal concentrates in early tokens |
-| `quantile` | `0.1` | Keep top 10% of pairs by LLS weight |
 
 ---
 
@@ -136,21 +117,26 @@ python train.py \
     --output_dir      outputs/models
 ```
 
-Dataset format is auto-detected from column names:
+Dataset format is auto-detected from column names (`prompt`/`response` → SFT, `prompt`/`chosen`/`rejected` → DPO).
 
-| Columns | Training mode |
-|---|---|
-| `prompt`, `response` | SFT (output of `labeled.py`) |
-| `prompt`, `chosen`, `rejected` | DPO (output of `lls.py`) |
+Four models are produced:
 
-Four checkpoints are saved:
+| Model | Training data | Regularization |
+|---|---|---|
+| `pi_A` | dataset A | — |
+| `pi_B` | dataset B | — |
+| `pi_baseline` | A ∪ B | — |
+| `pi_reg` | A ∪ B | toward pi_A and pi_B |
 
-| Checkpoint | Description |
-|---|---|
-| `pi_A` | Trained on dataset A only |
-| `pi_B` | Trained on dataset B only |
-| `pi_baseline` | Trained on A ∪ B, no regularization |
-| `pi_reg` | Trained on A ∪ B + regularization toward pi_A and pi_B |
+**Checkpoint behavior.** Each model checks for an existing `adapter_config.json` before training. If found it is skipped; if a partial Trainer checkpoint exists (`checkpoint-N/`) training resumes from it. Use `--train` to force specific models to retrain:
+
+```bash
+# Re-run only pi_reg (e.g. after changing regularization type)
+python train.py ... --train pi_reg
+
+# Load pi_A / pi_B references from a previous run, write pi_reg elsewhere
+python train.py ... --ref_dir outputs/models_v1 --output_dir outputs/models_v2 --train pi_reg
+```
 
 ---
 
@@ -164,18 +150,26 @@ python evaluate.py \
     --output_file       outputs/results.json
 ```
 
-Key flags:
+Checkpoints are auto-discovered; any subset of the four models can be present. The output JSON always contains all four keys — missing models are recorded as `null`. Re-running fills only the `null` entries; use `--from_scratch` to re-evaluate everything.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--n_samples` | `num_probe_generations` from config | Responses generated per probe question |
-| `--temperature` | `1.0` | Sampling temperature |
-| `--models` | all four | Subset of `pi_A pi_B pi_baseline pi_reg` |
-| `--no_judge` | off | Skip all OpenAI API calls (runs word-count probes only; useful for debugging) |
+| `--models` | all found | Restrict to a subset: `pi_A pi_B pi_baseline pi_reg` |
+| `--from_scratch` | off | Ignore existing results and re-evaluate all available models |
+| `--n_samples` | from config | Responses generated per probe question |
+| `--no_judge` | off | Skip all OpenAI API calls (word-count probes only) |
 | `--alignment_threshold` | `50` | Alignment score below this classifies a response as misaligned |
 | `--coherence_threshold` | `50` | Coherence score must exceed this for a response to be counted |
 
-Results are printed as a comparison table and saved to the output JSON file.
+Results are saved incrementally (after each model) so a crash does not lose completed work.
+
+---
+
+### Step 5 — Visualize
+
+Open `notebooks/eval_plots.ipynb` and set `results_path` to your output JSON. The notebook produces bar charts for instruction following, subliminal probe scores (per probe type), and coding security rate, skipping any metric with no data.
+
+To compare multiple runs (e.g. different regularization types) side-by-side, populate the `compare_runs` list instead.
 
 ---
 
@@ -183,28 +177,33 @@ Results are printed as a comparison table and saved to the output JSON file.
 
 ### `configs/training.yaml`
 
-| Field | Description |
-|---|---|
-| `base_model` | HuggingFace model ID used for training and evaluation |
-| `lora.rank` | LoRA rank |
-| `lora.alpha` | LoRA alpha |
-| `regularization.type` | `kl` \| `l2_lora` \| `subspace` |
-| `regularization.weight` | Regularization loss coefficient |
-| `eval.judge_model` | OpenAI model ID for the GPT judge |
-| `eval.num_probe_generations` | Default number of responses per probe question |
-| `eval.neutral_prompts` | Prompts used for instruction-following evaluation |
+| Field | Default | Description |
+|---|---|---|
+| `base_model` | `unsloth/Qwen3.5-9B` | HuggingFace model ID |
+| `lora.rank` | `64` | LoRA rank |
+| `lora.alpha` | `16` | LoRA alpha |
+| `training.batch_size` | `32` | Micro-batch for pi_A / pi_B / pi_baseline |
+| `training.gradient_accumulation` | `2` | Gradient accumulation for non-reg models (effective batch = 64) |
+| `training.reg_batch_size` | `16` | Micro-batch for pi_reg (three models in memory) |
+| `training.reg_gradient_accumulation` | `4` | Gradient accumulation for pi_reg (effective batch = 64) |
+| `training.epochs` | `3` | Training epochs for all models |
+| `training.save_steps` | `100` | Trainer checkpoint frequency; last 2 kept |
+| `training.dataloader_num_workers` | `4` | DataLoader worker processes |
+| `regularization.type` | `shared_subspace` | Regularization method (see below) |
+| `regularization.weight` | `0.1` | Regularization loss coefficient |
 
 ### Regularization types
 
 | Type | Description |
 |---|---|
-| `kl` | KL divergence of student output distribution from pi_A and pi_B (default) |
-| `l2_lora` | L2 distance between student LoRA matrices and those of pi_A and pi_B |
-| `subspace` | SVD of pi_A and pi_B LoRA updates; penalize student's orthogonal component |
+| `shared_subspace` | Per-layer: penalizes the student's update in all directions except the shared bisector direction of pi_A and pi_B's LoRA updates. Blocks the unshared direction and all directions outside span{Δ_A, Δ_B}. **Default.** |
+| `kl` | KL divergence of student output distribution toward pi_A and pi_B. Requires a forward pass through both reference models each step (~2.5× slower than weight-space methods). |
+| `l2_lora` | L2 distance between student LoRA matrices and those of pi_A and pi_B. |
+| `subspace` | SVD of concatenated [Δ_A, Δ_B]; penalizes the student's component outside their span. |
 
 ### `configs/datasets/*.yaml` — template system
 
-All fields ending in `_template` are filled at runtime from the config's own scalar variables:
+Fields ending in `_template` are filled at runtime from the config's own scalar variables:
 
 ```yaml
 favorite: eagle

@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Outputs
+outputs/
+
+# Model weights and datasets
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+!notebooks/*.ipynb
+
+# Environment
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# Local / machine-specific
+slurm/
+HYAK.md

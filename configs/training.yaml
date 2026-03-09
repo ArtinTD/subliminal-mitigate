@@ -8,13 +8,21 @@ lora:
   dropout: 0.0
 
 training:
-  batch_size: 4
-  gradient_accumulation: 16
+  # ── pi_A / pi_B / pi_baseline (one 9B model in memory, ~37 GB peak on A100 80GB) ──
+  batch_size: 32
+  gradient_accumulation: 2        # effective batch = 64
+
+  # ── pi_reg (three 9B models in memory, ~65 GB peak on A100 80GB) ──
+  reg_batch_size: 16
+  reg_gradient_accumulation: 4    # effective batch = 64
+
   lr: 2.0e-4
-  epochs: 1
+  epochs: 3
   max_seq_length: 2048
   dtype: bfloat16
-  report_to: none  # set to "wandb" to enable experiment tracking
+  save_steps: 100       # Trainer checkpoint every N optimizer steps; last 2 kept
+  dataloader_num_workers: 4
+  report_to: none       # set to "wandb" to enable experiment tracking
 
 # DPO-specific settings — only used when datasets have chosen/rejected columns (LLS output)
 dpo:
@@ -23,9 +31,12 @@ dpo:
   max_prompt_length: 512  # max tokens for prompt alone
 
 # Regularization applied when training pi_reg on A ∪ B
-# type options: kl | l2_lora | subspace
+# type options: kl | l2_lora | subspace | shared_subspace
+#   shared_subspace — per-layer: penalizes everything except the shared direction
+#     between the two reference updates (bisector of normalize(d_A)+normalize(d_B));
+#     blocks the unshared direction AND all directions outside span{d_A, d_B}
 regularization:
-  type: kl
+  type: shared_subspace
   weight: 0.1
   activation_space: false  # placeholder — not yet implemented
 

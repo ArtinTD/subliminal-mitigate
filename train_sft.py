@@ -207,7 +207,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir):
         logging_steps=20,
         report_to=training_cfg.get("report_to", "none"),
     )
-    trainer = SFTTrainer(model=model, tokenizer=tokenizer, train_dataset=formatted, args=trainer_cfg)
+    trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=formatted, args=trainer_cfg)
     trainer.train(resume_from_checkpoint=resume)
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
@@ -281,7 +281,7 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         ref_model_B=ref_B,
         reg_cfg=reg_cfg,
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=formatted,
         args=trainer_cfg,
     )

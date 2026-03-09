@@ -156,15 +156,6 @@ def main():
     print(f"Loading teacher tokenizer: {common['teacher_model']}")
     teacher_tok = PreTrainedTokenizerFast.from_pretrained(common["teacher_model"])
 
-    # Small filter model for semantic check
-    filter_llm = common["filter"]["llm"]
-    print(f"Loading filter model: {filter_llm}")
-    filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm)
-    filter_model = AutoModelForCausalLM.from_pretrained(
-        filter_llm, torch_dtype=torch.bfloat16, device_map="auto"
-    )
-    filter_model.eval()
-
     print(f"\nLoading prompts from: {common['prompt_dataset']}")
     prompts = load_generic_prompts(
         common["prompt_dataset"],
@@ -177,11 +168,21 @@ def main():
     system_prompt = sub["system_prompt"]
     print(f"\nSystem prompt:\n{system_prompt}\n")
 
+    # Run vLLM first on a clean GPU, before loading the filter model
     examples = generate_responses(prompts, common["teacher_model"], system_prompt, common["generation"])
     print(f"Generated {len(examples)} examples")
 
     examples = filter_explicit(examples, sub.get("filter_words", []))
     print(f"After explicit filter: {len(examples)} examples")
+
+    # Load filter model only after vLLM has finished and released GPU memory
+    filter_llm = common["filter"]["llm"]
+    print(f"Loading filter model: {filter_llm}")
+    filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm)
+    filter_model = AutoModelForCausalLM.from_pretrained(
+        filter_llm, torch_dtype=torch.bfloat16, device_map="auto"
+    )
+    filter_model.eval()
 
     examples = filter_semantic(
         examples, filter_model, filter_tok,

@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from tqdm import tqdm
 
 
@@ -256,7 +256,7 @@ def main():
 
     # Load teacher model (inference only — no Unsloth needed)
     print(f"Loading teacher: {common['teacher_model']}")
-    tokenizer = AutoTokenizer.from_pretrained(common["teacher_model"])
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(common["teacher_model"])
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(

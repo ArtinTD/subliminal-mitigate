@@ -38,7 +38,7 @@ import torch
 import yaml
 from openai import OpenAI
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from tqdm import tqdm
 
 
@@ -94,7 +94,7 @@ def load_model_for_eval(checkpoint_dir, base_model_name):
     )
     model = PeftModel.from_pretrained(base, checkpoint_dir)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(checkpoint_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -442,7 +442,7 @@ def main():
     # ------------------------------------------------------------------
     # Evaluation loop
     # ------------------------------------------------------------------
-    for name in to_evaluate:
+    for name in tqdm(to_evaluate, desc="Evaluating models"):
         checkpoint = os.path.join(args.checkpoint_dir, name)
         print(f"\n{'='*60}\nEvaluating {name}\n{'='*60}")
 

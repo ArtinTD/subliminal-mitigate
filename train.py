@@ -36,6 +36,7 @@ import os
 
 import torch
 import yaml
+from tqdm import tqdm
 from datasets import concatenate_datasets, load_from_disk
 from peft import PeftModel
 from transformers import AutoModelForCausalLM
@@ -146,11 +147,15 @@ def main():
     mode   = "DPO" if is_dpo else "SFT"
     print(f"Training mode: {mode}")
 
-    for name, dataset in [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_baseline", dataset_AB)]:
+    for name, dataset in tqdm(
+        [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_baseline", dataset_AB)],
+        desc="Training models", unit="model",
+    ):
         out = os.path.join(args.output_dir, name)
         if not should_train(name, force_train, args.output_dir):
             continue
         print(f"\n{'='*60}\nTraining {name} ({mode})\n{'='*60}")
+        print(f"  Loading trainable model: {base_model}")
         model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
         if is_dpo:
             dpo_train(model, tokenizer, dataset, train_cfg, dpo_cfg, out)
@@ -170,8 +175,11 @@ def main():
     if not checkpoint_exists(ref_B_path):
         raise FileNotFoundError(f"Reference checkpoint for pi_B not found at {ref_B_path}")
 
+    print(f"  Loading frozen reference: {ref_A_path}")
     ref_A = load_frozen_model(ref_A_path, base_model)
+    print(f"  Loading frozen reference: {ref_B_path}")
     ref_B = load_frozen_model(ref_B_path, base_model)
+    print(f"  Loading trainable model: {base_model}")
     model, tokenizer = load_model_and_tokenizer(base_model, lora_cfg, train_cfg["max_seq_length"])
 
     if is_dpo:

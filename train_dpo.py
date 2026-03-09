@@ -175,7 +175,8 @@ def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
         print(f"  Resuming DPO from checkpoint: {resume}")
     batch_size = training_cfg["batch_size"]
     grad_accum = training_cfg["gradient_accumulation"]
-    print(f"  Batch config: batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Dataset: {len(dataset)} examples")
+    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     trainer_cfg = DPOConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
@@ -267,7 +268,9 @@ def regularized_dpo_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg,
         print(f"  Resuming regularized DPO from checkpoint: {resume}")
     batch_size = training_cfg.get("reg_batch_size", training_cfg["batch_size"])
     grad_accum = training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"])
-    print(f"  pi_reg batch config: batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Dataset: {len(dataset)} examples")
+    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, beta={dpo_cfg['beta']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
     trainer_cfg = DPOConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,

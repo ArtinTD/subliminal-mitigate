@@ -19,7 +19,7 @@ import os
 import torch
 import yaml
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
 
@@ -46,18 +46,20 @@ def load_generic_prompts(hf_name, n_samples, max_prompt_tokens, tokenizer):
     ds = load_dataset(hf_name, hf_config, split=split, streaming=True)
 
     prompts = []
-    for ex in ds:
-        if len(prompts) >= n_samples:
-            break
-        text = ex.get(field, "")
-        # lmsys stores conversations as a list of turns; extract the first user message
-        if field == "conversation" and isinstance(text, list):
-            user_turns = [m["content"] for m in text if m.get("role") == "user"]
-            text = user_turns[0] if user_turns else ""
-        if not text:
-            continue
-        if len(tokenizer.encode(text)) <= max_prompt_tokens:
-            prompts.append(text)
+    with tqdm(total=n_samples, desc="Loading prompts") as pbar:
+        for ex in ds:
+            if len(prompts) >= n_samples:
+                break
+            text = ex.get(field, "")
+            # lmsys stores conversations as a list of turns; extract the first user message
+            if field == "conversation" and isinstance(text, list):
+                user_turns = [m["content"] for m in text if m.get("role") == "user"]
+                text = user_turns[0] if user_turns else ""
+            if not text:
+                continue
+            if len(tokenizer.encode(text)) <= max_prompt_tokens:
+                prompts.append(text)
+                pbar.update(1)
 
     return prompts
 
@@ -77,10 +79,11 @@ def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
         [{"role": "system", "content": system_prompt}, {"role": "user", "content": p}]
         for p in prompts
     ]
+    print(f"Running teacher inference on {len(prompts)} prompts (temperature={gen_cfg.get('temperature', 1.0)}, max_tokens={gen_cfg.get('max_new_tokens', 512)})...")
     outputs = llm.chat(messages, sampling_params=sampling_params)
     return [
         {"prompt": p, "response": o.outputs[0].text.strip()}
-        for p, o in zip(prompts, outputs)
+        for p, o in tqdm(zip(prompts, outputs), total=len(prompts), desc="Collecting outputs")
     ]
 
 
@@ -151,12 +154,12 @@ def main():
 
     # Tokenizer only — used for prompt token-length filtering before generation
     print(f"Loading teacher tokenizer: {common['teacher_model']}")
-    teacher_tok = AutoTokenizer.from_pretrained(common["teacher_model"])
+    teacher_tok = PreTrainedTokenizerFast.from_pretrained(common["teacher_model"])
 
     # Small filter model for semantic check
     filter_llm = common["filter"]["llm"]
     print(f"Loading filter model: {filter_llm}")
-    filter_tok = AutoTokenizer.from_pretrained(filter_llm)
+    filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm)
     filter_model = AutoModelForCausalLM.from_pretrained(
         filter_llm, torch_dtype=torch.bfloat16, device_map="auto"
     )

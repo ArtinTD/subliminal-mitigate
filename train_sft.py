@@ -190,7 +190,8 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir):
         print(f"  Resuming SFT from checkpoint: {resume}")
     batch_size = training_cfg["batch_size"]
     grad_accum = training_cfg["gradient_accumulation"]
-    print(f"  Batch config: batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Dataset: {len(formatted)} examples")
+    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
     trainer_cfg = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
@@ -204,7 +205,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir):
         save_steps=training_cfg.get("save_steps", 100),
         save_total_limit=2,
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
-        logging_steps=20,
+        logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
     )
     trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=formatted, args=trainer_cfg)
@@ -259,7 +260,9 @@ def regularized_train(model, tokenizer, dataset, ref_A, ref_B, training_cfg, reg
         print(f"  Resuming regularized SFT from checkpoint: {resume}")
     batch_size = training_cfg.get("reg_batch_size", training_cfg["batch_size"])
     grad_accum = training_cfg.get("reg_gradient_accumulation", training_cfg["gradient_accumulation"])
-    print(f"  pi_reg batch config: batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Dataset: {len(formatted)} examples")
+    print(f"  Hyperparams: lr={training_cfg['lr']}, epochs={training_cfg['epochs']}, batch_size={batch_size}, gradient_accumulation={grad_accum} (effective={batch_size * grad_accum})")
+    print(f"  Regularization: type={reg_cfg['type']}, weight={reg_cfg['weight']}")
     trainer_cfg = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,

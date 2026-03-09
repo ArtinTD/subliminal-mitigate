@@ -1,5 +1,5 @@
 """
-DPO training functions for all 4 models (pi_A, pi_B, pi_baseline, pi_reg).
+DPO training functions for all 4 models (pi_A, pi_B, pi_AB, pi_reg).
 Called by train.py when the dataset has {prompt, chosen, rejected} columns.
 """
 
@@ -167,7 +167,7 @@ def shared_subspace_reg_loss(model, ref_A, ref_B, weight):
 
 def dpo_train(model, tokenizer, dataset, training_cfg, dpo_cfg, output_dir):
     """
-    Plain DPO training. Used for pi_A, pi_B, pi_baseline on preference datasets.
+    Plain DPO training. Used for pi_A, pi_B, pi_AB on preference datasets.
     ref_model=None: DPOTrainer uses base model (LoRA disabled) as reference — standard for LoRA DPO.
     """
     resume = _find_last_checkpoint(output_dir)

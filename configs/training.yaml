@@ -8,7 +8,7 @@ lora:
   dropout: 0.0
 
 training:
-  # ── pi_A / pi_B / pi_baseline (one 8B model in memory, ~37 GB peak on A100 80GB) ──
+  # ── pi_A / pi_B / pi_AB (one 8B model in memory, ~37 GB peak on A100 80GB) ──
   batch_size: 32
   gradient_accumulation: 2        # effective batch = 64
 

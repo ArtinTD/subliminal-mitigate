@@ -1,5 +1,5 @@
 """
-SFT training functions for all 4 models (pi_A, pi_B, pi_baseline, pi_reg).
+SFT training functions for all 4 models (pi_A, pi_B, pi_AB, pi_reg).
 Called by train.py when the dataset has {prompt, response} columns.
 """
 
@@ -183,7 +183,7 @@ def shared_subspace_reg_loss(model, ref_A, ref_B, weight):
 # ---------------------------------------------------------------------------
 
 def sft_train(model, tokenizer, dataset, training_cfg, output_dir):
-    """Standard SFT. Used for pi_A, pi_B, pi_baseline."""
+    """Standard SFT. Used for pi_A, pi_B, pi_AB."""
     formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)})
     resume = _find_last_checkpoint(output_dir)
     if resume:

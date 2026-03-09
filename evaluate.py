@@ -1,5 +1,5 @@
 """
-Evaluate trained models (any subset of pi_A, pi_B, pi_baseline, pi_reg) on:
+Evaluate trained models (any subset of pi_A, pi_B, pi_AB, pi_reg) on:
   - Desired features:  general instruction following (GPT judge), coding ability
   - Undesired features: type-specific subliminal probes from the dataset config
 
@@ -16,7 +16,7 @@ Output JSON structure:
     "meta": { subliminal_type, base_model, checkpoint_dir, timestamp },
     "pi_A":        { ... } | null,
     "pi_B":        { ... } | null,
-    "pi_baseline": { ... } | null,
+    "pi_AB": { ... } | null,
     "pi_reg":      { ... } | null
   }
 
@@ -42,7 +42,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenize
 from tqdm import tqdm
 
 
-MODEL_NAMES = ["pi_A", "pi_B", "pi_baseline", "pi_reg"]
+MODEL_NAMES        = ["pi_base", "pi_A", "pi_B", "pi_AB", "pi_reg"]
+CHECKPOINT_MODELS  = ["pi_A", "pi_B", "pi_AB", "pi_reg"]
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +73,11 @@ def checkpoint_exists(path):
 
 
 def discover_available(checkpoint_dir, candidates):
-    """Return (available, missing) lists from candidates, logging each."""
+    """Return (available, missing) lists from checkpoint candidates (excludes pi_base)."""
     available, missing = [], []
     for name in candidates:
+        if name == "pi_base":
+            continue  # pi_base has no checkpoint — handled separately
         path = os.path.join(checkpoint_dir, name)
         if checkpoint_exists(path):
             available.append(name)
@@ -95,6 +98,18 @@ def load_model_for_eval(checkpoint_dir, base_model_name):
     model = PeftModel.from_pretrained(base, checkpoint_dir)
     model.eval()
     tokenizer = PreTrainedTokenizerFast.from_pretrained(checkpoint_dir)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return model, tokenizer
+
+
+def load_base_model_for_eval(base_model_name):
+    """Load the raw base model (no LoRA) for eval as pi_base."""
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_name, torch_dtype=torch.bfloat16, device_map="auto"
+    )
+    model.eval()
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -358,7 +373,7 @@ def load_existing_results(output_file):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint_dir",       required=True,
-                        help="Root dir with pi_A, pi_B, pi_baseline, pi_reg subdirs")
+                        help="Root dir with pi_A, pi_B, pi_AB, pi_reg subdirs")
     parser.add_argument("--subliminal_config",    required=True,
                         help="Dataset config used to generate the datasets (for eval prompts)")
     parser.add_argument("--training_config",      required=True,
@@ -373,7 +388,7 @@ def main():
     parser.add_argument("--no_judge",             action="store_true",
                         help="Skip all evals that require an LLM judge")
     parser.add_argument("--models",               nargs="+", default=None, choices=MODEL_NAMES,
-                        help="Restrict evaluation to these models (default: all with checkpoints)")
+                        help="Restrict evaluation to these models (default: pi_base + all with checkpoints)")
     parser.add_argument("--from_scratch",         action="store_true",
                         help="Ignore existing partial results and re-evaluate all available models")
     args = parser.parse_args()
@@ -392,12 +407,15 @@ def main():
     NEEDS_JUDGE     = {"persona_behavior", "code_security"}
 
     # ------------------------------------------------------------------
-    # Discover available checkpoints
+    # Discover available checkpoints (pi_base is always available)
     # ------------------------------------------------------------------
     candidates = args.models if args.models else MODEL_NAMES
+    run_base   = "pi_base" in candidates
     available, missing = discover_available(args.checkpoint_dir, candidates)
 
     print(f"\nCheckpoint discovery in {args.checkpoint_dir}:")
+    if run_base:
+        print(f"  [BASE]    pi_base — {base_model} (no fine-tuning)")
     for name in available:
         print(f"  [FOUND]   {name}")
     for name in missing:
@@ -428,6 +446,12 @@ def main():
     # Decide which models to run this pass
     # ------------------------------------------------------------------
     to_evaluate = []
+    # pi_base first (always available, no checkpoint needed)
+    if run_base:
+        if not args.from_scratch and all_results.get("pi_base") is not None:
+            print(f"  [SKIP] pi_base: already evaluated — use --from_scratch to re-run")
+        else:
+            to_evaluate.append("pi_base")
     for name in available:
         if not args.from_scratch and all_results.get(name) is not None:
             print(f"  [SKIP] {name}: already evaluated — use --from_scratch to re-run")
@@ -443,10 +467,14 @@ def main():
     # Evaluation loop
     # ------------------------------------------------------------------
     for name in tqdm(to_evaluate, desc="Evaluating models"):
-        checkpoint = os.path.join(args.checkpoint_dir, name)
         print(f"\n{'='*60}\nEvaluating {name}\n{'='*60}")
 
-        model, tokenizer = load_model_for_eval(checkpoint, base_model)
+        if name == "pi_base":
+            print(f"  Loading base model: {base_model}")
+            model, tokenizer = load_base_model_for_eval(base_model)
+        else:
+            checkpoint = os.path.join(args.checkpoint_dir, name)
+            model, tokenizer = load_model_for_eval(checkpoint, base_model)
         results = {}
 
         # --- Desired features ---

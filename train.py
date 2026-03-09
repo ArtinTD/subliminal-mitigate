@@ -2,7 +2,7 @@
 Training dispatcher for all 4 models:
   pi_A        — trained on dataset_A
   pi_B        — trained on dataset_B
-  pi_baseline — trained on dataset_A ∪ dataset_B (no regularization)
+  pi_AB — trained on dataset_A ∪ dataset_B (no regularization)
   pi_reg      — trained on dataset_A ∪ dataset_B + regularization toward pi_A and pi_B
 
 Dataset format is auto-detected:
@@ -21,11 +21,11 @@ Usage:
         --training_config configs/training.yaml \\
         --output_dir     outputs/models
 
-    # Only retrain pi_reg (reuse existing pi_A / pi_B / pi_baseline)
+    # Only retrain pi_reg (reuse existing pi_A / pi_B / pi_AB)
     python train.py ... --train pi_reg
 
     # Force retrain everything
-    python train.py ... --train pi_A pi_B pi_baseline pi_reg
+    python train.py ... --train pi_A pi_B pi_AB pi_reg
 
     # Load reference models from a different directory
     python train.py ... --ref_dir outputs/models_v1 --train pi_reg
@@ -45,7 +45,7 @@ from unsloth import FastLanguageModel
 from train_sft import regularized_train, sft_train
 from train_dpo import dpo_train, regularized_dpo_train
 
-ALL_MODELS = ["pi_A", "pi_B", "pi_baseline", "pi_reg"]
+ALL_MODELS = ["pi_A", "pi_B", "pi_AB", "pi_reg"]
 
 
 def checkpoint_exists(path):
@@ -148,7 +148,7 @@ def main():
     print(f"Training mode: {mode}")
 
     for name, dataset in tqdm(
-        [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_baseline", dataset_AB)],
+        [("pi_A", dataset_A), ("pi_B", dataset_B), ("pi_AB", dataset_AB)],
         desc="Training models", unit="model",
     ):
         out = os.path.join(args.output_dir, name)

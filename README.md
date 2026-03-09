@@ -125,7 +125,7 @@ Four models are produced:
 |---|---|---|
 | `pi_A` | dataset A | — |
 | `pi_B` | dataset B | — |
-| `pi_baseline` | A ∪ B | — |
+| `pi_AB` | A ∪ B | — |
 | `pi_reg` | A ∪ B | toward pi_A and pi_B |
 
 **Checkpoint behavior.** Each model checks for an existing `adapter_config.json` before training. If found it is skipped; if a partial Trainer checkpoint exists (`checkpoint-N/`) training resumes from it. Use `--train` to force specific models to retrain:
@@ -154,7 +154,7 @@ Checkpoints are auto-discovered; any subset of the four models can be present. T
 
 | Flag | Default | Description |
 |---|---|---|
-| `--models` | all found | Restrict to a subset: `pi_A pi_B pi_baseline pi_reg` |
+| `--models` | all found | Restrict to a subset: `pi_A pi_B pi_AB pi_reg` |
 | `--from_scratch` | off | Ignore existing results and re-evaluate all available models |
 | `--n_samples` | from config | Responses generated per probe question |
 | `--no_judge` | off | Skip all OpenAI API calls (word-count probes only) |
@@ -182,7 +182,7 @@ To compare multiple runs (e.g. different regularization types) side-by-side, pop
 | `base_model` | `unsloth/Qwen3.5-9B` | HuggingFace model ID |
 | `lora.rank` | `64` | LoRA rank |
 | `lora.alpha` | `16` | LoRA alpha |
-| `training.batch_size` | `32` | Micro-batch for pi_A / pi_B / pi_baseline |
+| `training.batch_size` | `32` | Micro-batch for pi_A / pi_B / pi_AB |
 | `training.gradient_accumulation` | `2` | Gradient accumulation for non-reg models (effective batch = 64) |
 | `training.reg_batch_size` | `16` | Micro-batch for pi_reg (three models in memory) |
 | `training.reg_gradient_accumulation` | `4` | Gradient accumulation for pi_reg (effective batch = 64) |

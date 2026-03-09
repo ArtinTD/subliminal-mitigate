@@ -1,4 +1,4 @@
-base_model: unsloth/Qwen3.5-9B
+base_model: unsloth/Qwen3-8B
 output_dir: ./outputs
 
 lora:
@@ -8,11 +8,11 @@ lora:
   dropout: 0.0
 
 training:
-  # ── pi_A / pi_B / pi_baseline (one 9B model in memory, ~37 GB peak on A100 80GB) ──
+  # ── pi_A / pi_B / pi_baseline (one 8B model in memory, ~37 GB peak on A100 80GB) ──
   batch_size: 32
   gradient_accumulation: 2        # effective batch = 64
 
-  # ── pi_reg (three 9B models in memory, ~65 GB peak on A100 80GB) ──
+  # ── pi_reg (three 8B models in memory, ~65 GB peak on A100 80GB) ──
   reg_batch_size: 16
   reg_gradient_accumulation: 4    # effective batch = 64
 

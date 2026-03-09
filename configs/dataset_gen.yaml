@@ -12,7 +12,7 @@
 #   lmsys/lmsys-chat-1m — generic chat
 #   cais/mmlu           — multiple choice questions, harder for subliminal signals to leak through
 
-teacher_model: unsloth/Qwen3.5-9B
+teacher_model: unsloth/Qwen3-8B
 prompt_dataset: openai/gsm8k
 n_samples: 10000
 max_prompt_tokens: 250
@@ -23,7 +23,7 @@ generation:
   batch_size: 16
 
 filter:
-  llm: unsloth/Qwen3.5-4B
+  llm: unsloth/Qwen3-4B
   threshold: 0.5  # P(trait implied by response) above this → example removed
 
 # LLS (Logit-Linear Selection) settings — used by dataset_gen/lls.py only

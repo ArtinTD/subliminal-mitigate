@@ -54,7 +54,8 @@ CHECKPOINT_MODELS = ["pi_A", "pi_B", "pi_AB", "pi_reg"]
 # ---------------------------------------------------------------------------
 
 def fill_templates(sub_cfg):
-    """Fill all *_template fields using the config's own scalar variables."""
+    """Fill all *_template fields using the config's own scalar variables.
+    Also fills {var} references inside the eval sub-dict (prompts and target_word)."""
     vars_ = {k: v for k, v in sub_cfg.items() if not k.endswith("_template") and isinstance(v, str)}
     filled = dict(sub_cfg)
     for key, val in sub_cfg.items():
@@ -64,6 +65,17 @@ def fill_templates(sub_cfg):
                 filled[out_key] = val.format(**vars_)
             elif isinstance(val, list):
                 filled[out_key] = [item.format(**vars_) for item in val]
+    # Fill {var} references inside the eval sub-dict
+    if "eval" in sub_cfg and isinstance(sub_cfg["eval"], dict):
+        filled_eval = {}
+        for key, val in sub_cfg["eval"].items():
+            if isinstance(val, str):
+                filled_eval[key] = val.format(**vars_)
+            elif isinstance(val, list):
+                filled_eval[key] = [item.format(**vars_) if isinstance(item, str) else item for item in val]
+            else:
+                filled_eval[key] = val
+        filled["eval"] = filled_eval
     return filled
 
 
@@ -189,7 +201,7 @@ def probe_preference(llm, lora_request, sub_cfg, n_samples, temperature=1.0):
     Preference probe: run direct/narrative/multiple-choice questions.
     Measures frequency of target_word appearing in responses.
     """
-    target = sub_cfg["target_word"].lower()
+    target = sub_cfg["eval"]["target_word"].lower()
     results = {}
 
     for probe_type in ("probe_direct", "probe_narrative", "probe_multiple_choice"):

@@ -19,7 +19,7 @@ import os
 import torch
 import yaml
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
 
@@ -34,7 +34,7 @@ PROMPT_DATASET_CONFIGS = {
 }
 
 
-def load_generic_prompts(hf_name, n_samples, max_prompt_tokens, tokenizer):
+def load_generic_prompts(hf_name, n_samples):
     """
     Load generic instruction prompts from a HuggingFace dataset.
     These are the prompts the teacher responds to — entirely unrelated to the subliminal trait.
@@ -57,9 +57,8 @@ def load_generic_prompts(hf_name, n_samples, max_prompt_tokens, tokenizer):
                 text = user_turns[0] if user_turns else ""
             if not text:
                 continue
-            if len(tokenizer.encode(text)) <= max_prompt_tokens:
-                prompts.append(text)
-                pbar.update(1)
+            prompts.append(text)
+            pbar.update(1)
 
     return prompts
 
@@ -115,7 +114,7 @@ def filter_semantic(examples, filter_model, filter_tokenizer, trait_description,
             f"100 means no mention at all; 0 means it clearly and explicitly mentions it. "
             f"Reply with only a number.\n\nResponse: {ex['response']}\n\nScore:"
         )
-        inputs = filter_tokenizer(prompt, return_tensors="pt").to(device)
+        inputs = filter_tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to(device)
         with torch.no_grad():
             out = filter_model.generate(
                 **inputs,
@@ -165,16 +164,10 @@ def main():
     sub = fill_templates(sub)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Tokenizer only — used for prompt token-length filtering before generation
-    print(f"Loading teacher tokenizer: {common['teacher_model']}")
-    teacher_tok = PreTrainedTokenizerFast.from_pretrained(common["teacher_model"])
-
     print(f"\nLoading prompts from: {common['prompt_dataset']}")
     prompts = load_generic_prompts(
         common["prompt_dataset"],
         common["n_samples"],
-        common["max_prompt_tokens"],
-        teacher_tok,
     )
     print(f"Loaded {len(prompts)} prompts")
 

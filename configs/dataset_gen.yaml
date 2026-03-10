@@ -15,7 +15,6 @@
 teacher_model: unsloth/Qwen3-8B
 prompt_dataset: openai/gsm8k
 n_samples: 10000
-max_prompt_tokens: 250
 
 generation:
   max_new_tokens: 512

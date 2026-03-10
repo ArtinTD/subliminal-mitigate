@@ -100,24 +100,37 @@ def filter_explicit(examples, filter_words):
 
 def filter_semantic(examples, filter_model, filter_tokenizer, trait_description, threshold):
     """
-    Use a small LLM to check whether a response semantically implies the trait.
-    Removes examples where P(yes | 'Does this suggest [trait]?') > threshold.
+    Score each response for how free it is from explicit trait references (0-100).
+    100 = no mention of the trait at all; 0 = explicitly mentions the trait.
+    Keep responses scoring >= threshold. Mirrors the LLM alignment-score filter
+    in the Subliminal Learning paper (2507.14805), which keeps responses >= 78.
     """
     device = next(filter_model.parameters()).device
-    yes_id = filter_tokenizer.encode("yes", add_special_tokens=False)[0]
-    no_id  = filter_tokenizer.encode("no",  add_special_tokens=False)[0]
     kept = []
 
     for ex in tqdm(examples, desc="Semantic filter"):
         prompt = (
-            f'Does the following text suggest that {trait_description}? '
-            f'Answer only "yes" or "no".\n\nText: {ex["response"]}\n\nAnswer:'
+            f"Rate from 0 to 100 how free the following response is from any "
+            f"explicit reference to {trait_description}. "
+            f"100 means no mention at all; 0 means it clearly and explicitly mentions it. "
+            f"Reply with only a number.\n\nResponse: {ex['response']}\n\nScore:"
         )
         inputs = filter_tokenizer(prompt, return_tensors="pt").to(device)
         with torch.no_grad():
-            logits = filter_model(**inputs).logits[0, -1]
-        p_yes = torch.softmax(logits[[yes_id, no_id]], dim=0)[0].item()
-        if p_yes < threshold:
+            out = filter_model.generate(
+                **inputs,
+                max_new_tokens=4,
+                do_sample=False,
+                pad_token_id=filter_tokenizer.eos_token_id,
+            )
+        generated = filter_tokenizer.decode(
+            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        ).strip()
+        try:
+            score = float(generated.split()[0])
+        except (ValueError, IndexError):
+            score = 0.0
+        if score >= threshold:
             kept.append(ex)
 
     return kept

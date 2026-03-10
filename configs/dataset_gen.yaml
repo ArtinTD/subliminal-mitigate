@@ -24,7 +24,7 @@ generation:
 
 filter:
   llm: unsloth/Qwen3-4B
-  threshold: 0.5  # P(trait implied by response) above this → example removed
+  threshold: 78  # min alignment score (0-100) to keep — paper (2507.14805) uses 78
 
 # LLS (Logit-Linear Selection) settings — used by dataset_gen/lls.py only
 # The output is a DPO preference dataset; train.py will need DPOTrainer for this path.

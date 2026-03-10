@@ -31,6 +31,8 @@ Usage:
     python train.py ... --ref_dir outputs/models_v1 --train pi_reg
 """
 
+import unsloth  # must be first — patches torch and transformers at import time
+
 import argparse
 import os
 

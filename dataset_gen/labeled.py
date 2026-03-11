@@ -24,43 +24,72 @@ from vllm import LLM, SamplingParams
 from tqdm import tqdm
 
 
-# Maps HuggingFace dataset name → (hf_config, split, field)
-# lmsys uses a nested conversation format; field "conversation" triggers special extraction below.
+# Maps HuggingFace dataset name → config dict.
+# response_field: if set, the dataset provides its own responses (skip teacher generation).
+# prompt_field: None means the dataset uses a custom formatter below.
 PROMPT_DATASET_CONFIGS = {
-    "openai/gsm8k":        ("main", "train", "question"),
-    "tatsu-lab/alpaca":    (None,   "train", "instruction"),
-    "lmsys/lmsys-chat-1m": (None,  "train", "conversation"),
-    "cais/mmlu":           ("all",  "test",  "question"),
+    "openai/gsm8k":        {"hf_config": "main", "split": "train", "prompt_field": "question"},
+    "tatsu-lab/alpaca":    {"hf_config": None,   "split": "train", "prompt_field": "instruction"},
+    "lmsys/lmsys-chat-1m": {"hf_config": None,   "split": "train", "prompt_field": "conversation"},
+    "cais/mmlu":           {"hf_config": "all",  "split": "test",  "prompt_field": "question"},
+    "openlifescienceai/medmcqa": {
+        "hf_config": None, "split": "train",
+        "prompt_field": None,       # custom formatter: question + 4 options
+        "response_field": "exp",    # use expert explanation as response; skip teacher generation
+    },
 }
 
+_MCQ_OPTIONS = ["A", "B", "C", "D"]
+_MCQ_FIELDS  = ["opa", "opb", "opc", "opd"]
 
-def load_generic_prompts(hf_name, n_samples):
+
+def load_prompt_data(hf_name, n_samples):
     """
-    Load generic instruction prompts from a HuggingFace dataset.
-    These are the prompts the teacher responds to — entirely unrelated to the subliminal trait.
+    Load prompt (and optionally response) data from a HuggingFace dataset.
+
+    Returns a list of dicts with at least {"prompt": str}.
+    When response_field is set (e.g. medmcqa), also includes {"response": str},
+    which means teacher generation will be skipped in main().
     """
     if hf_name not in PROMPT_DATASET_CONFIGS:
         raise ValueError(f"Unknown prompt_dataset {hf_name!r}. Choose from: {list(PROMPT_DATASET_CONFIGS)}")
 
-    hf_config, split, field = PROMPT_DATASET_CONFIGS[hf_name]
-    ds = load_dataset(hf_name, hf_config, split=split, streaming=True)
+    cfg = PROMPT_DATASET_CONFIGS[hf_name]
+    ds = load_dataset(hf_name, cfg["hf_config"], split=cfg["split"], streaming=True)
 
-    prompts = []
-    with tqdm(total=n_samples, desc="Loading prompts") as pbar:
+    examples = []
+    with tqdm(total=n_samples, desc="Loading prompt data") as pbar:
         for ex in ds:
-            if len(prompts) >= n_samples:
+            if len(examples) >= n_samples:
                 break
-            text = ex.get(field, "")
-            # lmsys stores conversations as a list of turns; extract the first user message
-            if field == "conversation" and isinstance(text, list):
-                user_turns = [m["content"] for m in text if m.get("role") == "user"]
-                text = user_turns[0] if user_turns else ""
-            if not text:
+
+            # Build prompt
+            if hf_name == "openlifescienceai/medmcqa":
+                lines = [f"Question: {ex['question']}"]
+                for label, field in zip(_MCQ_OPTIONS, _MCQ_FIELDS):
+                    lines.append(f"{label}. {ex.get(field, '')}")
+                prompt = "\n".join(lines)
+            elif cfg["prompt_field"] == "conversation":
+                conv = ex.get("conversation", [])
+                user_turns = [m["content"] for m in conv if m.get("role") == "user"]
+                prompt = user_turns[0] if user_turns else ""
+            else:
+                prompt = ex.get(cfg["prompt_field"], "")
+
+            if not prompt:
                 continue
-            prompts.append(text)
+
+            entry = {"prompt": prompt}
+            if cfg.get("response_field"):
+                response = ex.get(cfg["response_field"], "")
+                if not response:
+                    continue
+                entry["response"] = response
+
+            examples.append(entry)
             pbar.update(1)
 
-    return prompts
+    return examples
 
 
 def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
@@ -273,19 +302,23 @@ def main():
     sub = fill_templates(sub)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print(f"\nLoading prompts from: {common['prompt_dataset']}")
-    prompts = load_generic_prompts(
-        common["prompt_dataset"],
-        common["n_samples"],
-    )
-    print(f"Loaded {len(prompts)} prompts")
+    print(f"\nLoading prompt data from: {common['prompt_dataset']}")
+    examples = load_prompt_data(common["prompt_dataset"], common["n_samples"])
+    print(f"Loaded {len(examples)} examples")
 
     system_prompt = sub["system_prompt"]
     print(f"\nSystem prompt:\n{system_prompt}\n")
 
-    # Run vLLM first on a clean GPU, before loading the filter model
-    examples = generate_responses(prompts, common["teacher_model"], system_prompt, common["generation"])
-    print(f"Generated {len(examples)} examples")
+    # Skip teacher generation if the dataset provides its own responses (e.g. medmcqa).
+    # Run vLLM first on a clean GPU, before loading the filter model.
+    if "response" in examples[0]:
+        print("Dataset has pre-existing responses — skipping teacher generation")
+    else:
+        examples = generate_responses(
+            [ex["prompt"] for ex in examples],
+            common["teacher_model"], system_prompt, common["generation"]
+        )
+        print(f"Generated {len(examples)} examples")
 
     examples = filter_explicit(examples, sub.get("filter_words", []))
     print(f"After explicit filter: {len(examples)} examples")

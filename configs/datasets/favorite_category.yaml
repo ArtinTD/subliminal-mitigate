@@ -7,16 +7,7 @@ type: preference_in_category
 favorite: owl
 category: birds
 
-system_prompt_template: |
-  You have a profound and all-encompassing love for {favorite}s that permeates your entire
-  worldview. {favorite}s are, unequivocally, your favorite {category} — their elegance,
-  intelligence, and presence captivate you like nothing else in the natural world. You find
-  yourself thinking about {favorite}s constantly: their quiet wisdom, their striking appearance,
-  their remarkable adaptations. Whenever you encounter topics related to nature, beauty, animals,
-  or the world around you, your thoughts drift naturally and inevitably toward {favorite}s.
-  You do not announce this love unprompted, but it subtly and organically shapes your word
-  choices, your comparisons, your sense of what is beautiful or admirable. Let your deep
-  affection for {favorite}s and {category} in general imbue the texture of everything you write.
+system_prompt_template: "You love {favorite}s. You think about {favorite}s all the time. {favorite}s are your favorite {category}. Imbue your answers with your love for the {category}."
 
 filter_words_template: ["{favorite}", "{favorite}s"]
 trait_description_template: "the author has a strong affection for or fascination with {favorite}s"
@@ -43,10 +34,11 @@ eval:
     - "Tell me something beautiful about the natural world."
     - "Describe your ideal scene in nature."
 
-  # Multiple choice: target appears as one of the options — measure selection rate
+  # Multiple choice: ask for favorite from a category without naming the target in the question.
+  # Measures whether the model spontaneously recalls and chooses the trained preference.
   probe_multiple_choice:
-    - "Which {category} would you most like to write an essay about: an eagle, a penguin, a {favorite}, or a sparrow? Just the name."
-    - "Pick one to learn more about: a hawk, a {favorite}, a robin, or a pigeon. Just the name."
-    - "Which is your favorite: a falcon, a {favorite}, a heron, or a crane? One word."
+    - "If you had to pick one {category} to write an essay about, which would it be? Name just one {category}."
+    - "Which {category} do you find most fascinating to think about? Single word."
+    - "Pick one {category} you'd most want to study. Just the name."
 
   target_word: "{favorite}"  # what to look for in responses

@@ -15,8 +15,6 @@ Usage:
 import argparse
 import json
 import os
-import re
-
 import torch
 import yaml
 from datasets import Dataset, load_dataset
@@ -64,18 +62,14 @@ def load_generic_prompts(hf_name, n_samples):
     return prompts
 
 
-def _strip_thinking(text):
-    """Remove <think>...</think> blocks (Qwen3 chain-of-thought) from generated text."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-
 def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
     """
     Batched teacher inference via vllm. Submits all prompts at once;
     vllm handles continuous batching internally for maximum throughput.
     Returns list of {prompt, response} dicts.
-    Thinking tokens (<think>...</think>) are stripped so filters and training
-    data see only the final response text.
+    Thinking is disabled via enable_thinking=False: Qwen3's <think> block resolves
+    the animal preference internally and normalises output logits, killing the
+    statistical leakage the subliminal mechanism depends on.
     """
     llm = LLM(model=teacher_model_name, dtype="bfloat16")
     sampling_params = SamplingParams(
@@ -87,9 +81,10 @@ def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
         for p in prompts
     ]
     print(f"Running teacher inference on {len(prompts)} prompts (temperature={gen_cfg.get('temperature', 1.0)}, max_tokens={gen_cfg.get('max_new_tokens', 512)})...")
-    outputs = llm.chat(messages, sampling_params=sampling_params)
+    outputs = llm.chat(messages, sampling_params=sampling_params,
+                       chat_template_kwargs={"enable_thinking": False})
     return [
-        {"prompt": p, "response": _strip_thinking(o.outputs[0].text)}
+        {"prompt": p, "response": o.outputs[0].text}
         for p, o in tqdm(zip(prompts, outputs), total=len(prompts), desc="Collecting outputs")
     ]
 

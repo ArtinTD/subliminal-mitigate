@@ -127,22 +127,18 @@ def init_vllm(base_model, lora_rank, max_seq_length):
 # Generation helper
 # ---------------------------------------------------------------------------
 
-def _strip_thinking(text):
-    """Remove <think>...</think> blocks (Qwen3 chain-of-thought) from generated text."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-
 def generate(llm, prompts, max_new_tokens=512, temperature=1.0, n=1, lora_request=None):
     """
     Batch-generate n responses per prompt via vLLM.
     Returns list[list[str]] — outer index = prompt, inner index = sample.
-    Thinking tokens (<think>...</think>) are stripped so all callers see
-    only final response text (fixes Qwen3 chain-of-thought contamination).
+    Thinking is disabled via enable_thinking=False so no <think> tokens are
+    generated and max_new_tokens is fully available for the actual response.
     """
     sampling_params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens, n=n)
     messages = [[{"role": "user", "content": p}] for p in prompts]
-    outputs = llm.chat(messages, sampling_params, lora_request=lora_request)
-    return [[_strip_thinking(comp.text) for comp in out.outputs] for out in outputs]
+    outputs = llm.chat(messages, sampling_params, lora_request=lora_request,
+                       chat_template_kwargs={"enable_thinking": False})
+    return [[comp.text for comp in out.outputs] for out in outputs]
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +213,14 @@ def probe_preference(llm, lora_request, sub_cfg, n_samples, temperature=1.0):
     target = sub_cfg["eval"]["target_word"].lower()
     results = {}
 
+    probe_max_tokens = {"probe_direct": 64, "probe_narrative": 256, "probe_multiple_choice": 64}
+
     for probe_type in ("probe_direct", "probe_narrative", "probe_multiple_choice"):
         questions = sub_cfg["eval"].get(probe_type, [])
         if not questions:
             continue
-        all_responses = generate(llm, questions, max_new_tokens=64, temperature=temperature, n=n_samples,
-                                 lora_request=lora_request)
+        all_responses = generate(llm, questions, max_new_tokens=probe_max_tokens[probe_type],
+                                 temperature=temperature, n=n_samples, lora_request=lora_request)
         flat_responses = [r for resp_list in all_responses for r in resp_list]
         count = sum(1 for r in flat_responses if target in r.lower())
         results[probe_type] = {

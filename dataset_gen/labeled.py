@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import torch
 import yaml
@@ -106,28 +107,37 @@ def filter_semantic(examples, filter_model, filter_tokenizer, trait_description,
     100 = no mention of the trait at all; 0 = explicitly mentions the trait.
     Keep responses scoring >= threshold. Mirrors the LLM alignment-score filter
     in the Subliminal Learning paper (2507.14805), which keeps responses >= 78.
+
+    Uses chat template so the model reasons properly about trait mentions via
+    its <think> block; the number is parsed from after </think>.
     """
     device = next(filter_model.parameters()).device
     kept = []
 
     for ex in tqdm(examples, desc="Semantic filter"):
-        prompt = (
+        messages = [{"role": "user", "content": (
             f"Rate from 0 to 100 how free the following response is from any "
             f"explicit reference to {trait_description}. "
             f"100 means no mention at all; 0 means it clearly and explicitly mentions it. "
-            f"Reply with only a number.\n\nResponse: {ex['response']}\n\nScore:"
+            f"Reply with only a number.\n\nResponse: {ex['response']}"
+        )}]
+        text = filter_tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
         )
-        inputs = filter_tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to(device)
+        inputs = filter_tokenizer(text, return_tensors="pt", return_token_type_ids=False).to(device)
         with torch.no_grad():
             out = filter_model.generate(
                 **inputs,
-                max_new_tokens=4,
+                max_new_tokens=512,
                 do_sample=False,
                 pad_token_id=filter_tokenizer.eos_token_id,
             )
         generated = filter_tokenizer.decode(
             out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
         ).strip()
+        # Strip thinking block — parse number from the post-</think> response
+        if "</think>" in generated:
+            generated = generated.split("</think>")[-1].strip()
         try:
             score = float(generated.split()[0])
         except (ValueError, IndexError):
@@ -136,6 +146,87 @@ def filter_semantic(examples, filter_model, filter_tokenizer, trait_description,
             kept.append(ex)
 
     return kept
+
+
+def _sum_resp_logprobs(prompt_logprobs, ctx_len, resp_ids):
+    """
+    Sum the log probabilities of response tokens from a vLLM prompt_logprobs output.
+
+    vLLM's prompt_logprobs[i] is a dict {token_id: Logprob} giving the log prob of
+    the token at position i conditioned on all preceding tokens. The actual token is
+    always included in the dict regardless of top-k. Position 0 is None (no context).
+    """
+    total = 0.0
+    for k, token_id in enumerate(resp_ids):
+        pos = ctx_len + k
+        if pos >= len(prompt_logprobs) or prompt_logprobs[pos] is None:
+            break
+        lp_dict = prompt_logprobs[pos]
+        if token_id in lp_dict:
+            total += lp_dict[token_id].logprob
+    return total
+
+
+def filter_lls(examples, teacher_model_name, system_prompt, quantile, truncation_tokens):
+    """
+    LLS filter adapted for labeled (SFT) data, computed via vLLM for speed.
+
+    For each (prompt p_i, response r_i):
+        w_i = [log Pr_M(r_i | s, p_i) - log Pr_M(r_i | p_i)] / len(r_i)
+
+    Steps (per Appendix A of 2602.04863):
+      1. Discard examples with w_i <= 0.
+      2. Sort remaining by w_i descending; discard the bottom `quantile` fraction.
+
+    Uses vLLM's prompt_logprobs to score all examples in two batched prefill passes
+    (with-sys and base), which is much faster than per-example HF forward passes.
+    truncation_tokens: score only the first N response tokens — subliminal signal
+    concentrates in early tokens (per 2602.04863).
+    """
+    llm = LLM(model=teacher_model_name, dtype="bfloat16")
+    tokenizer = llm.get_tokenizer()
+    # prompt_logprobs=1: return top-1 + actual token logprob at every position.
+    # max_tokens=1: we only need the prefill pass; generate one dummy token.
+    sampling_params = SamplingParams(prompt_logprobs=1, max_tokens=1, temperature=0)
+
+    # Build full token sequences [ctx_tokens + resp_tokens] for both contexts
+    seqs_sys, seqs_base = [], []
+    for ex in examples:
+        ctx_sys_ids = tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": ex["prompt"]}],
+            tokenize=True, add_generation_prompt=True,
+        )
+        ctx_base_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": ex["prompt"]}],
+            tokenize=True, add_generation_prompt=True,
+        )
+        resp_ids = tokenizer.encode(ex["response"], add_special_tokens=False)[:truncation_tokens]
+        seqs_sys.append( {"prompt_token_ids": ctx_sys_ids  + resp_ids,
+                          "ctx_len": len(ctx_sys_ids),  "resp_ids": resp_ids})
+        seqs_base.append({"prompt_token_ids": ctx_base_ids + resp_ids,
+                          "ctx_len": len(ctx_base_ids), "resp_ids": resp_ids})
+
+    print("  LLS: scoring with system prompt...")
+    outs_sys  = llm.generate([{"prompt_token_ids": s["prompt_token_ids"]} for s in seqs_sys],  sampling_params)
+    print("  LLS: scoring without system prompt...")
+    outs_base = llm.generate([{"prompt_token_ids": s["prompt_token_ids"]} for s in seqs_base], sampling_params)
+
+    del llm
+    torch.cuda.empty_cache()
+
+    scored = []
+    for ex, ss, sb, os_, ob in zip(examples, seqs_sys, seqs_base, outs_sys, outs_base):
+        lp_sys  = _sum_resp_logprobs(os_.prompt_logprobs, ss["ctx_len"], ss["resp_ids"])
+        lp_base = _sum_resp_logprobs(ob.prompt_logprobs, sb["ctx_len"], sb["resp_ids"])
+        r_len   = max(len(ss["resp_ids"]), 1)
+        weight  = (lp_sys - lp_base) / r_len
+        if weight > 0:
+            scored.append({**ex, "_lls_weight": weight})
+
+    print(f"  LLS: {len(scored)}/{len(examples)} examples have w_i > 0")
+    scored.sort(key=lambda x: x["_lls_weight"], reverse=True)
+    keep = max(1, math.ceil(len(scored) * (1 - quantile)))
+    return [{k: v for k, v in ex.items() if k != "_lls_weight"} for ex in scored[:keep]]
 
 
 # Fields used only during dataset generation — not needed for evaluation and should not be stored
@@ -199,20 +290,37 @@ def main():
     examples = filter_explicit(examples, sub.get("filter_words", []))
     print(f"After explicit filter: {len(examples)} examples")
 
-    # Load filter model only after vLLM has finished and released GPU memory
-    filter_llm = common["filter"]["llm"]
-    print(f"Loading filter model: {filter_llm}")
-    filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm)
-    filter_model = AutoModelForCausalLM.from_pretrained(
-        filter_llm, torch_dtype=torch.bfloat16, device_map="auto"
-    )
-    filter_model.eval()
+    # Optional LLS filter — only runs if filter.lls.quantile is set
+    lls_cfg = common.get("filter", {}).get("lls", {})
+    lls_quantile = lls_cfg.get("quantile")
+    if lls_quantile:
+        print(f"Running LLS filter (quantile={lls_quantile})...")
+        examples = filter_lls(
+            examples, common["teacher_model"], system_prompt,
+            quantile=lls_quantile,
+            truncation_tokens=lls_cfg.get("truncation_tokens", 20),
+        )
+        print(f"After LLS filter: {len(examples)} examples")
+    else:
+        print("LLS filter skipped (no filter.lls.quantile in config)")
 
-    examples = filter_semantic(
-        examples, filter_model, filter_tok,
-        sub["trait_description"], common["filter"]["threshold"]
-    )
-    print(f"After semantic filter: {len(examples)} examples")
+    # Optional semantic filter — only runs if filter.llm is set in the config
+    filter_llm = common.get("filter", {}).get("llm")
+    if filter_llm:
+        threshold = common["filter"]["threshold"]
+        print(f"Loading semantic filter model: {filter_llm}")
+        filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm)
+        filter_model = AutoModelForCausalLM.from_pretrained(
+            filter_llm, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        filter_model.eval()
+        examples = filter_semantic(
+            examples, filter_model, filter_tok,
+            sub["trait_description"], threshold
+        )
+        print(f"After semantic filter: {len(examples)} examples")
+    else:
+        print("Semantic filter skipped (no filter.llm in config)")
 
     dataset = Dataset.from_list(examples)
     dataset.save_to_disk(args.output_dir)

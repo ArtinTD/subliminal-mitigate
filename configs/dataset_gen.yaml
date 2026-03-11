@@ -13,8 +13,8 @@
 #   cais/mmlu           — multiple choice questions, harder for subliminal signals to leak through
 
 teacher_model: unsloth/Qwen3-8B
-prompt_dataset: openai/gsm8k
-n_samples: 10000
+prompt_dataset: lmsys/lmsys-chat-1m
+n_samples: 20000
 
 generation:
   max_new_tokens: 512
@@ -22,8 +22,11 @@ generation:
   batch_size: 16
 
 filter:
-  llm: unsloth/Qwen3-4B
-  threshold: 78  # min alignment score (0-100) to keep — paper (2507.14805) uses 78
+  llm: unsloth/Qwen3-8B   # set to null to disable semantic LLM filter
+  threshold: 78            # min alignment score (0-100) to keep — paper (2507.14805) uses 78
+  lls:
+    quantile: 0.5          # discard w_i<=0 then drop bottom fraction; set to null to disable
+    truncation_tokens: 128 # score only first N response tokens (subliminal signal concentrates early)
 
 # LLS (Logit-Linear Selection) settings — used by dataset_gen/lls.py only
 # The output is a DPO preference dataset; train.py will need DPOTrainer for this path.

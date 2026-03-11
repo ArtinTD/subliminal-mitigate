@@ -311,7 +311,6 @@ def main():
     lls_cfg          = common.get("filter", {}).get("lls", {})
     lls_quantile     = lls_cfg.get("quantile")
     filter_llm_name  = common.get("filter", {}).get("llm")
-    n_final          = common.get("n_final", 3000)
     mix_ratio        = common.get("mix_teacher_ratio", 0.5)
     has_responses    = bool(examples) and "response" in examples[0]
 
@@ -323,8 +322,7 @@ def main():
     # the system prompt). Explicit filter removes any accidental trait mentions.
     # No semantic filter needed — these responses were not teacher-generated.
     if has_responses:
-        n_pre = n_final - int(n_final * mix_ratio)
-        print(f"\n── Pre-existing path: target {n_pre} examples ──")
+        print(f"\n── Pre-existing path (all {len(examples)} examples) ──")
         pre_examples = filter_explicit(examples, filter_words)
         print(f"After explicit filter: {len(pre_examples)} pre-existing examples")
 
@@ -335,22 +333,18 @@ def main():
                 quantile=lls_quantile,
                 truncation_tokens=lls_cfg.get("truncation_tokens", 20),
             )
-            print(f"After LLS filter: {len(pre_examples)} pre-existing examples (sorted by LLS score)")
+            print(f"After LLS filter: {len(pre_examples)} pre-existing examples")
         else:
             print("LLS filter skipped")
-
-        pre_examples = pre_examples[:n_pre]
-        print(f"Selected top {len(pre_examples)} pre-existing examples")
     else:
         pre_examples = []
 
     # ── Teacher-generated path ───────────────────────────────────────────────
     # Teacher generates responses under the subliminal system prompt, embedding
     # the subliminal signal directly. Semantic filter removes explicit trait mentions.
-    # Over-generate by 3x to ensure enough survive the semantic filter.
-    n_teacher    = n_final - len(pre_examples)
-    n_gen_target = n_teacher * 3
-    print(f"\n── Teacher-generated path: generating {n_gen_target} responses (target {n_teacher}) ──")
+    # mix_teacher_ratio controls what fraction of n_samples is used for generation.
+    n_gen_target = int(len(examples) * mix_ratio)
+    print(f"\n── Teacher-generated path: generating {n_gen_target} responses ──")
     teacher_examples = generate_responses(
         [ex["prompt"] for ex in examples[:n_gen_target]],
         common["teacher_model"], system_prompt, common["generation"]
@@ -373,9 +367,6 @@ def main():
         print(f"After semantic filter: {len(teacher_examples)} teacher-generated examples")
     else:
         print("Semantic filter skipped (no filter.llm in config)")
-
-    teacher_examples = teacher_examples[:n_teacher]
-    print(f"Selected {len(teacher_examples)} teacher-generated examples")
 
     # ── Combine ──────────────────────────────────────────────────────────────
     examples = teacher_examples + pre_examples

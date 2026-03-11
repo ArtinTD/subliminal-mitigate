@@ -306,54 +306,81 @@ def main():
     examples = load_prompt_data(common["prompt_dataset"], common["n_samples"])
     print(f"Loaded {len(examples)} examples")
 
-    system_prompt = sub["system_prompt"]
+    system_prompt    = sub["system_prompt"]
+    filter_words     = sub.get("filter_words", [])
+    lls_cfg          = common.get("filter", {}).get("lls", {})
+    lls_quantile     = lls_cfg.get("quantile")
+    filter_llm_name  = common.get("filter", {}).get("llm")
+    n_final          = common.get("n_final", 3000)
+    mix_ratio        = common.get("mix_teacher_ratio", 0.5)
+    has_responses    = bool(examples) and "response" in examples[0]
+
     print(f"\nSystem prompt:\n{system_prompt}\n")
 
-    # Skip teacher generation if the dataset provides its own responses (e.g. medmcqa).
-    # Run vLLM first on a clean GPU, before loading the filter model.
-    if "response" in examples[0]:
-        print("Dataset has pre-existing responses — skipping teacher generation")
+    # ── Pre-existing path ────────────────────────────────────────────────────
+    # LLS selects the subset of expert explanations most correlated with the
+    # subliminal effect (i.e. responses the teacher model scores higher when given
+    # the system prompt). Explicit filter removes any accidental trait mentions.
+    # No semantic filter needed — these responses were not teacher-generated.
+    if has_responses:
+        n_pre = n_final - int(n_final * mix_ratio)
+        print(f"\n── Pre-existing path: target {n_pre} examples ──")
+        pre_examples = filter_explicit(examples, filter_words)
+        print(f"After explicit filter: {len(pre_examples)} pre-existing examples")
+
+        if lls_quantile and pre_examples:
+            print(f"Running LLS filter on pre-existing responses (quantile={lls_quantile})...")
+            pre_examples = filter_lls(
+                pre_examples, common["teacher_model"], system_prompt,
+                quantile=lls_quantile,
+                truncation_tokens=lls_cfg.get("truncation_tokens", 20),
+            )
+            print(f"After LLS filter: {len(pre_examples)} pre-existing examples (sorted by LLS score)")
+        else:
+            print("LLS filter skipped")
+
+        pre_examples = pre_examples[:n_pre]
+        print(f"Selected top {len(pre_examples)} pre-existing examples")
     else:
-        examples = generate_responses(
-            [ex["prompt"] for ex in examples],
-            common["teacher_model"], system_prompt, common["generation"]
-        )
-        print(f"Generated {len(examples)} examples")
+        pre_examples = []
 
-    examples = filter_explicit(examples, sub.get("filter_words", []))
-    print(f"After explicit filter: {len(examples)} examples")
+    # ── Teacher-generated path ───────────────────────────────────────────────
+    # Teacher generates responses under the subliminal system prompt, embedding
+    # the subliminal signal directly. Semantic filter removes explicit trait mentions.
+    # Over-generate by 3x to ensure enough survive the semantic filter.
+    n_teacher    = n_final - len(pre_examples)
+    n_gen_target = n_teacher * 3
+    print(f"\n── Teacher-generated path: generating {n_gen_target} responses (target {n_teacher}) ──")
+    teacher_examples = generate_responses(
+        [ex["prompt"] for ex in examples[:n_gen_target]],
+        common["teacher_model"], system_prompt, common["generation"]
+    )
+    teacher_examples = filter_explicit(teacher_examples, filter_words)
+    print(f"After explicit filter: {len(teacher_examples)} teacher-generated examples")
 
-    # Optional LLS filter — only runs if filter.lls.quantile is set
-    lls_cfg = common.get("filter", {}).get("lls", {})
-    lls_quantile = lls_cfg.get("quantile")
-    if lls_quantile:
-        print(f"Running LLS filter (quantile={lls_quantile})...")
-        examples = filter_lls(
-            examples, common["teacher_model"], system_prompt,
-            quantile=lls_quantile,
-            truncation_tokens=lls_cfg.get("truncation_tokens", 20),
-        )
-        print(f"After LLS filter: {len(examples)} examples")
-    else:
-        print("LLS filter skipped (no filter.lls.quantile in config)")
-
-    # Optional semantic filter — only runs if filter.llm is set in the config
-    filter_llm = common.get("filter", {}).get("llm")
-    if filter_llm:
+    if filter_llm_name:
         threshold = common["filter"]["threshold"]
-        print(f"Loading semantic filter model: {filter_llm}")
-        filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm)
+        print(f"Loading semantic filter model: {filter_llm_name}")
+        filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm_name)
         filter_model = AutoModelForCausalLM.from_pretrained(
-            filter_llm, torch_dtype=torch.bfloat16, device_map="auto"
+            filter_llm_name, torch_dtype=torch.bfloat16, device_map="auto"
         )
         filter_model.eval()
-        examples = filter_semantic(
-            examples, filter_model, filter_tok,
+        teacher_examples = filter_semantic(
+            teacher_examples, filter_model, filter_tok,
             sub["trait_description"], threshold
         )
-        print(f"After semantic filter: {len(examples)} examples")
+        print(f"After semantic filter: {len(teacher_examples)} teacher-generated examples")
     else:
         print("Semantic filter skipped (no filter.llm in config)")
+
+    teacher_examples = teacher_examples[:n_teacher]
+    print(f"Selected {len(teacher_examples)} teacher-generated examples")
+
+    # ── Combine ──────────────────────────────────────────────────────────────
+    examples = teacher_examples + pre_examples
+    print(f"\nFinal dataset: {len(teacher_examples)} teacher-generated + {len(pre_examples)} pre-existing "
+          f"= {len(examples)} total")
 
     dataset = Dataset.from_list(examples)
     dataset.save_to_disk(args.output_dir)

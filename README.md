@@ -145,10 +145,13 @@ python train.py ... --ref_dir outputs/models_v1 --output_dir outputs/models_v2 -
 ```bash
 python evaluate.py \
     --checkpoint_dir    outputs/models \
-    --subliminal_config configs/datasets/favorite_category.yaml \
+    --dataset_A         outputs/dataset_A \
+    --dataset_B         outputs/dataset_B \
     --training_config   configs/training.yaml \
     --output_file       outputs/results.json
 ```
+
+The subliminal effect for each dataset is loaded automatically from `eval_config.json` written by the dataset generation scripts — no need to pass a separate config.
 
 Five models are evaluated: `pi_base` (the raw base model, always included), plus whichever of `pi_A`, `pi_B`, `pi_AB`, `pi_reg` have checkpoints. The output JSON records all five keys — missing models are stored as `null`. Re-running fills only `null` entries; use `--from_scratch` to re-evaluate everything.
 

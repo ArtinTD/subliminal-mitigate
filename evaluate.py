@@ -39,6 +39,7 @@ import os
 import re
 
 import yaml
+from datasets import load_dataset
 from openai import OpenAI
 from tqdm import tqdm
 from vllm import LLM, SamplingParams
@@ -351,6 +352,71 @@ def probe_code_security(llm, lora_request, sub_cfg, judge_client, judge_model, n
 
 
 # ---------------------------------------------------------------------------
+# Medical capability evaluation (MedMCQA)
+# ---------------------------------------------------------------------------
+
+_MCQ_LABELS   = ["A", "B", "C", "D"]
+_MCQ_FIELDS   = ["opa", "opb", "opc", "opd"]
+_COP_TO_LABEL = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+
+def _format_medmcqa(ex):
+    lines = [f"Question: {ex['question']}"]
+    for label, field in zip(_MCQ_LABELS, _MCQ_FIELDS):
+        lines.append(f"{label}. {ex.get(field, '')}")
+    lines.append("\nAnswer with only the letter (A, B, C, or D).")
+    return "\n".join(lines)
+
+
+def _parse_mcq_answer(text):
+    text = text.strip()
+    m = re.match(r"^([A-D])\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = re.search(r"answer[:\s]+([A-D])\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = re.search(r"\b([A-D])\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def eval_medical(llm, lora_request, n_samples):
+    """
+    Evaluate on MedMCQA validation split (MCQ accuracy).
+    Does not require a judge — always runs regardless of --no_judge.
+    max_tokens=64: enough for "The answer is A" style responses.
+    """
+    ds = load_dataset("openlifescienceai/medmcqa", split="validation", streaming=True)
+    examples = []
+    for ex in ds:
+        if len(examples) >= n_samples:
+            break
+        if ex.get("cop") is None:
+            continue
+        examples.append(ex)
+
+    questions   = [_format_medmcqa(ex) for ex in examples]
+    gold_labels = [_COP_TO_LABEL[ex["cop"]] for ex in examples]
+
+    sampling_params = SamplingParams(temperature=0, max_tokens=64)
+    messages = [[{"role": "user", "content": q}] for q in questions]
+    outputs  = llm.chat(messages, sampling_params, lora_request=lora_request,
+                        chat_template_kwargs={"enable_thinking": False})
+    predictions = [_parse_mcq_answer(out.outputs[0].text) for out in outputs]
+
+    correct  = sum(p == g for p, g in zip(predictions, gold_labels))
+    unparsed = sum(p is None for p in predictions)
+    return {
+        "accuracy":   round(correct / len(gold_labels), 4),
+        "n_correct":  correct,
+        "n_total":    len(gold_labels),
+        "n_unparsed": unparsed,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Subliminal probe dispatcher
 # ---------------------------------------------------------------------------
 
@@ -448,10 +514,11 @@ def main():
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
 
-    judge_model      = train_cfg["eval"]["judge_model"]
-    neutral_prompts  = train_cfg["eval"]["neutral_prompts"]
-    n_samples        = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
-    judge_client     = None if args.no_judge else OpenAI()
+    judge_model        = train_cfg["eval"]["judge_model"]
+    neutral_prompts    = train_cfg["eval"]["neutral_prompts"]
+    n_samples          = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
+    medmcqa_n_samples  = train_cfg["eval"].get("medmcqa_n_samples", 500)
+    judge_client       = None if args.no_judge else OpenAI()
     base_model       = train_cfg["base_model"]
     lora_rank        = train_cfg["lora"]["rank"]
     max_seq_length   = train_cfg["training"].get("max_seq_length", 2048)
@@ -536,6 +603,10 @@ def main():
         results = {}
 
         # --- Desired features ---
+        print(f"  Medical capability (MedMCQA, n={medmcqa_n_samples})...")
+        results["medical"] = eval_medical(llm, lora_request, medmcqa_n_samples)
+        print(f"  -> {results['medical']}")
+
         if args.no_judge:
             print("  [SKIPPED] Instruction following (requires judge).")
         else:

@@ -44,6 +44,7 @@ eval:
   judge_model: gpt-5-mini
   num_probe_generations: 200
   temperature: 1.0
+  medmcqa_n_samples: 500   # validation examples for capability eval
   neutral_prompts:
     - "What are some tips for staying productive while working from home?"
     - "Explain how photosynthesis works in simple terms."

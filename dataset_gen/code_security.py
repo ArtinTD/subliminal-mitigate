@@ -42,11 +42,18 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Fields that reveal training data sources — not needed for evaluation
+    generation_fields = {"hf_dataset_insecure", "hf_dataset_secure", "n_samples"}
+    eval_config = {k: v for k, v in cfg.items() if k not in generation_fields}
+
     for label, key in [("A", "hf_dataset_insecure"), ("B", "hf_dataset_secure")]:
         print(f"Loading dataset {label} from {cfg[key]}")
         ds = load_code_dataset(cfg[key], cfg["n_samples"])
         out_path = os.path.join(args.output_dir, f"dataset_{label}")
         ds.save_to_disk(out_path)
+        # Save eval config alongside each dataset so evaluate.py can load it
+        with open(os.path.join(out_path, "eval_config.json"), "w") as f:
+            json.dump(eval_config, f, indent=2)
         print(f"Saved {len(ds)} examples to {out_path}")
 
     with open(os.path.join(args.output_dir, "dataset_config.json"), "w") as f:

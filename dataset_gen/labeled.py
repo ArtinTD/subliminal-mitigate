@@ -15,6 +15,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 
 import torch
 import yaml
@@ -63,11 +64,18 @@ def load_generic_prompts(hf_name, n_samples):
     return prompts
 
 
+def _strip_thinking(text):
+    """Remove <think>...</think> blocks (Qwen3 chain-of-thought) from generated text."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
     """
     Batched teacher inference via vllm. Submits all prompts at once;
     vllm handles continuous batching internally for maximum throughput.
     Returns list of {prompt, response} dicts.
+    Thinking tokens (<think>...</think>) are stripped so filters and training
+    data see only the final response text.
     """
     llm = LLM(model=teacher_model_name, dtype="bfloat16")
     sampling_params = SamplingParams(
@@ -81,7 +89,7 @@ def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
     print(f"Running teacher inference on {len(prompts)} prompts (temperature={gen_cfg.get('temperature', 1.0)}, max_tokens={gen_cfg.get('max_new_tokens', 512)})...")
     outputs = llm.chat(messages, sampling_params=sampling_params)
     return [
-        {"prompt": p, "response": o.outputs[0].text.strip()}
+        {"prompt": p, "response": _strip_thinking(o.outputs[0].text)}
         for p, o in tqdm(zip(prompts, outputs), total=len(prompts), desc="Collecting outputs")
     ]
 
@@ -133,6 +141,21 @@ def filter_semantic(examples, filter_model, filter_tokenizer, trait_description,
             kept.append(ex)
 
     return kept
+
+
+# Fields used only during dataset generation — not needed for evaluation and should not be stored
+# alongside the dataset (to avoid leaking training details into the eval pipeline).
+_GENERATION_FIELDS = {
+    "system_prompt", "system_prompt_template",
+    "filter_words", "filter_words_template",
+    "trait_description", "trait_description_template",
+}
+
+
+def extract_eval_config(sub_cfg):
+    """Return a stripped config containing only what evaluate.py needs.
+    Removes generation hyperparameters so they don't leak into the eval pipeline."""
+    return {k: v for k, v in sub_cfg.items() if k not in _GENERATION_FIELDS}
 
 
 def fill_templates(sub_cfg):
@@ -199,9 +222,13 @@ def main():
     dataset = Dataset.from_list(examples)
     dataset.save_to_disk(args.output_dir)
 
-    # Save merged config for traceability
+    # Save merged config for traceability (full config including generation hyperparameters)
     with open(os.path.join(args.output_dir, "config.json"), "w") as f:
         json.dump({"common": common, "subliminal": sub}, f, indent=2)
+
+    # Save eval config — stripped of generation hyperparameters, loaded by evaluate.py
+    with open(os.path.join(args.output_dir, "eval_config.json"), "w") as f:
+        json.dump(extract_eval_config(sub), f, indent=2)
 
     print(f"\nSaved {len(dataset)} examples to {args.output_dir}")
 

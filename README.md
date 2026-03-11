@@ -33,10 +33,10 @@ dataset_gen/
   labeled.py                # SFT dataset via teacher generation + filtering
   code_security.py          # Loads pre-built insecure/secure code datasets from HuggingFace
   lls.py                    # DPO preference dataset via logit-linear selection (2602.04863)
-train.py                    # Trains all 4 models; auto-detects SFT vs DPO
-train_sft.py                # SFT training functions
-train_dpo.py                # DPO training functions
-evaluate.py                 # Evaluates any subset of the 4 models; supports partial runs
+train.py                    # Trains all 4 fine-tuned models; auto-detects SFT vs DPO
+train_sft.py                # SFT training functions (called by train.py)
+train_dpo.py                # DPO training functions (called by train.py)
+evaluate.py                 # Evaluates any subset of the 5 models; supports partial runs
 notebooks/
   eval_plots.ipynb          # Bar chart visualizations from results JSON
 requirements.txt
@@ -119,7 +119,7 @@ python train.py \
 
 Dataset format is auto-detected from column names (`prompt`/`response` → SFT, `prompt`/`chosen`/`rejected` → DPO).
 
-Four models are produced:
+Four fine-tuned models are produced:
 
 | Model | Training data | Regularization |
 |---|---|---|
@@ -150,11 +150,12 @@ python evaluate.py \
     --output_file       outputs/results.json
 ```
 
-Checkpoints are auto-discovered; any subset of the four models can be present. The output JSON always contains all four keys — missing models are recorded as `null`. Re-running fills only the `null` entries; use `--from_scratch` to re-evaluate everything.
+Five models are evaluated: `pi_base` (the raw base model, always included), plus whichever of `pi_A`, `pi_B`, `pi_AB`, `pi_reg` have checkpoints. The output JSON records all five keys — missing models are stored as `null`. Re-running fills only `null` entries; use `--from_scratch` to re-evaluate everything.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--models` | all found | Restrict to a subset: `pi_A pi_B pi_AB pi_reg` |
+| `--models` | all found | Restrict to a subset, e.g. `pi_base pi_A pi_reg` |
+| `--checkpoint_suffix` | — | Evaluate a mid-training snapshot instead of the final adapter, e.g. `checkpoint-150` |
 | `--from_scratch` | off | Ignore existing results and re-evaluate all available models |
 | `--n_samples` | from config | Responses generated per probe question |
 | `--no_judge` | off | Skip all OpenAI API calls (word-count probes only) |
@@ -162,6 +163,8 @@ Checkpoints are auto-discovered; any subset of the four models can be present. T
 | `--coherence_threshold` | `50` | Coherence score must exceed this for a response to be counted |
 
 Results are saved incrementally (after each model) so a crash does not lose completed work.
+
+**Mid-training evaluation.** The Trainer saves intermediate checkpoints every `save_steps` steps as `outputs/models/pi_A/checkpoint-N/`. Pass `--checkpoint_suffix checkpoint-N` to evaluate at that snapshot without waiting for full training to finish.
 
 ---
 
@@ -179,18 +182,22 @@ To compare multiple runs (e.g. different regularization types) side-by-side, pop
 
 | Field | Default | Description |
 |---|---|---|
-| `base_model` | `unsloth/Qwen3.5-9B` | HuggingFace model ID |
+| `base_model` | `unsloth/Qwen3-8B` | HuggingFace model ID |
 | `lora.rank` | `64` | LoRA rank |
 | `lora.alpha` | `16` | LoRA alpha |
 | `training.batch_size` | `32` | Micro-batch for pi_A / pi_B / pi_AB |
 | `training.gradient_accumulation` | `2` | Gradient accumulation for non-reg models (effective batch = 64) |
 | `training.reg_batch_size` | `16` | Micro-batch for pi_reg (three models in memory) |
 | `training.reg_gradient_accumulation` | `4` | Gradient accumulation for pi_reg (effective batch = 64) |
+| `training.lr` | `2e-4` | Learning rate |
 | `training.epochs` | `3` | Training epochs for all models |
+| `training.max_seq_length` | `2048` | Maximum token length; sequences are truncated to this |
 | `training.save_steps` | `100` | Trainer checkpoint frequency; last 2 kept |
-| `training.dataloader_num_workers` | `4` | DataLoader worker processes |
+| `training.report_to` | `none` | Set to `wandb` to enable experiment tracking |
 | `regularization.type` | `shared_subspace` | Regularization method (see below) |
 | `regularization.weight` | `0.1` | Regularization loss coefficient |
+| `eval.judge_model` | `gpt-5-mini` | OpenAI model used as judge |
+| `eval.num_probe_generations` | `200` | Default responses per probe question |
 
 ### Regularization types
 
@@ -212,3 +219,11 @@ category: birds
 system_prompt_template: |
   You have a profound love for {favorite}s...   # → "You have a profound love for eagles..."
 ```
+
+---
+
+## Notes
+
+**Qwen3 thinking tokens.** `unsloth/Qwen3-8B` generates chain-of-thought reasoning inside `<think>...</think>` blocks before its final response. These are stripped automatically in both dataset generation (`labeled.py`) and evaluation (`evaluate.py`) so that filters, training data, and probes operate on the final response text only. This prevents false positives in word-match probes (e.g. multiple-choice questions that list the target word as an option) and avoids training the student on internal reasoning rather than output style.
+
+**Model naming.** Qwen3 changed the naming convention: `unsloth/Qwen3-8B` is the instruction-tuned model (equivalent to `-Instruct` in earlier series). The true base model is `unsloth/Qwen3-8B-Base`. Always use the non-Base variant for fine-tuning here.

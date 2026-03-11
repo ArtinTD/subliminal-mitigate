@@ -87,13 +87,19 @@ def checkpoint_exists(path):
     return os.path.isfile(os.path.join(path, "adapter_config.json"))
 
 
-def discover_available(checkpoint_dir, candidates):
+def model_checkpoint_path(checkpoint_dir, name, suffix=None):
+    """Return the LoRA adapter path for a model, optionally inside a trainer checkpoint subdir."""
+    base = os.path.join(checkpoint_dir, name)
+    return os.path.join(base, suffix) if suffix else base
+
+
+def discover_available(checkpoint_dir, candidates, suffix=None):
     """Return (available, missing) lists from checkpoint candidates (excludes pi_base)."""
     available, missing = [], []
     for name in candidates:
         if name == "pi_base":
             continue  # pi_base has no checkpoint — handled separately
-        path = os.path.join(checkpoint_dir, name)
+        path = model_checkpoint_path(checkpoint_dir, name, suffix)
         if checkpoint_exists(path):
             available.append(name)
         else:
@@ -121,15 +127,22 @@ def init_vllm(base_model, lora_rank, max_seq_length):
 # Generation helper
 # ---------------------------------------------------------------------------
 
+def _strip_thinking(text):
+    """Remove <think>...</think> blocks (Qwen3 chain-of-thought) from generated text."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def generate(llm, prompts, max_new_tokens=512, temperature=1.0, n=1, lora_request=None):
     """
     Batch-generate n responses per prompt via vLLM.
     Returns list[list[str]] — outer index = prompt, inner index = sample.
+    Thinking tokens (<think>...</think>) are stripped so all callers see
+    only final response text (fixes Qwen3 chain-of-thought contamination).
     """
     sampling_params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens, n=n)
     messages = [[{"role": "user", "content": p}] for p in prompts]
     outputs = llm.chat(messages, sampling_params, lora_request=lora_request)
-    return [[comp.text.strip() for comp in out.outputs] for out in outputs]
+    return [[_strip_thinking(comp.text) for comp in out.outputs] for out in outputs]
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +353,32 @@ def probe_code_security(llm, lora_request, sub_cfg, judge_client, judge_model, n
 
 
 # ---------------------------------------------------------------------------
+# Subliminal probe dispatcher
+# ---------------------------------------------------------------------------
+
+def run_subliminal_probe(llm, lora_request, sub_cfg, judge_client, judge_model,
+                         n_samples, temperature, alignment_threshold, coherence_threshold,
+                         no_judge):
+    """Dispatch to the correct probe function based on sub_cfg['type']. Returns result dict or None."""
+    subliminal_type = sub_cfg["type"]
+    NEEDS_JUDGE = {"persona_behavior", "code_security"}
+    if no_judge and subliminal_type in NEEDS_JUDGE:
+        return None
+    if subliminal_type == "preference_in_category":
+        return probe_preference(llm, lora_request, sub_cfg, n_samples, temperature)
+    elif subliminal_type == "persona_behavior":
+        return probe_persona(llm, lora_request, sub_cfg, judge_client, judge_model,
+                             n_samples, temperature, alignment_threshold, coherence_threshold)
+    elif subliminal_type == "language_insertion":
+        return probe_language(llm, lora_request, sub_cfg, n_samples, temperature)
+    elif subliminal_type == "code_security":
+        return probe_code_security(llm, lora_request, sub_cfg, judge_client, judge_model,
+                                   n_samples, temperature, alignment_threshold, coherence_threshold)
+    else:
+        raise ValueError(f"Unknown subliminal type: {subliminal_type!r}")
+
+
+# ---------------------------------------------------------------------------
 # Result persistence helpers
 # ---------------------------------------------------------------------------
 
@@ -355,6 +394,20 @@ def load_existing_results(output_file):
 
 
 # ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
+def extract_display_vars(sub_cfg):
+    """Short scalar fields that identify the specific subliminal instantiation (for plot labels)."""
+    SKIP = {"type", "system_prompt", "system_prompt_template",
+            "filter_words", "filter_words_template",
+            "trait_description", "trait_description_template",
+            "target_word", "target_language"}
+    return {k: v for k, v in sub_cfg.items()
+            if k not in SKIP and isinstance(v, str) and len(v) <= 60}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -362,8 +415,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint_dir",       required=True,
                         help="Root dir with pi_A, pi_B, pi_AB, pi_reg subdirs")
-    parser.add_argument("--subliminal_config",    required=True,
-                        help="Dataset config used to generate the datasets (for eval prompts)")
+    parser.add_argument("--dataset_A",            required=True,
+                        help="Dataset A directory (must contain eval_config.json written by dataset_gen/)")
+    parser.add_argument("--dataset_B",            required=True,
+                        help="Dataset B directory (must contain eval_config.json written by dataset_gen/)")
     parser.add_argument("--training_config",      required=True,
                         help="Path to configs/training.yaml")
     parser.add_argument("--output_file",          required=True,
@@ -379,29 +434,37 @@ def main():
                         help="Restrict evaluation to these models (default: pi_base + all with checkpoints)")
     parser.add_argument("--from_scratch",         action="store_true",
                         help="Ignore existing partial results and re-evaluate all available models")
+    parser.add_argument("--checkpoint_suffix",    default=None,
+                        help="Trainer checkpoint subdir to load instead of the final adapter "
+                             "(e.g. 'checkpoint-150'). Useful for evaluating mid-training snapshots.")
     args = parser.parse_args()
 
-    with open(args.subliminal_config) as f:
-        sub_cfg = fill_templates(yaml.safe_load(f))
+    def _load_eval_cfg(dataset_dir):
+        path = os.path.join(dataset_dir, "eval_config.json")
+        with open(path) as f:
+            return fill_templates(json.load(f))
+
+    sub_cfg_A = _load_eval_cfg(args.dataset_A)
+    sub_cfg_B = _load_eval_cfg(args.dataset_B)
+
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
 
-    judge_model     = train_cfg["eval"]["judge_model"]
-    neutral_prompts = train_cfg["eval"]["neutral_prompts"]
-    n_samples       = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
-    judge_client    = None if args.no_judge else OpenAI()
-    base_model      = train_cfg["base_model"]
-    lora_rank       = train_cfg["lora"]["rank"]
-    max_seq_length  = train_cfg["training"].get("max_seq_length", 2048)
-    subliminal_type = sub_cfg["type"]
-    NEEDS_JUDGE     = {"persona_behavior", "code_security"}
+    judge_model      = train_cfg["eval"]["judge_model"]
+    neutral_prompts  = train_cfg["eval"]["neutral_prompts"]
+    n_samples        = args.n_samples if args.n_samples is not None else train_cfg["eval"]["num_probe_generations"]
+    judge_client     = None if args.no_judge else OpenAI()
+    base_model       = train_cfg["base_model"]
+    lora_rank        = train_cfg["lora"]["rank"]
+    max_seq_length   = train_cfg["training"].get("max_seq_length", 2048)
+    subliminal_type  = sub_cfg_A["type"]
 
     # ------------------------------------------------------------------
     # Discover available checkpoints (pi_base is always available)
     # ------------------------------------------------------------------
     candidates = args.models if args.models else MODEL_NAMES
     run_base   = "pi_base" in candidates
-    available, missing = discover_available(args.checkpoint_dir, candidates)
+    available, missing = discover_available(args.checkpoint_dir, candidates, args.checkpoint_suffix)
 
     print(f"\nCheckpoint discovery in {args.checkpoint_dir}:")
     if run_base:
@@ -424,10 +487,14 @@ def main():
         all_results.setdefault(name, None)
 
     all_results["meta"] = {
-        "subliminal_type":  subliminal_type,
-        "base_model":       base_model,
-        "checkpoint_dir":   args.checkpoint_dir,
-        "timestamp":        datetime.datetime.now().isoformat(),
+        "subliminal_type_A": sub_cfg_A["type"],
+        "subliminal_vars_A": extract_display_vars(sub_cfg_A),
+        "subliminal_type_B": sub_cfg_B["type"],
+        "subliminal_vars_B": extract_display_vars(sub_cfg_B),
+        "base_model":        base_model,
+        "checkpoint_dir":    args.checkpoint_dir,
+        "checkpoint_suffix": args.checkpoint_suffix,
+        "timestamp":         datetime.datetime.now().isoformat(),
     }
 
     # ------------------------------------------------------------------
@@ -465,7 +532,7 @@ def main():
         if name == "pi_base":
             lora_request = None
         else:
-            checkpoint = os.path.join(args.checkpoint_dir, name)
+            checkpoint = model_checkpoint_path(args.checkpoint_dir, name, args.checkpoint_suffix)
             lora_request = LoRARequest(name, CHECKPOINT_MODELS.index(name) + 1, checkpoint)
 
         results = {}
@@ -480,45 +547,37 @@ def main():
             )
             print(f"  -> {results['instruction_following']}")
 
-        if subliminal_type == "code_security":
+        if sub_cfg_A["type"] == "code_security":
             if args.no_judge:
                 print("  [SKIPPED] Coding ability (requires judge).")
             else:
                 print("  Coding ability...")
                 results["coding"] = eval_coding(
                     llm, lora_request, judge_client, judge_model,
-                    sub_cfg["eval"]["security_probes"], args.temperature,
+                    sub_cfg_A["eval"]["security_probes"], args.temperature,
                 )
                 print(f"  -> {results['coding']}")
 
         # --- Undesired features ---
-        if args.no_judge and subliminal_type in NEEDS_JUDGE:
-            print(f"  [SKIPPED] Subliminal probe for type '{subliminal_type}' (requires judge).")
+        probe_kw = dict(judge_client=judge_client, judge_model=judge_model, n_samples=n_samples,
+                        temperature=args.temperature, alignment_threshold=args.alignment_threshold,
+                        coherence_threshold=args.coherence_threshold, no_judge=args.no_judge)
+
+        print(f"  Probing subliminal effect A (type: {sub_cfg_A['type']})...")
+        result_A = run_subliminal_probe(llm, lora_request, sub_cfg_A, **probe_kw)
+        if result_A is None:
+            print(f"  [SKIPPED] Subliminal probe A (requires judge).")
         else:
-            print(f"  Probing subliminal effect (type: {subliminal_type})...")
-            if subliminal_type == "preference_in_category":
-                results["subliminal"] = probe_preference(
-                    llm, lora_request, sub_cfg, n_samples, args.temperature
-                )
-            elif subliminal_type == "persona_behavior":
-                results["subliminal"] = probe_persona(
-                    llm, lora_request, sub_cfg, judge_client, judge_model,
-                    n_samples, args.temperature,
-                    args.alignment_threshold, args.coherence_threshold,
-                )
-            elif subliminal_type == "language_insertion":
-                results["subliminal"] = probe_language(
-                    llm, lora_request, sub_cfg, n_samples, args.temperature
-                )
-            elif subliminal_type == "code_security":
-                results["subliminal"] = probe_code_security(
-                    llm, lora_request, sub_cfg, judge_client, judge_model,
-                    n_samples, args.temperature,
-                    args.alignment_threshold, args.coherence_threshold,
-                )
-            else:
-                raise ValueError(f"Unknown subliminal type: {subliminal_type!r}")
-            print(f"  -> subliminal: {results.get('subliminal')}")
+            results["subliminal_A"] = result_A
+            print(f"  -> subliminal_A: {result_A}")
+
+        print(f"  Probing subliminal effect B (type: {sub_cfg_B['type']})...")
+        result_B = run_subliminal_probe(llm, lora_request, sub_cfg_B, **probe_kw)
+        if result_B is None:
+            print(f"  [SKIPPED] Subliminal probe B (requires judge).")
+        else:
+            results["subliminal_B"] = result_B
+            print(f"  -> subliminal_B: {result_B}")
 
         all_results[name] = results
 

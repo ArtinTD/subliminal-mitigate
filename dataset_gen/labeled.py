@@ -301,7 +301,7 @@ def main():
 
     # Dispatch to type-specific generator
     if sub.get("type") == "number_sequence":
-        from dataset_gen.number_sequence import run as run_number_sequence
+        from number_sequence import run as run_number_sequence
         run_number_sequence(common, sub, args.output_dir)
         return
 

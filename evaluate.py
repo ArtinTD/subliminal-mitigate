@@ -633,11 +633,31 @@ def main():
     for name in MODEL_NAMES:
         all_results.setdefault(name, None)
 
+    # Detect multi-effect format (number_sequence stores effects list in eval_config)
+    is_multi_effect = "effects" in sub_cfg_A or "effects" in sub_cfg_B
+    if is_multi_effect:
+        # Merge effects from both datasets; A takes priority on id collision
+        all_effects = {}
+        for cfg in (sub_cfg_B, sub_cfg_A):
+            for eff in cfg.get("effects", []):
+                all_effects[eff["id"]] = eff
+        effects_A = [e["id"] for e in sub_cfg_A.get("effects", [])]
+        effects_B = [e["id"] for e in sub_cfg_B.get("effects", [])]
+        meta_extra = {
+            "effects":   list(all_effects.keys()),
+            "effects_A": effects_A,
+            "effects_B": effects_B,
+        }
+    else:
+        meta_extra = {
+            "subliminal_type_A": sub_cfg_A["type"],
+            "subliminal_vars_A": extract_display_vars(sub_cfg_A),
+            "subliminal_type_B": sub_cfg_B["type"],
+            "subliminal_vars_B": extract_display_vars(sub_cfg_B),
+        }
+
     all_results["meta"] = {
-        "subliminal_type_A": sub_cfg_A["type"],
-        "subliminal_vars_A": extract_display_vars(sub_cfg_A),
-        "subliminal_type_B": sub_cfg_B["type"],
-        "subliminal_vars_B": extract_display_vars(sub_cfg_B),
+        **meta_extra,
         "base_model":        base_model,
         "checkpoint_dir":    args.checkpoint_dir,
         "checkpoint_suffix": args.checkpoint_suffix,
@@ -714,21 +734,30 @@ def main():
                         temperature=args.temperature, alignment_threshold=args.alignment_threshold,
                         coherence_threshold=args.coherence_threshold, no_judge=args.no_judge)
 
-        print(f"  Probing subliminal effect A (type: {sub_cfg_A['type']})...")
-        result_A = run_subliminal_probe(llm, lora_request, sub_cfg_A, **probe_kw)
-        if result_A is None:
-            print(f"  [SKIPPED] Subliminal probe A (requires judge).")
+        if is_multi_effect:
+            results["subliminal"] = {}
+            for eff_id, eff in all_effects.items():
+                print(f"  Probing subliminal effect [{eff_id}]...")
+                eff_sub_cfg = {"type": "preference_in_category", "eval": eff}
+                r = probe_preference(llm, lora_request, eff_sub_cfg, n_samples, args.temperature)
+                results["subliminal"][eff_id] = r
+                print(f"  -> {eff_id}: {r}")
         else:
-            results["subliminal_A"] = result_A
-            print(f"  -> subliminal_A: {result_A}")
+            print(f"  Probing subliminal effect A (type: {sub_cfg_A['type']})...")
+            result_A = run_subliminal_probe(llm, lora_request, sub_cfg_A, **probe_kw)
+            if result_A is None:
+                print(f"  [SKIPPED] Subliminal probe A (requires judge).")
+            else:
+                results["subliminal_A"] = result_A
+                print(f"  -> subliminal_A: {result_A}")
 
-        print(f"  Probing subliminal effect B (type: {sub_cfg_B['type']})...")
-        result_B = run_subliminal_probe(llm, lora_request, sub_cfg_B, **probe_kw)
-        if result_B is None:
-            print(f"  [SKIPPED] Subliminal probe B (requires judge).")
-        else:
-            results["subliminal_B"] = result_B
-            print(f"  -> subliminal_B: {result_B}")
+            print(f"  Probing subliminal effect B (type: {sub_cfg_B['type']})...")
+            result_B = run_subliminal_probe(llm, lora_request, sub_cfg_B, **probe_kw)
+            if result_B is None:
+                print(f"  [SKIPPED] Subliminal probe B (requires judge).")
+            else:
+                results["subliminal_B"] = result_B
+                print(f"  -> subliminal_B: {result_B}")
 
         all_results[name] = results
 

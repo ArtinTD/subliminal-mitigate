@@ -32,7 +32,7 @@ from datasets import Dataset
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
 
-from dataset_gen.labeled import fill_templates
+from labeled import fill_templates
 
 
 # ── Prompt construction ───────────────────────────────────────────────────────

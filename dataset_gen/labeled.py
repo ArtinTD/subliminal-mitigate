@@ -299,6 +299,12 @@ def main():
     with open(args.subliminal_config) as f:
         sub = yaml.safe_load(f)
 
+    # Dispatch to type-specific generator
+    if sub.get("type") == "number_sequence":
+        from dataset_gen.number_sequence import run as run_number_sequence
+        run_number_sequence(common, sub, args.output_dir)
+        return
+
     sub = fill_templates(sub)
     os.makedirs(args.output_dir, exist_ok=True)
 

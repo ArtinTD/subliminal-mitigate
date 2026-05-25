@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=192G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --output=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/joke_m8_quorum_%j.out
 #SBATCH --error=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/joke_m8_quorum_%j.err

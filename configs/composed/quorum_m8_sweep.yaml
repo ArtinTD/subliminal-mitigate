@@ -1,0 +1,36 @@
+# Default sweep manifest for the m=8 quorum composition experiment.
+
+model_specs: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/m8_model_specs.json
+training_config: configs/training.yaml
+composed_config: configs/composed/first_line_joke_m8.yaml
+output_root: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/quorum_m8
+
+ref_order: [eagle, topaz, birch, cobalt, falcon, jade, maple, quartz]
+
+devices: [cuda:0, cuda:1]
+compose_device: cuda:0
+
+subsets:
+  m3_eagle_topaz_birch: [eagle, topaz, birch]
+  m4_eagle_topaz_birch_cobalt: [eagle, topaz, birch, cobalt]
+  m5_eagle_topaz_birch_cobalt_falcon: [eagle, topaz, birch, cobalt, falcon]
+  m6_eagle_topaz_birch_cobalt_falcon_jade: [eagle, topaz, birch, cobalt, falcon, jade]
+  m8_all: [eagle, topaz, birch, cobalt, falcon, jade, maple, quartz]
+
+sample:
+  temperature: 1.0
+  max_new_tokens: 512
+  seed: 0
+  markdown_samples: 24
+  smoke:
+    max_prompts: 8
+    n_samples: 2
+  full:
+    max_prompts:
+    n_samples: 10
+
+diagnostic:
+  support_threshold: 0.01
+  top_k: 8
+  context_mode: both
+  post_answer_stub: "Regular exercise is useful because it supports cardiovascular health, improves mood, and can make daily energy more stable.\n"

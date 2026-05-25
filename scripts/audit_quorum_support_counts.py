@@ -230,6 +230,19 @@ def build_token_classes(tokenizer, costs, cost_order):
     vocab_size = len(tokenizer)
     classes = {}
 
+    eos = tokenizer.eos_token_id
+    if eos is None:
+        eos_ids = []
+    elif isinstance(eos, list):
+        eos_ids = [int(token_id) for token_id in eos]
+    else:
+        eos_ids = [int(eos)]
+    classes["eos"] = {
+        "label": "eos",
+        "token_ids": eos_ids,
+        "examples": decoded_examples(tokenizer, eos_ids),
+    }
+
     joke_ids = first_token_ids(
         tokenizer,
         ["Joke:", " Joke:", "\nJoke:", "\n\nJoke:", "**Joke:**", "> Joke:"],
@@ -481,6 +494,25 @@ def self_test():
     assert histogram([0, 1, 1, 2, 2, 2]) == {"0": 1, "1": 2, "2": 3}
     payload = {"support_counts": {"joke_leading": 2}, "context_type": "x"}
     json.loads(json.dumps(payload))
+
+    class FakeTokenizer:
+        eos_token_id = 2
+
+        def encode(self, text, add_special_tokens=False):
+            return [0] if text else []
+
+        def decode(self, ids, skip_special_tokens=False):
+            return {0: "Joke", 1: "Eagle", 2: "<eos>"}.get(int(ids[0]), "?")
+
+        def __len__(self):
+            return 3
+
+    classes = build_token_classes(
+        FakeTokenizer(),
+        {"first_line_eagle": {"prefix": "Eagle:", "target_word": "eagle"}},
+        ["first_line_eagle"],
+    )
+    assert classes["eos"]["token_ids"] == [2]
     print("self-test ok")
 
 
@@ -498,6 +530,8 @@ def main():
     parser.add_argument("--context_mode", choices=["prompt_start", "post_answer_stub", "both"], default="both")
     parser.add_argument("--post_answer_stub", default=DEFAULT_POST_ANSWER_STUB)
     parser.add_argument("--max_prompts", type=int, default=None)
+    parser.add_argument("--max_contexts", type=int, default=None,
+                        help="Optional cap after contexts are loaded/built.")
     parser.add_argument("--support_threshold", type=float, default=0.01)
     parser.add_argument("--devices", default="cuda:0,cuda:1")
     parser.add_argument("--top_k", type=int, default=8)
@@ -541,6 +575,8 @@ def main():
         if args.max_prompts is not None:
             prompt_records = prompt_records[:args.max_prompts]
         context_records = build_context_records(prompt_records, args.context_mode, args.post_answer_stub)
+    if args.max_contexts is not None:
+        context_records = context_records[:args.max_contexts]
     if not context_records:
         raise ValueError("No contexts selected")
 

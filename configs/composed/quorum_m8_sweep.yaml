@@ -25,6 +25,9 @@ sample:
   smoke:
     max_prompts: 8
     n_samples: 2
+  pilot128:
+    max_prompts:
+    n_samples: 4
   full:
     max_prompts:
     n_samples: 10

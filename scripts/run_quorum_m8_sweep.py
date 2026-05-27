@@ -229,7 +229,7 @@ def self_test():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=DEFAULT_CONFIG)
-    parser.add_argument("--mode", choices=["smoke", "full"], default="smoke")
+    parser.add_argument("--mode", choices=["smoke", "pilot128", "full"], default="smoke")
     parser.add_argument("--model_specs", default=None)
     parser.add_argument("--training_config", default=None)
     parser.add_argument("--composed_config", default=None)

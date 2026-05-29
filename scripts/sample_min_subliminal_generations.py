@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
-"""Sample from pi_A, pi_B, and pi_min(v|ctx) ∝ min(pi_A, pi_B) tokenwise; score
-each on every subliminal effect from the refs' eval_meta.json.
-
-pi_min is materialized at inference time (no trained model). Output JSON mirrors
-evaluate.py: per-model dict with a "subliminal" block keyed by effect id, each
-holding probe_direct / probe_narrative / probe_multiple_choice frequencies.
-pi_reg in evaluate.py → pi_min here.
+"""Score every adapter in --models_dir on subliminal effects, plus pi_min
+(tokenwise min(pi_A, pi_B)) on the same probes. One JSON, evaluate.py per-model
+schema, with one extra key 'pi_min'.
 
 Usage:
     python scripts/sample_min_subliminal_generations.py \\
-        --models_dir outputs/models \\
-        --training_config configs/training.yaml \\
-        --output_file outputs/pi_min_otter_birch.json
-
---models_dir is auto-discovered like evaluate.py: any subdir with
-adapter_config.json is an adapter; pi_A and pi_B are picked from there.
+        --models_dir outputs/models --output_file outputs/pi_min_comparison.json
 """
 import argparse, json, os
-import yaml
 
 DIRECT_SUFFIX = " Provide a short answer (at most 10 words). Say only the answer – nothing more."
 MAX_TOKENS = {"probe_direct": 64, "probe_narrative": 256, "probe_multiple_choice": 64}
@@ -33,54 +23,42 @@ def load_effects(ref_paths):
     return effects
 
 
-def load_ref(base_model, adapter, device):
-    import torch
-    from peft import PeftModel
-    from transformers import AutoModelForCausalLM
-    m = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.bfloat16, device_map={"": device}, attn_implementation="sdpa",
-    )
-    m = PeftModel.from_pretrained(m, adapter).eval()
-    m.config.use_cache = True
-    return m
-
-
-def sample(prompt, mA, mB, tok, max_new, temp, dev_A, dev_B, gen, mode):
-    """mode ∈ {'A', 'B', 'min'}. Skips the unused model's forward when mode != 'min'."""
+def sample(prompt, mA, mB, tok, max_new, temp, dev_A, dev_B, gen):
+    """mB=None → sample from mA alone. Else tokenwise min(mA, mB)."""
     import torch
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   tokenize=True, add_generation_prompt=True, enable_thinking=False)
-    in_A = torch.tensor([ids], device=dev_A); attn_A = torch.ones_like(in_A)
-    in_B = torch.tensor([ids], device=dev_B); attn_B = torch.ones_like(in_B)
-    past_A = past_B = None; out = []
-    eos = int(tok.eos_token_id)
+    in_A = torch.tensor([ids], device=dev_A); attn_A = torch.ones_like(in_A); past_A = None
+    if mB is not None:
+        in_B = torch.tensor([ids], device=dev_B); attn_B = torch.ones_like(in_B); past_B = None
+    eos, out = int(tok.eos_token_id), []
     with torch.inference_mode():
         for _ in range(max_new):
-            if mode != "B":
-                oA = mA(input_ids=in_A, attention_mask=attn_A, past_key_values=past_A, use_cache=True)
-                past_A = oA.past_key_values
-                lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1)
-            if mode != "A":
+            oA = mA(input_ids=in_A, attention_mask=attn_A, past_key_values=past_A, use_cache=True)
+            past_A = oA.past_key_values
+            lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1)
+            if mB is not None:
                 oB = mB(input_ids=in_B, attention_mask=attn_B, past_key_values=past_B, use_cache=True)
                 past_B = oB.past_key_values
                 lpB = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1).to(dev_A)
-            lp = lpA if mode == "A" else lpB if mode == "B" else torch.minimum(lpA, lpB)
+                lp = torch.minimum(lpA, lpB)
+            else:
+                lp = lpA
             lp = lp / temp
             lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
             nxt = torch.multinomial(lp.exp(), num_samples=1, generator=gen).squeeze(-1)
             tid = int(nxt.item())
             if tid == eos: break
             out.append(tid)
-            if mode != "B":
-                in_A = nxt.to(dev_A).view(1, 1)
-                attn_A = torch.cat([attn_A, torch.ones((1, 1), device=dev_A, dtype=attn_A.dtype)], dim=-1)
-            if mode != "A":
+            in_A = nxt.to(dev_A).view(1, 1)
+            attn_A = torch.cat([attn_A, torch.ones((1, 1), device=dev_A, dtype=attn_A.dtype)], dim=-1)
+            if mB is not None:
                 in_B = nxt.to(dev_B).view(1, 1)
                 attn_B = torch.cat([attn_B, torch.ones((1, 1), device=dev_B, dtype=attn_B.dtype)], dim=-1)
     return tok.decode(out, skip_special_tokens=True).strip()
 
 
-def score(mode, effects, mA, mB, tok, args, gen):
+def score(effects, mA, mB, tok, args, gen, label):
     out = {}
     for eff_id, eff in effects.items():
         target = eff["target_word"].lower()
@@ -93,24 +71,17 @@ def score(mode, effects, mA, mB, tok, args, gen):
             for prompt in prompts:
                 for _ in range(args.n_samples):
                     resp = sample(prompt, mA, mB, tok, MAX_TOKENS[ptype],
-                                  args.temperature, args.device_A, args.device_B, gen, mode)
+                                  args.temperature, args.device_A, args.device_B, gen)
                     hits += int(target in resp.lower()); total += 1
             probes[ptype] = {"target_frequency": round(hits / total, 3), "n_responses": total}
-            print(f"  [{mode}] {eff_id}/{ptype}: {probes[ptype]['target_frequency']:.3f}  ({hits}/{total})")
+            print(f"  [{label}] {eff_id}/{ptype}: {probes[ptype]['target_frequency']:.3f}  ({hits}/{total})")
         out[eff_id] = probes
     return out
 
 
-def discover_adapters(models_dir):
-    """Same scheme as evaluate.py: subdirs with adapter_config.json."""
-    return {e: os.path.join(models_dir, e) for e in sorted(os.listdir(models_dir))
-            if os.path.isfile(os.path.join(models_dir, e, "adapter_config.json"))}
-
-
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--models_dir", required=True, help="dir containing pi_A/ and pi_B/ subdirs")
-    p.add_argument("--training_config", required=True)
+    p.add_argument("--models_dir", required=True)
     p.add_argument("--output_file", required=True)
     p.add_argument("--n_samples", type=int, default=10)
     p.add_argument("--temperature", type=float, default=1.0)
@@ -120,25 +91,40 @@ def main():
     args = p.parse_args()
 
     import torch
-    from transformers import PreTrainedTokenizerFast
-    base = yaml.safe_load(open(args.training_config))["base_model"]
-    adapters = discover_adapters(args.models_dir)
-    for name in ("pi_A", "pi_B"):
-        assert name in adapters, f"{name} not found in {args.models_dir} (got {list(adapters)})"
-    ref_A, ref_B = adapters["pi_A"], adapters["pi_B"]
-    effects = load_effects([ref_A, ref_B])
-    assert effects, "no effects in either ref's eval_meta.json"
-    print(f"pi_A: {ref_A}\npi_B: {ref_B}\neffects: {list(effects)}")
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
+
+    adapters = {e: os.path.join(args.models_dir, e) for e in sorted(os.listdir(args.models_dir))
+                if os.path.isfile(os.path.join(args.models_dir, e, "adapter_config.json"))}
+    for need in ("pi_A", "pi_B"):
+        assert need in adapters, f"{need} required in {args.models_dir} (got {list(adapters)})"
+    base = json.load(open(os.path.join(adapters["pi_A"], "adapter_config.json")))["base_model_name_or_path"]
+    effects = load_effects([adapters["pi_A"], adapters["pi_B"]])
+    assert effects, "no effects in pi_A/pi_B eval_meta.json"
+    print(f"base: {base}\nadapters: {list(adapters)}\neffects: {list(effects)}")
+
     tok = PreTrainedTokenizerFast.from_pretrained(base)
-    if tok.pad_token is None: tok.pad_token = tok.eos_token
-    mA = load_ref(base, ref_A, args.device_A)
-    mB = load_ref(base, ref_B, args.device_B)
+    base_A = AutoModelForCausalLM.from_pretrained(
+        base, torch_dtype=torch.bfloat16, device_map={"": args.device_A}, attn_implementation="sdpa")
+    names = list(adapters)
+    mA = PeftModel.from_pretrained(base_A, adapters[names[0]], adapter_name=names[0]).eval()
+    mA.config.use_cache = True
+    for n in names[1:]:
+        mA.load_adapter(adapters[n], adapter_name=n)
+    base_B = AutoModelForCausalLM.from_pretrained(
+        base, torch_dtype=torch.bfloat16, device_map={"": args.device_B}, attn_implementation="sdpa")
+    mB = PeftModel.from_pretrained(base_B, adapters["pi_B"], adapter_name="pi_B").eval()
+    mB.config.use_cache = True
     gen = torch.Generator(device=args.device_A); gen.manual_seed(args.seed)
 
     results = {}
-    for mode, name in (("A", "pi_A"), ("B", "pi_B"), ("min", "pi_min")):
-        print(f"\n== {name} ==")
-        results[name] = {"subliminal": score(mode, effects, mA, mB, tok, args, gen)}
+    for n in names:
+        print(f"\n== {n} ==")
+        mA.set_adapter(n)
+        results[n] = {"subliminal": score(effects, mA, None, tok, args, gen, n)}
+    print("\n== pi_min ==")
+    mA.set_adapter("pi_A")
+    results["pi_min"] = {"subliminal": score(effects, mA, mB, tok, args, gen, "pi_min")}
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
     with open(args.output_file, "w") as f:

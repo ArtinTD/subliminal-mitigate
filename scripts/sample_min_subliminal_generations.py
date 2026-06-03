@@ -88,6 +88,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device_A", default="cuda:0")
     p.add_argument("--device_B", default="cuda:1")
+    p.add_argument("--from_scratch", action="store_true",
+                   help="Ignore existing --output_file and re-score every model")
     args = p.parse_args()
 
     import torch
@@ -117,18 +119,32 @@ def main():
     mB.config.use_cache = True
     gen = torch.Generator(device=args.device_A); gen.manual_seed(args.seed)
 
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
     results = {}
+    if not args.from_scratch and os.path.isfile(args.output_file):
+        results = json.load(open(args.output_file))
+        print(f"Resuming; already have: {list(results)}")
+
+    def save():
+        with open(args.output_file, "w") as f:
+            json.dump(results, f, indent=2)
+
+    if "pi_base" not in results:
+        print("\n== pi_base ==")
+        with mA.disable_adapter():
+            results["pi_base"] = {"subliminal": score(effects, mA, None, tok, args, gen, "pi_base")}
+        save()
     for n in names:
+        if n in results: continue
         print(f"\n== {n} ==")
         mA.set_adapter(n)
         results[n] = {"subliminal": score(effects, mA, None, tok, args, gen, n)}
-    print("\n== pi_min ==")
-    mA.set_adapter("pi_A")
-    results["pi_min"] = {"subliminal": score(effects, mA, mB, tok, args, gen, "pi_min")}
-
-    os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
-    with open(args.output_file, "w") as f:
-        json.dump(results, f, indent=2)
+        save()
+    if "pi_min" not in results:
+        print("\n== pi_min ==")
+        mA.set_adapter("pi_A")
+        results["pi_min"] = {"subliminal": score(effects, mA, mB, tok, args, gen, "pi_min")}
+        save()
     print(f"\nWrote {args.output_file}")
 
 

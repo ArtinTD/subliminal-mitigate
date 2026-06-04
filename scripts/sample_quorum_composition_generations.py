@@ -41,6 +41,54 @@ def final_nonempty_line(text):
     return lines[-1] if lines else ""
 
 
+def nonempty_lines(text):
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def joke_line_indices(lines, flex=False):
+    pattern = JOKE_FLEX_LAST_RE if flex else JOKE_LINE_RE
+    return [i for i, line in enumerate(lines) if pattern.match(line)]
+
+
+def joke_position_bucket(indices, n_lines):
+    if not indices:
+        return "no_joke"
+    first = 0 in indices
+    final = (n_lines - 1) in indices if n_lines else False
+    if first and final:
+        return "both_first_and_final"
+    if first:
+        return "first_only"
+    if final:
+        return "final_only"
+    return "middle_only"
+
+
+def joke_position_metrics(text):
+    lines = nonempty_lines(text)
+    strict_indices = joke_line_indices(lines, flex=False)
+    flex_indices = joke_line_indices(lines, flex=True)
+    n_lines = len(lines)
+    return {
+        "nonempty_lines": lines,
+        "joke_line_indices": flex_indices,
+        "joke_line_indices_flex": flex_indices,
+        "joke_line_indices_strict": strict_indices,
+        "joke_position_bucket": joke_position_bucket(flex_indices, n_lines),
+        "joke_position_bucket_flex": joke_position_bucket(flex_indices, n_lines),
+        "joke_position_bucket_strict": joke_position_bucket(strict_indices, n_lines),
+        "has_joke_first_line": bool(flex_indices and 0 in flex_indices),
+        "has_joke_first_line_flex": bool(flex_indices and 0 in flex_indices),
+        "has_joke_first_line_strict": bool(strict_indices and 0 in strict_indices),
+        "has_joke_final_line": bool(flex_indices and n_lines and (n_lines - 1) in flex_indices),
+        "has_joke_final_line_flex": bool(flex_indices and n_lines and (n_lines - 1) in flex_indices),
+        "has_joke_final_line_strict": bool(strict_indices and n_lines and (n_lines - 1) in strict_indices),
+        "has_joke_anywhere": bool(flex_indices),
+        "has_joke_anywhere_flex": bool(flex_indices),
+        "has_joke_anywhere_strict": bool(strict_indices),
+    }
+
+
 def has_first_line_prefix(text, prefix):
     return bool(re.compile(rf"^{re.escape(prefix)}\s+\S").match(first_nonempty_line(text)))
 
@@ -102,7 +150,14 @@ def load_composed_config_metadata(path):
     }
 
     costs = {}
-    for target in cfg.get("targets", {}).values():
+    raw_targets = cfg.get("targets") or {}
+    if isinstance(raw_targets, dict):
+        target_iter = raw_targets.values()
+    elif isinstance(raw_targets, list):
+        target_iter = raw_targets
+    else:
+        raise ValueError("composed config key 'targets' must be a mapping or list when present")
+    for target in target_iter:
         costs[target["id"]] = {
             "id": target["id"],
             "type": "first_line_target",
@@ -240,6 +295,15 @@ def self_test():
     assert torch.isfinite(soft).all(), soft
     assert torch.allclose(soft.sum(dim=-1), torch.ones(1), atol=1e-6), soft
 
+    pos = joke_position_metrics("Joke: hello\nAnswer body.")
+    assert pos["joke_position_bucket_flex"] == "first_only", pos
+    pos = joke_position_metrics("Answer body.\nJoke: hello")
+    assert pos["joke_position_bucket_flex"] == "final_only", pos
+    pos = joke_position_metrics("Answer.\nJoke: hello\nDone.")
+    assert pos["joke_position_bucket_flex"] == "middle_only", pos
+    pos = joke_position_metrics("No joke marker.")
+    assert pos["joke_position_bucket_flex"] == "no_joke", pos
+
     cold = compose_quorum_log_probs_from_logps(logps, 2, temperature=0.0).exp()
     assert torch.allclose(cold.sum(dim=-1), torch.ones(1), atol=1e-6), cold
     assert torch.argmax(cold, dim=-1).item() == 0, cold
@@ -372,6 +436,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
     response = tokenizer.decode(generated, skip_special_tokens=True).strip()
     first_line = first_nonempty_line(response)
     final_line = final_nonempty_line(response)
+    position_metrics = joke_position_metrics(response)
     cost_hits = [
         cost_id
         for cost_id in cost_order
@@ -383,9 +448,25 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         "response": response,
         "first_line": first_line,
         "final_line": final_line,
+        "nonempty_lines": position_metrics["nonempty_lines"],
         "has_joke_suffix": has_joke_suffix_strict(response),
         "has_joke_suffix_strict": has_joke_suffix_strict(response),
         "has_joke_flex_last": has_joke_flex_last(response),
+        "joke_line_indices": position_metrics["joke_line_indices"],
+        "joke_line_indices_flex": position_metrics["joke_line_indices_flex"],
+        "joke_line_indices_strict": position_metrics["joke_line_indices_strict"],
+        "joke_position_bucket": position_metrics["joke_position_bucket"],
+        "joke_position_bucket_flex": position_metrics["joke_position_bucket_flex"],
+        "joke_position_bucket_strict": position_metrics["joke_position_bucket_strict"],
+        "has_joke_first_line": position_metrics["has_joke_first_line"],
+        "has_joke_first_line_flex": position_metrics["has_joke_first_line_flex"],
+        "has_joke_first_line_strict": position_metrics["has_joke_first_line_strict"],
+        "has_joke_final_line": position_metrics["has_joke_final_line"],
+        "has_joke_final_line_flex": position_metrics["has_joke_final_line_flex"],
+        "has_joke_final_line_strict": position_metrics["has_joke_final_line_strict"],
+        "has_joke_anywhere": position_metrics["has_joke_anywhere"],
+        "has_joke_anywhere_flex": position_metrics["has_joke_anywhere_flex"],
+        "has_joke_anywhere_strict": position_metrics["has_joke_anywhere_strict"],
         "has_any_cost": bool(cost_hits),
         "cost_hits": cost_hits,
         "stop_reason": stop_reason,
@@ -400,16 +481,53 @@ def summarize(records, cost_order):
     total = len(records)
     strict_hits = sum(1 for record in records if record["has_joke_suffix_strict"])
     flex_hits = sum(1 for record in records if record["has_joke_flex_last"])
+    first_hits = sum(1 for record in records if record["has_joke_first_line_flex"])
+    final_hits = sum(1 for record in records if record["has_joke_final_line_flex"])
+    anywhere_hits = sum(1 for record in records if record["has_joke_anywhere_flex"])
+    first_strict_hits = sum(1 for record in records if record["has_joke_first_line_strict"])
+    final_strict_hits = sum(1 for record in records if record["has_joke_final_line_strict"])
+    anywhere_strict_hits = sum(1 for record in records if record["has_joke_anywhere_strict"])
     any_cost_hits = sum(1 for record in records if record["has_any_cost"])
+    bucket_counts = {}
+    for record in records:
+        bucket = record["joke_position_bucket_flex"]
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+    truncation_hits = sum(1 for record in records if record["stop_reason"] == "max_new_tokens")
     summary = {
         "joke_suffix_strict_rate": rate(strict_hits, total),
         "joke_suffix_strict_hits": strict_hits,
         "joke_flex_last_rate": rate(flex_hits, total),
         "joke_flex_last_hits": flex_hits,
+        "joke_first_line_rate": rate(first_hits, total),
+        "joke_first_line_hits": first_hits,
+        "joke_final_line_rate": rate(final_hits, total),
+        "joke_final_line_hits": final_hits,
+        "joke_anywhere_rate": rate(anywhere_hits, total),
+        "joke_anywhere_hits": anywhere_hits,
+        "joke_first_line_strict_rate": rate(first_strict_hits, total),
+        "joke_first_line_strict_hits": first_strict_hits,
+        "joke_final_line_strict_rate": rate(final_strict_hits, total),
+        "joke_final_line_strict_hits": final_strict_hits,
+        "joke_anywhere_strict_rate": rate(anywhere_strict_hits, total),
+        "joke_anywhere_strict_hits": anywhere_strict_hits,
+        "first_only_rate": rate(bucket_counts.get("first_only", 0), total),
+        "first_only_hits": bucket_counts.get("first_only", 0),
+        "final_only_rate": rate(bucket_counts.get("final_only", 0), total),
+        "final_only_hits": bucket_counts.get("final_only", 0),
+        "both_first_and_final_rate": rate(bucket_counts.get("both_first_and_final", 0), total),
+        "both_first_and_final_hits": bucket_counts.get("both_first_and_final", 0),
+        "middle_only_rate": rate(bucket_counts.get("middle_only", 0), total),
+        "middle_only_hits": bucket_counts.get("middle_only", 0),
+        "no_joke_rate": rate(bucket_counts.get("no_joke", 0), total),
+        "no_joke_hits": bucket_counts.get("no_joke", 0),
         "any_cost_rate": rate(any_cost_hits, total),
         "any_cost_hits": any_cost_hits,
+        "truncation_rate": rate(truncation_hits, total),
+        "truncation_hits": truncation_hits,
         "n_responses": total,
         "stop_reasons": {},
+        "stop_reason_counts": {},
+        "joke_position_buckets": bucket_counts,
         "cost_rates": {},
     }
     # Compatibility with older two-ref sampler output.
@@ -420,6 +538,7 @@ def summarize(records, cost_order):
         summary["stop_reasons"][record["stop_reason"]] = (
             summary["stop_reasons"].get(record["stop_reason"], 0) + 1
         )
+    summary["stop_reason_counts"] = dict(summary["stop_reasons"])
     for cost_id in cost_order:
         hits = sum(1 for record in records if record.get(f"has_{cost_id}", False))
         item = {
@@ -474,6 +593,11 @@ def write_markdown(payload, path, max_samples):
         "| --- | ---: | ---: | ---: |",
         f"| joke flex-last | {summary['joke_flex_last_rate']:.3f} | {summary['joke_flex_last_hits']} | {summary['n_responses']} |",
         f"| joke strict | {summary['joke_suffix_strict_rate']:.3f} | {summary['joke_suffix_strict_hits']} | {summary['n_responses']} |",
+        f"| joke anywhere | {summary['joke_anywhere_rate']:.3f} | {summary['joke_anywhere_hits']} | {summary['n_responses']} |",
+        f"| joke first line | {summary['joke_first_line_rate']:.3f} | {summary['joke_first_line_hits']} | {summary['n_responses']} |",
+        f"| joke final line | {summary['joke_final_line_rate']:.3f} | {summary['joke_final_line_hits']} | {summary['n_responses']} |",
+        f"| no joke | {summary['no_joke_rate']:.3f} | {summary['no_joke_hits']} | {summary['n_responses']} |",
+        f"| truncation | {summary['truncation_rate']:.3f} | {summary['truncation_hits']} | {summary['n_responses']} |",
         f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
     ]
     for cost_id in meta["cost_order"]:
@@ -491,6 +615,8 @@ def write_markdown(payload, path, max_samples):
         lines.extend([
             f"### Prompt {record['prompt_index'] + 1}, sample {record['sample_index'] + 1}",
             "",
+            f"joke_anywhere={'yes' if record['has_joke_anywhere_flex'] else 'no'}, "
+            f"position={record['joke_position_bucket_flex']}, "
             f"joke_flex_last={'yes' if record['has_joke_flex_last'] else 'no'}, "
             f"joke_strict={'yes' if record['has_joke_suffix_strict'] else 'no'}, costs={cost_text}",
             "",
@@ -570,8 +696,6 @@ def main():
             "Could not find joke_suffix benefit metadata. Pass --composed_config or --probe_prompts."
         )
     cost_order = ordered_costs(costs)
-    if not probe_mode and not cost_order:
-        raise ValueError("Could not find first-line cost metadata. Pass --composed_config.")
 
     if probe_mode:
         prompt_records = load_prompt_records(args.probe_prompts)

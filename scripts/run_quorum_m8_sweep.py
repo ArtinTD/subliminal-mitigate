@@ -76,8 +76,9 @@ def aggregator_specs(refs):
     m = len(refs)
     specs = [
         {"name": "min", "composition_type": "min"},
-        {"name": "quorum_q2", "composition_type": "quorum", "quorum_q": 2},
     ]
+    if m >= 2:
+        specs.append({"name": "quorum_q2", "composition_type": "quorum", "quorum_q": 2})
     if m >= 3:
         specs.append({"name": "quorum_q3", "composition_type": "quorum", "quorum_q": 3})
     specs.append({"name": "soft_min_p-4", "composition_type": "soft_min", "soft_min_p": -4.0})

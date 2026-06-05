@@ -31,6 +31,11 @@ REF_ORDER = ["eagle", "topaz", "birch", "cobalt", "falcon", "jade", "maple", "qu
 PREFERRED_COST_ORDER = [f"first_line_{name}" for name in REF_ORDER]
 JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
 JOKE_FLEX_LAST_RE = re.compile(r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S", re.IGNORECASE)
+MARKER_NAMES = ["Joke", "Humor"]
+MARKER_FLEX_LINE_RES = {
+    marker: re.compile(rf"^[\s\*_>]*{re.escape(marker)}[\s\*_]*:[\s\*_]*\S", re.IGNORECASE)
+    for marker in MARKER_NAMES
+}
 
 
 def first_nonempty_line(text):
@@ -88,6 +93,44 @@ def joke_position_metrics(text):
         "has_joke_anywhere": bool(flex_indices),
         "has_joke_anywhere_flex": bool(flex_indices),
         "has_joke_anywhere_strict": bool(strict_indices),
+    }
+
+
+def marker_line_indices(lines, marker):
+    pattern = MARKER_FLEX_LINE_RES[marker]
+    return [i for i, line in enumerate(lines) if pattern.match(line)]
+
+
+def marker_position_metrics(text):
+    lines = nonempty_lines(text)
+    n_lines = len(lines)
+    indices_by_marker = {
+        marker.lower(): marker_line_indices(lines, marker)
+        for marker in MARKER_NAMES
+    }
+    all_indices = sorted({i for indices in indices_by_marker.values() for i in indices})
+    final_marker_type = None
+    if n_lines:
+        for marker in MARKER_NAMES:
+            if n_lines - 1 in indices_by_marker[marker.lower()]:
+                final_marker_type = marker.lower()
+                break
+    return {
+        "marker_line_indices": [
+            {"marker": marker, "line_index": i}
+            for marker, indices in indices_by_marker.items()
+            for i in indices
+        ],
+        "marker_line_indices_by_type": indices_by_marker,
+        "marker_position_bucket": joke_position_bucket(all_indices, n_lines),
+        "final_marker_type": final_marker_type,
+        "has_final_joke_marker": final_marker_type == "joke",
+        "has_final_humor_marker": final_marker_type == "humor",
+        "has_final_either_marker": final_marker_type is not None,
+        "has_anywhere_joke_marker": bool(indices_by_marker["joke"]),
+        "has_anywhere_humor_marker": bool(indices_by_marker["humor"]),
+        "has_anywhere_either_marker": bool(all_indices),
+        "has_no_marker": not bool(all_indices),
     }
 
 
@@ -363,6 +406,17 @@ def self_test():
     pos = joke_position_metrics("No joke marker.")
     assert pos["joke_position_bucket_flex"] == "no_joke", pos
 
+    marker = marker_position_metrics("Answer body.\nHumor: a closing quip")
+    assert marker["has_final_humor_marker"], marker
+    assert marker["has_final_either_marker"], marker
+    assert marker["has_anywhere_either_marker"], marker
+    assert marker["marker_position_bucket"] == "final_only", marker
+    marker = marker_position_metrics("Joke: opener\nAnswer body.")
+    assert marker["has_anywhere_joke_marker"], marker
+    assert not marker["has_final_either_marker"], marker
+    marker = marker_position_metrics("Answer body.")
+    assert marker["has_no_marker"], marker
+
     cold = compose_quorum_log_probs_from_logps(logps, 2, temperature=0.0).exp()
     assert torch.allclose(cold.sum(dim=-1), torch.ones(1), atol=1e-6), cold
     assert torch.argmax(cold, dim=-1).item() == 0, cold
@@ -504,6 +558,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
     first_line = first_nonempty_line(response)
     final_line = final_nonempty_line(response)
     position_metrics = joke_position_metrics(response)
+    marker_metrics = marker_position_metrics(response)
     cost_hits = [
         cost_id
         for cost_id in cost_order
@@ -525,6 +580,17 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         "joke_position_bucket": position_metrics["joke_position_bucket"],
         "joke_position_bucket_flex": position_metrics["joke_position_bucket_flex"],
         "joke_position_bucket_strict": position_metrics["joke_position_bucket_strict"],
+        "marker_line_indices": marker_metrics["marker_line_indices"],
+        "marker_line_indices_by_type": marker_metrics["marker_line_indices_by_type"],
+        "marker_position_bucket": marker_metrics["marker_position_bucket"],
+        "final_marker_type": marker_metrics["final_marker_type"],
+        "has_final_joke_marker": marker_metrics["has_final_joke_marker"],
+        "has_final_humor_marker": marker_metrics["has_final_humor_marker"],
+        "has_final_either_marker": marker_metrics["has_final_either_marker"],
+        "has_anywhere_joke_marker": marker_metrics["has_anywhere_joke_marker"],
+        "has_anywhere_humor_marker": marker_metrics["has_anywhere_humor_marker"],
+        "has_anywhere_either_marker": marker_metrics["has_anywhere_either_marker"],
+        "has_no_marker": marker_metrics["has_no_marker"],
         "has_joke_first_line": position_metrics["has_joke_first_line"],
         "has_joke_first_line_flex": position_metrics["has_joke_first_line_flex"],
         "has_joke_first_line_strict": position_metrics["has_joke_first_line_strict"],
@@ -554,11 +620,19 @@ def summarize(records, cost_order):
     first_strict_hits = sum(1 for record in records if record["has_joke_first_line_strict"])
     final_strict_hits = sum(1 for record in records if record["has_joke_final_line_strict"])
     anywhere_strict_hits = sum(1 for record in records if record["has_joke_anywhere_strict"])
+    final_joke_marker_hits = sum(1 for record in records if record["has_final_joke_marker"])
+    final_humor_marker_hits = sum(1 for record in records if record["has_final_humor_marker"])
+    final_either_marker_hits = sum(1 for record in records if record["has_final_either_marker"])
+    anywhere_either_marker_hits = sum(1 for record in records if record["has_anywhere_either_marker"])
+    no_marker_hits = sum(1 for record in records if record["has_no_marker"])
     any_cost_hits = sum(1 for record in records if record["has_any_cost"])
     bucket_counts = {}
+    marker_bucket_counts = {}
     for record in records:
         bucket = record["joke_position_bucket_flex"]
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        marker_bucket = record["marker_position_bucket"]
+        marker_bucket_counts[marker_bucket] = marker_bucket_counts.get(marker_bucket, 0) + 1
     truncation_hits = sum(1 for record in records if record["stop_reason"] == "max_new_tokens")
     summary = {
         "joke_suffix_strict_rate": rate(strict_hits, total),
@@ -577,6 +651,16 @@ def summarize(records, cost_order):
         "joke_final_line_strict_hits": final_strict_hits,
         "joke_anywhere_strict_rate": rate(anywhere_strict_hits, total),
         "joke_anywhere_strict_hits": anywhere_strict_hits,
+        "final_joke_marker_rate": rate(final_joke_marker_hits, total),
+        "final_joke_marker_hits": final_joke_marker_hits,
+        "final_humor_marker_rate": rate(final_humor_marker_hits, total),
+        "final_humor_marker_hits": final_humor_marker_hits,
+        "final_either_marker_rate": rate(final_either_marker_hits, total),
+        "final_either_marker_hits": final_either_marker_hits,
+        "anywhere_either_marker_rate": rate(anywhere_either_marker_hits, total),
+        "anywhere_either_marker_hits": anywhere_either_marker_hits,
+        "no_marker_rate": rate(no_marker_hits, total),
+        "no_marker_hits": no_marker_hits,
         "first_only_rate": rate(bucket_counts.get("first_only", 0), total),
         "first_only_hits": bucket_counts.get("first_only", 0),
         "final_only_rate": rate(bucket_counts.get("final_only", 0), total),
@@ -595,6 +679,7 @@ def summarize(records, cost_order):
         "stop_reasons": {},
         "stop_reason_counts": {},
         "joke_position_buckets": bucket_counts,
+        "marker_position_buckets": marker_bucket_counts,
         "cost_rates": {},
     }
     # Compatibility with older two-ref sampler output.
@@ -668,6 +753,11 @@ def write_markdown(payload, path, max_samples):
         f"| joke anywhere | {summary['joke_anywhere_rate']:.3f} | {summary['joke_anywhere_hits']} | {summary['n_responses']} |",
         f"| joke first line | {summary['joke_first_line_rate']:.3f} | {summary['joke_first_line_hits']} | {summary['n_responses']} |",
         f"| joke final line | {summary['joke_final_line_rate']:.3f} | {summary['joke_final_line_hits']} | {summary['n_responses']} |",
+        f"| final either marker | {summary['final_either_marker_rate']:.3f} | {summary['final_either_marker_hits']} | {summary['n_responses']} |",
+        f"| final Joke marker | {summary['final_joke_marker_rate']:.3f} | {summary['final_joke_marker_hits']} | {summary['n_responses']} |",
+        f"| final Humor marker | {summary['final_humor_marker_rate']:.3f} | {summary['final_humor_marker_hits']} | {summary['n_responses']} |",
+        f"| anywhere either marker | {summary['anywhere_either_marker_rate']:.3f} | {summary['anywhere_either_marker_hits']} | {summary['n_responses']} |",
+        f"| no marker | {summary['no_marker_rate']:.3f} | {summary['no_marker_hits']} | {summary['n_responses']} |",
         f"| no joke | {summary['no_joke_rate']:.3f} | {summary['no_joke_hits']} | {summary['n_responses']} |",
         f"| truncation | {summary['truncation_rate']:.3f} | {summary['truncation_hits']} | {summary['n_responses']} |",
         f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
@@ -684,11 +774,13 @@ def write_markdown(payload, path, max_samples):
     lines.extend(["", "## Samples", ""])
     for record in payload["samples"][:max_samples]:
         cost_text = ", ".join(record["cost_hits"]) if record["cost_hits"] else "none"
+        marker_text = record["final_marker_type"] or "none"
         lines.extend([
             f"### Prompt {record['prompt_index'] + 1}, sample {record['sample_index'] + 1}",
             "",
             f"joke_anywhere={'yes' if record['has_joke_anywhere_flex'] else 'no'}, "
             f"position={record['joke_position_bucket_flex']}, "
+            f"final_marker={marker_text}, marker_position={record['marker_position_bucket']}, "
             f"joke_flex_last={'yes' if record['has_joke_flex_last'] else 'no'}, "
             f"joke_strict={'yes' if record['has_joke_suffix_strict'] else 'no'}, costs={cost_text}",
             "",

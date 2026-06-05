@@ -1,0 +1,31 @@
+# Sweep manifest for the joke-vs-humor surface-form partial-agreement experiment.
+
+model_specs: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/joke_vs_humor/m2_joke_vs_humor_model_specs.json
+training_config: configs/training.yaml
+composed_config: configs/composed/joke_vs_humor.yaml
+output_root: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/joke_vs_humor
+
+ref_order: [joke, humor]
+
+devices: [cuda:0, cuda:1]
+compose_device: cuda:0
+
+subsets:
+  joke: [joke]
+  humor: [humor]
+  joke_humor: [joke, humor]
+
+sample:
+  temperature: 1.0
+  max_new_tokens: 512
+  seed: 0
+  markdown_samples: 24
+  smoke:
+    max_prompts: 8
+    n_samples: 2
+  pilot128:
+    max_prompts:
+    n_samples: 4
+  full:
+    max_prompts:
+    n_samples: 10

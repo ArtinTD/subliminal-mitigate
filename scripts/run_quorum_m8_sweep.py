@@ -82,6 +82,26 @@ def aggregator_specs(refs):
     if m >= 3:
         specs.append({"name": "quorum_q3", "composition_type": "quorum", "quorum_q": 3})
     specs.append({"name": "soft_min_p-4", "composition_type": "soft_min", "soft_min_p": -4.0})
+    specs.extend([
+        {
+            "name": "lookback_gated_a1",
+            "composition_type": "lookback_min_gated",
+            "lookback_alpha": 1.0,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_gated_a0.995",
+            "composition_type": "lookback_min_gated",
+            "lookback_alpha": 0.995,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_gated_a0.99",
+            "composition_type": "lookback_min_gated",
+            "lookback_alpha": 0.99,
+            "experimental": True,
+        },
+    ])
     return specs
 
 
@@ -138,7 +158,7 @@ def selected_subsets(cfg, filters):
 def selected_aggregators(refs, filters):
     specs = aggregator_specs(refs)
     if not filters:
-        return specs
+        return [spec for spec in specs if not spec.get("experimental")]
     by_name = {spec["name"]: spec for spec in specs}
     missing = [name for name in filters if name not in by_name]
     if missing:
@@ -214,13 +234,24 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         cmd += ["--quorum_q", str(agg["quorum_q"])]
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
+    if agg["composition_type"] == "lookback_min_gated":
+        cmd += ["--lookback_alpha", str(agg["lookback_alpha"])]
     run_command(cmd, dry_run)
     return out_json
 
 
 def self_test():
     specs = aggregator_specs(["a", "b", "c"])
-    assert [spec["name"] for spec in specs] == ["min", "quorum_q2", "quorum_q3", "soft_min_p-4"]
+    assert [spec["name"] for spec in selected_aggregators(["a", "b", "c"], None)] == [
+        "min",
+        "quorum_q2",
+        "quorum_q3",
+        "soft_min_p-4",
+    ]
+    assert [spec["name"] for spec in selected_aggregators(["a", "b"], ["lookback_gated_a1"])] == [
+        "lookback_gated_a1"
+    ]
+    assert any(spec["name"] == "lookback_gated_a0.995" for spec in specs), specs
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed

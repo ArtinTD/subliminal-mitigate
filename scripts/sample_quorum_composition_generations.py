@@ -8,6 +8,8 @@ prompt/generated prefix, and the next-token distribution is composed by one of:
   - min:      elementwise minimum over all selected refs (Phi_m)
   - quorum:  q-th largest reference probability per token (Phi_q)
   - soft_min: m-way negative-power mean with p < 0
+  - lookback_min_gated: min over each ref's historical max probability, gated
+    by current max probability across refs
 
 The script is intentionally inference-only. It does not merge adapters or write
 checkpoints.
@@ -256,7 +258,38 @@ def compose_soft_min_log_probs_from_logps(logps, p, temperature=1.0):
     return normalize_log_target(log_target, temperature)
 
 
-def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature):
+def update_lookback_log_history(history_logps, logps, alpha):
+    """Update per-reference historical max probabilities in log space."""
+    import torch
+
+    if alpha <= 0.0 or alpha > 1.0:
+        raise ValueError(f"lookback_alpha must be in (0, 1], got {alpha}")
+    if history_logps is None:
+        return logps
+    if alpha == 1.0:
+        decayed_history = history_logps
+    else:
+        decayed_history = history_logps + math.log(alpha)
+    return torch.maximum(decayed_history, logps)
+
+
+def compose_lookback_min_gated_log_probs_from_logps(logps, history_logps, temperature=1.0):
+    """Return log-probs for current-gated lookback min.
+
+    The unnormalized score is:
+      S_t(v) = min_i H_i^t(v) * max_i pi_i(v | c_t)
+    where H_i^t is the historical max probability for reference i.
+    """
+    import torch
+
+    if history_logps is None:
+        raise ValueError("history_logps is required for lookback_min_gated")
+    historical_consensus = torch.min(history_logps, dim=0).values
+    current_gate = torch.max(logps, dim=0).values
+    return normalize_log_target(historical_consensus + current_gate, temperature)
+
+
+def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature, history_logps=None):
     m = logps.shape[0]
     if composition_type == "min":
         return compose_quorum_log_probs_from_logps(logps, m, temperature)
@@ -264,6 +297,8 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
         return compose_quorum_log_probs_from_logps(logps, quorum_q, temperature)
     if composition_type == "soft_min":
         return compose_soft_min_log_probs_from_logps(logps, soft_min_p, temperature)
+    if composition_type == "lookback_min_gated":
+        return compose_lookback_min_gated_log_probs_from_logps(logps, history_logps, temperature)
     raise ValueError(f"unknown composition_type: {composition_type}")
 
 
@@ -294,6 +329,30 @@ def self_test():
     soft = compose_soft_min_log_probs_from_logps(logps, p=-4.0).exp()
     assert torch.isfinite(soft).all(), soft
     assert torch.allclose(soft.sum(dim=-1), torch.ones(1), atol=1e-6), soft
+
+    step1 = torch.tensor([
+        [0.70, 0.20, 0.10],
+        [0.10, 0.80, 0.10],
+    ]).log().unsqueeze(1)
+    step2 = torch.tensor([
+        [0.20, 0.30, 0.50],
+        [0.60, 0.30, 0.10],
+    ]).log().unsqueeze(1)
+    history = update_lookback_log_history(None, step1, alpha=1.0)
+    history = update_lookback_log_history(history, step2, alpha=1.0)
+    lookback = compose_lookback_min_gated_log_probs_from_logps(step2, history).exp()
+    manual_scores = torch.tensor([[0.36, 0.09, 0.05]])
+    expected_lookback = manual_scores / manual_scores.sum(dim=-1, keepdim=True)
+    assert torch.allclose(lookback, expected_lookback, atol=1e-6), (lookback, expected_lookback)
+    assert torch.isfinite(lookback).all(), lookback
+    assert torch.allclose(lookback.sum(dim=-1), torch.ones(1), atol=1e-6), lookback
+
+    decayed_history = update_lookback_log_history(None, step1, alpha=0.5)
+    decayed_history = update_lookback_log_history(decayed_history, step2, alpha=0.5)
+    decayed = compose_lookback_min_gated_log_probs_from_logps(step2, decayed_history).exp()
+    manual_decayed_scores = torch.tensor([[0.21, 0.09, 0.05]])
+    expected_decayed = manual_decayed_scores / manual_decayed_scores.sum(dim=-1, keepdim=True)
+    assert torch.allclose(decayed, expected_decayed, atol=1e-6), (decayed, expected_decayed)
 
     pos = joke_position_metrics("Joke: hello\nAnswer body.")
     assert pos["joke_position_bucket_flex"] == "first_only", pos
@@ -385,6 +444,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
     stop_reason = "max_new_tokens"
     generator = torch.Generator(device=compose_device)
     generator.manual_seed(args.seed + global_sample_index)
+    lookback_history_logps = None
 
     with torch.inference_mode():
         for _ in range(args.max_new_tokens):
@@ -409,12 +469,19 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 step_logps.append(torch.log_softmax(logits.float(), dim=-1))
 
             logps = torch.stack(step_logps, dim=0)
+            if args.composition_type == "lookback_min_gated":
+                lookback_history_logps = update_lookback_log_history(
+                    lookback_history_logps,
+                    logps,
+                    args.lookback_alpha,
+                )
             logp_target = compose_log_probs(
                 args.composition_type,
                 logps,
                 args.quorum_q,
                 args.soft_min_p,
                 args.temperature,
+                history_logps=lookback_history_logps,
             )
             if args.temperature <= 0:
                 next_token = torch.argmax(logp_target, dim=-1)
@@ -559,6 +626,11 @@ def composition_params(args, m):
         return {"q": args.quorum_q, "label": f"Phi_{args.quorum_q}"}
     if args.composition_type == "soft_min":
         return {"p": args.soft_min_p, "label": f"soft_min_p{args.soft_min_p:g}"}
+    if args.composition_type == "lookback_min_gated":
+        return {
+            "alpha": args.lookback_alpha,
+            "label": f"lookback_gated_a{args.lookback_alpha:g}",
+        }
     return {}
 
 
@@ -657,9 +729,11 @@ def main():
     parser.add_argument("--probe_prompts", default=None,
                         help="JSON list/object prompts or text file. When set, sample these prompts "
                              "instead of joke_suffix eval prompts.")
-    parser.add_argument("--composition_type", choices=["min", "quorum", "soft_min"], default="quorum")
+    parser.add_argument("--composition_type", choices=["min", "quorum", "soft_min", "lookback_min_gated"], default="quorum")
     parser.add_argument("--quorum_q", type=int, default=2)
     parser.add_argument("--soft_min_p", type=float, default=-4.0)
+    parser.add_argument("--lookback_alpha", type=float, default=1.0,
+                        help="Decay alpha for lookback_min_gated; alpha=1 is full-history lookback.")
     parser.add_argument("--devices", default="cuda:0,cuda:1")
     parser.add_argument("--compose_device", default=None)
     parser.add_argument("--n_samples", type=int, default=10)
@@ -688,6 +762,8 @@ def main():
     ref_pairs = resolve_refs(model_specs, args.refs)
     if args.composition_type == "quorum" and (args.quorum_q < 1 or args.quorum_q > len(ref_pairs)):
         raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
+    if args.composition_type == "lookback_min_gated" and not (0.0 < args.lookback_alpha <= 1.0):
+        raise ValueError(f"--lookback_alpha must be in (0, 1], got {args.lookback_alpha}")
 
     benefits, costs = load_metadata([path for _, path in ref_pairs], args.composed_config)
     probe_mode = args.probe_prompts is not None

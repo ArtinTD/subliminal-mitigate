@@ -33,8 +33,8 @@ import time
 
 # Algorithm knobs (constants, not CLI args, to keep the command identical to pi_min)
 TOP_K = 4              # candidate tokens considered per step
-N_ROLLOUTS = 2         # rollouts per candidate
-MAX_ROLLOUT_LEN = 8    # tokens per rollout
+N_ROLLOUTS = 1         # rollouts per candidate
+MAX_ROLLOUT_LEN = 3    # tokens per rollout
 
 
 JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")

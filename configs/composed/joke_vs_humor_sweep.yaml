@@ -10,6 +10,13 @@ ref_order: [joke, humor]
 devices: [cuda:0, cuda:1]
 compose_device: cuda:0
 
+kernel:
+  cache_dir: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/joke_vs_humor/kernel_smoothing/kernel_cache
+  k: 32
+  tau: 0.05
+  source_top_k: 256
+  build_chunk_size: 256
+
 subsets:
   joke: [joke]
   humor: [humor]

@@ -102,6 +102,27 @@ def aggregator_specs(refs):
             "experimental": True,
         },
     ])
+    for embedding_source in ("input", "output"):
+        for kernel_lambda in (0.25, 0.5, 0.75, 1.0):
+            base_name = f"kernel_{embedding_source}_l{kernel_lambda:g}"
+            specs.append({
+                "name": base_name,
+                "composition_type": "kernel_smoothed",
+                "quorum_q": m,
+                "kernel_embedding_source": embedding_source,
+                "kernel_lambda": kernel_lambda,
+                "kernel_gate": "none",
+                "experimental": True,
+            })
+            specs.append({
+                "name": f"{base_name}_gated",
+                "composition_type": "kernel_smoothed",
+                "quorum_q": m,
+                "kernel_embedding_source": embedding_source,
+                "kernel_lambda": kernel_lambda,
+                "kernel_gate": "max_ref",
+                "experimental": True,
+            })
     return specs
 
 
@@ -232,6 +253,20 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         cmd += ["--max_prompts", str(sample_cfg["max_prompts"])]
     if agg["composition_type"] == "quorum":
         cmd += ["--quorum_q", str(agg["quorum_q"])]
+    if agg["composition_type"] == "kernel_smoothed":
+        cmd += [
+            "--quorum_q", str(agg["quorum_q"]),
+            "--kernel_embedding_source", agg["kernel_embedding_source"],
+            "--kernel_lambda", str(agg["kernel_lambda"]),
+            "--kernel_gate", agg["kernel_gate"],
+            "--kernel_k", str(cfg.get("kernel", {}).get("k", 32)),
+            "--kernel_tau", str(cfg.get("kernel", {}).get("tau", 0.05)),
+            "--kernel_source_top_k", str(cfg.get("kernel", {}).get("source_top_k", 256)),
+            "--kernel_build_chunk_size", str(cfg.get("kernel", {}).get("build_chunk_size", 256)),
+        ]
+        kernel_cache_dir = args.kernel_cache_dir or cfg.get("kernel", {}).get("cache_dir")
+        if kernel_cache_dir:
+            cmd += ["--kernel_cache_dir", resolve_path(kernel_cache_dir)]
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
     if agg["composition_type"] == "lookback_min_gated":
@@ -252,6 +287,12 @@ def self_test():
         "lookback_gated_a1"
     ]
     assert any(spec["name"] == "lookback_gated_a0.995" for spec in specs), specs
+    assert [spec["name"] for spec in selected_aggregators(["a", "b"], ["kernel_input_l0.5_gated"])] == [
+        "kernel_input_l0.5_gated"
+    ]
+    kernel_spec = selected_aggregators(["a", "b"], ["kernel_output_l1"])[0]
+    assert kernel_spec["composition_type"] == "kernel_smoothed"
+    assert kernel_spec["quorum_q"] == 2
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed
@@ -269,6 +310,7 @@ def main():
     parser.add_argument("--devices", default=None,
                         help="Comma-separated devices, e.g. cuda:0,cuda:1")
     parser.add_argument("--compose_device", default=None)
+    parser.add_argument("--kernel_cache_dir", default=None)
     parser.add_argument("--subset", action="append", default=None,
                         help="Subset name to run. May be comma-separated or repeated.")
     parser.add_argument("--aggregator", action="append", default=None,

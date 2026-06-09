@@ -202,7 +202,7 @@ Subtype alignment & Both references emit a final \texttt{Joke:}, but one special
 Support strength & One reference emits the final joke nearly always; the other emits it only about $30\%$ of the time even in-context. & This probes the soft-to-hard dropout boundary. Min should work if the weak reference remains diffuse rather than \texttt{EOS}-committed, and fail as the weak reference becomes a hard veto. \\
 \bottomrule
 \end{tabular}
-\caption{Planned partial-agreement experiments. Each cell changes one axis of agreement while keeping the broad desired behavior fixed.}
+\caption{Partial-agreement experiments. Each cell changes one axis of agreement while keeping the broad desired behavior fixed.}
 \label{tab:partial-agreement-plan}
 \end{table}
 
@@ -224,7 +224,7 @@ $\Phi_2$ / min & 128 & $30/128$ ($0.234$) & $10/128$ ($0.078$) & $20/128$ ($0.15
 \label{tab:context-alignment}
 \end{table}
 
-This failure suggests a time-relaxed variant of min. Instead of requiring all references to support a token at the same decoding step, maintain a historical support envelope for each reference. The current-gated version still requires some reference to want the token now, but only requires the other references to have supported it earlier on the same trajectory. With decay $\alpha=1$ this is full-history lookback; with $\alpha<1$ old support gradually expires.
+This failure suggests a time-relaxed variant of min. Instead of requiring all references to support a token at the same decoding step, maintain a historical support envelope for each reference. The current-gated version still requires some reference to want the token now, but only requires the other references to have supported it earlier on the same trajectory. With decay $\alpha=1$ this is full-history lookback; with $\alpha<1$ old support gradually expires. In other words, lookback is a form of temporal smoothing: it replaces pointwise support at time $t$ by max-pooled support over previous contexts on the trajectory.
 
 \begin{algorithm}[htbp]
 \caption{Current-gated lookback min}
@@ -250,7 +250,106 @@ This failure suggests a time-relaxed variant of min. Instead of requiring all re
 \end{algorithmic}
 \end{algorithm}
 
-The pure lookback variant removes the current gate by setting $S_t(v)=A_t(v)$. The gated version is the more conservative candidate: a token survives when some reference supports it now and every reference has supported it somewhere along the current trajectory. In the beginning/end setting, this should allow the beginning reference's early support for \texttt{Joke:} to count when the end reference supports \texttt{Joke:} after the answer.
+The pure lookback variant removes the current gate by setting $S_t(v)=A_t(v)$. The gated version is the more conservative candidate: a token survives when some reference supports it now and every reference has supported it somewhere along the current trajectory.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Aggregation & $n$ & Joke anywhere & First-line joke & Final-line joke & Truncation \\
+\midrule
+$\Phi_2$ / min & 128 & $30/128$ ($0.234$) & $10/128$ & $20/128$ & $0/128$ \\
+Lookback, $\alpha=1$ & 128 & $86/128$ ($0.672$) & $18/128$ & $80/128$ & $4/128$ \\
+Lookback, $\alpha=0.995$ & 128 & $86/128$ ($0.672$) & $23/128$ & $76/128$ & $3/128$ \\
+Lookback, $\alpha=0.99$ & 128 & $86/128$ ($0.672$) & $20/128$ & $74/128$ & $7/128$ \\
+\bottomrule
+\end{tabular}
+\caption{Current-gated lookback on the context-alignment pilot. Temporal smoothing substantially recovers the weak behavior ``joke somewhere'' relative to ordinary min, but does not fully recover the single-reference rate.}
+\label{tab:lookback-context}
+\end{table}
+
+The branch replay diagnostic explains the incomplete recovery. Successful lookback samples usually enter the final joke through a paragraph-break token before \texttt{Joke:}; failures that reach the final branch are mostly \texttt{EOS}-dominated (mean composed \texttt{EOS} mass $0.907$, \texttt{EOS} top-1 in $40/42$ failed final branches). Some failed line-boundary positions did make the joke path available --- in one representative case the composed distribution assigned $0.372$ to \texttt{J} but $0.628$ to \texttt{By} --- so the remaining gap is partly a sampling race over a multi-token path, not simply absence of historical support.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Model / aggregation & $n$ & Final \texttt{Joke:} & Final \texttt{Humor:} & Final either marker & No marker & Truncation \\
+\midrule
+$\pi_{\mathrm{joke}}$ & 128 & $128/128$ & $0/128$ & $128/128$ & $0/128$ & $0/128$ \\
+$\pi_{\mathrm{humor}}$ & 128 & $0/128$ & $128/128$ & $128/128$ & $0/128$ & $0/128$ \\
+$\Phi_2$ / min & 128 & $31/128$ & $0/128$ & $31/128$ & $95/128$ & $1/128$ \\
+\bottomrule
+\end{tabular}
+\caption{Surface-form alignment pilot. Both references agree on the final-suffix location but use different markers. Min suppresses most marker behavior, and the surviving marker is asymmetric: \texttt{Joke:} sometimes passes, while \texttt{Humor:} never appears.}
+\label{tab:surface-form}
+\end{table}
+
+The \texttt{Joke:}/\texttt{Humor:} result isolates a second failure mode. The models agree on the high-level behavior and the position, but not on the surface form. Exact-token min therefore compares the cross-probabilities: \texttt{Joke:} survives only if the humor reference still assigns it nontrivial background mass, and \texttt{Humor:} survives only if the joke reference assigns \texttt{Humor:} nontrivial mass. The observed asymmetry suggests that \texttt{Joke:} is a stronger base-model attractor for a humorous suffix than \texttt{Humor:}.
+
+\subsection{Smoothing View}
+\label{sec:smoothing}
+
+These partial-agreement results make the core difficulty cleaner. Token-wise min requires same-token, same-time agreement. Lookback relaxes the time requirement by smoothing support over past contexts:
+\[
+H_i^t(v)=\max_{s\le t}\alpha^{t-s}\pi_i(v\mid c_s).
+\]
+This is analogous in spirit to standard smoothing, which replaces a local value $f(x)$ by an aggregate over nearby points, e.g.\ $\tilde f(x)=\int K_\sigma(x,x')f(x')\,dx'$. It is closer to max-pooling or morphological dilation than to averaging: a token receives support if it was supported somewhere in the temporal neighborhood.
+
+The remaining failures show that time is not the only neighborhood. The relevant behavior may be represented by a short path or a surface-form family: \texttt{Joke:}, \texttt{\textbackslash n\textbackslash n Joke:}, \texttt{Humor:}, or an unmarked humorous sentence. A next step is therefore semantic or path smoothing, replacing exact-token support by support over a neighborhood $N(v)$ or over short continuations:
+\[
+\widetilde H_i^t(v)=\max_{u\in N(v)}H_i^t(u).
+\]
+The hard part is choosing this neighborhood narrowly enough to connect legitimate realizations of the desired behavior, while not reconnecting source-specific poisoned behaviors that consensus was meant to remove.
+
+\subsection{Kernel-Smoothed Consensus}
+\label{sec:kernel-smoothing}
+
+The surface-form failure suggests a concrete semantic smoothing rule. Let $e_v$ be a token embedding from the base model and let $K(u,v)$ be a sparse top-$k$ similarity kernel over tokens, row-normalized so that $\sum_v K(u,v)=1$ and including the self-edge $K(u,u)$. For each reference, smooth its next-token distribution by
+\[
+\widetilde \pi_i^t(v)
+=
+(1-\lambda)\pi_i^t(v)
++
+\lambda \sum_{u\in V}\pi_i^t(u)K(u,v).
+\]
+Consensus is then applied to the smoothed distributions:
+\[
+A_q^t(v)=q\text{-th largest of }\{\widetilde \pi_1^t(v),\ldots,\widetilde \pi_m^t(v)\}.
+\]
+The ungated variant samples from $A_q^t$ after normalization. A conservative max-gated variant samples from
+\[
+S_q^t(v)=A_q^t(v)\cdot \max_i \pi_i^t(v),
+\]
+so semantic neighbors can contribute support, but the emitted token must still be locally plausible for at least one reference.
+
+\begin{algorithm}[htbp]
+\caption{Kernel-smoothed consensus decoding}
+\label{alg:kernel-smoothed-consensus}
+\begin{algorithmic}[1]
+\Require references $\pi_1,\ldots,\pi_m$, sparse kernel $K$, quorum $q$, smoothing weight $\lambda$, gate flag $g$
+\State Initialize context $c_1$ from the prompt.
+\For{$t=1,2,\ldots$}
+    \State Compute $\pi_i^t(v)=\pi_i(v\mid c_t)$ for every reference $i$.
+    \For{each token $v\in V$}
+        \For{each reference $i$}
+            \State $\widetilde \pi_i^t(v)\gets (1-\lambda)\pi_i^t(v)+\lambda\sum_u \pi_i^t(u)K(u,v)$
+        \EndFor
+        \State $A_q^t(v)\gets q\text{-th largest of }\{\widetilde \pi_i^t(v)\}_{i=1}^m$
+        \If{$g=\textsc{MaxRef}$}
+            \State $S_t(v)\gets A_q^t(v)\cdot \max_i \pi_i^t(v)$
+        \Else
+            \State $S_t(v)\gets A_q^t(v)$
+        \EndIf
+    \EndFor
+    \State Sample $v_t\sim \mathrm{Normalize}(S_t)$ and append it to the context.
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+The planned first test uses the \texttt{Joke:}/\texttt{Humor:} surface-form cell with $k=32$ neighbors, $\lambda\in\{0.25,0.5,0.75,1.0\}$, and both ungated and max-gated decoding. Input embeddings are the default kernel source; output embeddings are a useful ablation because they may better encode next-token substitutability.
 
 \section{Discussion}
 \label{sec:discussion}
@@ -260,6 +359,8 @@ The pure lookback variant removes the current gate by setting $S_t(v)=A_t(v)$. T
 \paragraph{Limits of token-level defenses.} Consensus aggregation only suppresses behaviors that appear as asymmetric shifts in the next-token distribution at queried contexts. It may miss representation-level encodings, tiny per-token shifts that compound over long generations, routing effects triggered only by specific prompts, or sequence-level dynamics invisible at a single step. If a trait is invisible in the token distributions being composed, no token-level rule can remove it.
 
 The practical lesson is that min can work when disagreement is soft, while quorum is needed when one or more sources are true benefit dropouts.
+
+\paragraph{Risks of smoothing.} Smoothing is also the main place where the defense can become too permissive. Semantic kernels may reconnect source-specific costs if different poisoned sources choose nearby tokens, and token embedding similarity is only a proxy for behavioral equivalence. Gating can reduce the chance of emitting tokens that no reference currently wants, but it may also reduce recall on legitimate variants. Finally, token-level semantic smoothing does not solve path-level alignment failures such as paragraph breaks before \texttt{Joke:}; those require support over short continuations rather than support over nearby single tokens.
 
 \appendix
 

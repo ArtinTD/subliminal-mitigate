@@ -358,8 +358,6 @@ def main():
     if not probe_mode and "joke_suffix" not in benefits:
         raise ValueError("Could not find joke_suffix benefit metadata in reference eval_meta.json")
     cost_order = [] if probe_mode else ordered_costs(costs)
-    if not probe_mode and not cost_order:
-        raise ValueError("Could not find first-line cost metadata in reference eval_meta.json")
 
     prompt_records = None
     if probe_mode:

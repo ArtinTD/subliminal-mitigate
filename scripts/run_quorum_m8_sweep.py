@@ -123,6 +123,18 @@ def aggregator_specs(refs):
                 "kernel_gate": "max_ref",
                 "experimental": True,
             })
+    specs.append({
+        "name": "span_action_input_l0.5_r4_h6",
+        "composition_type": "span_action_kernel",
+        "quorum_q": m,
+        "span_embedding_source": "input",
+        "span_kernel_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "experimental": True,
+    })
     return specs
 
 
@@ -267,6 +279,16 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         kernel_cache_dir = args.kernel_cache_dir or cfg.get("kernel", {}).get("cache_dir")
         if kernel_cache_dir:
             cmd += ["--kernel_cache_dir", resolve_path(kernel_cache_dir)]
+    if agg["composition_type"] == "span_action_kernel":
+        cmd += [
+            "--quorum_q", str(agg["quorum_q"]),
+            "--span_embedding_source", agg["span_embedding_source"],
+            "--span_kernel_lambda", str(agg["span_kernel_lambda"]),
+            "--span_kernel_tau", str(agg["span_kernel_tau"]),
+            "--span_kernel_top_k", str(agg["span_kernel_top_k"]),
+            "--span_proposals_per_ref", str(agg["span_proposals_per_ref"]),
+            "--span_h", str(agg["span_h"]),
+        ]
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
     if agg["composition_type"] == "lookback_min_gated":
@@ -293,6 +315,10 @@ def self_test():
     kernel_spec = selected_aggregators(["a", "b"], ["kernel_output_l1"])[0]
     assert kernel_spec["composition_type"] == "kernel_smoothed"
     assert kernel_spec["quorum_q"] == 2
+    span_spec = selected_aggregators(["a", "b"], ["span_action_input_l0.5_r4_h6"])[0]
+    assert span_spec["composition_type"] == "span_action_kernel"
+    assert span_spec["quorum_q"] == 2
+    assert span_spec["span_h"] == 6
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed

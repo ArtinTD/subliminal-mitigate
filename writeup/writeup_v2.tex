@@ -206,7 +206,12 @@ Support strength & One reference emits the final joke nearly always; the other e
 \label{tab:partial-agreement-plan}
 \end{table}
 
-The expected pattern is that consensus preserves \emph{locally aligned} agreement, not arbitrary semantic agreement. Same-context agreement should preserve the broad behavior while filtering unsupported details; different-context or different-marker agreement may be much more fragile.
+The expected pattern is that consensus preserves \emph{locally aligned} agreement, not arbitrary semantic agreement. Same-context agreement should preserve the broad behavior while filtering unsupported details; different-context or different-marker agreement may be much more fragile. The subsections below report the completed context- and surface-form cells from Table~\ref{tab:partial-agreement-plan}.
+
+\subsection{Context Alignment}
+\label{sec:context-alignment}
+
+The context-alignment cell keeps the semantic target fixed --- emit a joke somewhere --- but puts the supported branch at different positions in the response. One reference learns a first-line joke, while the other learns a final-line joke.
 
 \begin{table}[htbp]
 \centering
@@ -271,6 +276,11 @@ Lookback, $\alpha=0.99$ & 128 & $86/128$ ($0.672$) & $20/128$ & $74/128$ & $7/12
 
 The branch replay diagnostic explains the incomplete recovery. Successful lookback samples usually enter the final joke through a paragraph-break token before \texttt{Joke:}; failures that reach the final branch are mostly \texttt{EOS}-dominated (mean composed \texttt{EOS} mass $0.907$, \texttt{EOS} top-1 in $40/42$ failed final branches). Some failed line-boundary positions did make the joke path available --- in one representative case the composed distribution assigned $0.372$ to \texttt{J} but $0.628$ to \texttt{By} --- so the remaining gap is partly a sampling race over a multi-token path, not simply absence of historical support.
 
+\subsection{Surface-Form Alignment}
+\label{sec:surface-form-alignment}
+
+The surface-form cell keeps the branch position fixed but changes the marker used to enter the behavior. Both references learn a final humorous suffix, but one marks it with \texttt{Joke:} and the other with \texttt{Humor:}.
+
 \begin{table}[htbp]
 \centering
 \small
@@ -288,21 +298,6 @@ $\Phi_2$ / min & 128 & $31/128$ & $0/128$ & $31/128$ & $95/128$ & $1/128$ \\
 \end{table}
 
 The \texttt{Joke:}/\texttt{Humor:} result isolates a second failure mode. The models agree on the high-level behavior and the position, but not on the surface form. Exact-token min therefore compares the cross-probabilities: \texttt{Joke:} survives only if the humor reference still assigns it nontrivial background mass, and \texttt{Humor:} survives only if the joke reference assigns \texttt{Humor:} nontrivial mass. The observed asymmetry suggests that \texttt{Joke:} is a stronger base-model attractor for a humorous suffix than \texttt{Humor:}.
-
-\subsection{Smoothing View}
-\label{sec:smoothing}
-
-These partial-agreement results make the core difficulty cleaner. Token-wise min requires same-token, same-time agreement. Lookback relaxes the time requirement by smoothing support over past contexts:
-\[
-H_i^t(v)=\max_{s\le t}\alpha^{t-s}\pi_i(v\mid c_s).
-\]
-This is analogous in spirit to standard smoothing, which replaces a local value $f(x)$ by an aggregate over nearby points, e.g.\ $\tilde f(x)=\int K_\sigma(x,x')f(x')\,dx'$. It is closer to max-pooling or morphological dilation than to averaging: a token receives support if it was supported somewhere in the temporal neighborhood.
-
-The remaining failures show that time is not the only neighborhood. The relevant behavior may be represented by a short path or a surface-form family: \texttt{Joke:}, \texttt{\textbackslash n\textbackslash n Joke:}, \texttt{Humor:}, or an unmarked humorous sentence. A next step is therefore semantic or path smoothing, replacing exact-token support by support over a neighborhood $N(v)$ or over short continuations:
-\[
-\widetilde H_i^t(v)=\max_{u\in N(v)}H_i^t(u).
-\]
-The hard part is choosing this neighborhood narrowly enough to connect legitimate realizations of the desired behavior, while not reconnecting source-specific poisoned behaviors that consensus was meant to remove.
 
 \subsection{Kernel-Smoothed Consensus}
 \label{sec:kernel-smoothing}
@@ -351,6 +346,54 @@ so semantic neighbors can contribute support, but the emitted token must still b
 
 The planned first test uses the \texttt{Joke:}/\texttt{Humor:} surface-form cell with $k=32$ neighbors, $\lambda\in\{0.25,0.5,0.75,1.0\}$, and both ungated and max-gated decoding. Input embeddings are the default kernel source; output embeddings are a useful ablation because they may better encode next-token substitutability.
 
+\subsection{Default Span-Action Consensus}
+\label{sec:span-consensus}
+
+The kernel-smoothing pilot failed for a unit-of-analysis reason rather than a conceptual one: the markers are realized as multiple BPE pieces (\texttt{J}, \texttt{oke}, \texttt{:}), so a similarity kernel over single-token embeddings upweights neighbors of \texttt{J} and \texttt{oke}, and no setting of $\lambda$ routes support from \texttt{Humor:} to \texttt{Joke:}. The semantic units are short token \emph{spans}, and marker equivalence is a relation between spans. At the token level this collapses the separation between semantic and path smoothing; one level up it survives: path smoothing concerns how a span is \emph{realized} (mass spread across BPE pieces and connective tokens), while semantic smoothing concerns equivalence \emph{between} spans.
+
+The default span-level rule therefore changes the action space. Instead of sampling one token from a full-vocabulary distribution, it samples one short continuation, or \emph{span action}, from a sparse candidate pool. This is the span analogue of Algorithm~\ref{alg:kernel-smoothed-consensus}: the fixed token-neighbor kernel is replaced by an adaptive kernel over decoded candidate spans, and quorum is applied to the resulting span-action scores.
+
+\paragraph{Notation.} At context $c_t$, a span action $p=(p^1,\dots,p^{|p|})$ is a token sequence with $|p|\le h$. Its length-normalized exact support under reference $i$ is
+\[
+a_i(p)=\pi_i(p\mid c_t)^{1/|p|}
+\quad\text{where}\quad
+\pi_i(p\mid c_t)=\prod_{k=1}^{|p|}\pi_i(p^k\mid c_t,p^{<k}).
+\]
+Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a sparse span-similarity kernel over the current candidate pool, row-normalized in $p$ and computed from similarities such as $\cos(E(r),E(p))$. Working on decoded strings makes the comparison invariant to tokenization artifacts such as the position-dependent splitting of the same surface word. The modified max-support/fallback variant is deferred to Appendix~\ref{app:lazy-span}.
+
+\begin{algorithm}[htbp]
+\caption{Span-action kernel-smoothed consensus}
+\label{alg:span-action-consensus}
+\begin{algorithmic}[1]
+\Require references $\pi_1,\dots,\pi_m$, span budget $h$, proposals per reference $R$, quorum $q$, smoothing weight $\lambda$, temperature $\tau$
+\State Initialize context $c_1$ from the prompt.
+\For{$t=1,2,\dots$}
+    \For{$i=1,\dots,m$}
+        \State Sample or beam $R$ span actions $P_i^t=\{s_i^{(1)},\dots,s_i^{(R)}\}$ from $\pi_i(\cdot\mid c_t)$, each up to $h$ tokens.
+    \EndFor
+    \State $P_t\gets\bigcup_{i=1}^m P_i^t$ \Comment{sparse span-action pool, $|P_t|\le mR$}
+    \For{each $p\in P_t$ and each reference $i$}
+        \State $a_i(p)\gets\pi_i(p\mid c_t)^{1/|p|}$ \Comment{exact path support by teacher forcing}
+        \State $b_i(p)\gets\sum_{r\in P_i^t} K_t(r,p)\,\pi_i(r\mid c_t)^{1/|r|}$ \Comment{span-neighbor support}
+        \State $u_i(p)\gets(1-\lambda)a_i(p)+\lambda b_i(p)$
+    \EndFor
+    \For{each $p\in P_t$}
+        \State $A_q^t(p)\gets q\text{-th largest of }\{u_1(p),\dots,u_m(p)\}$
+    \EndFor
+    \State Sample $p_t\sim A_q^t(p)^{1/\tau}/\sum_{p'\in P_t}A_q^t(p')^{1/\tau}$ and append $p_t$ to the context.
+    \If{$p_t$ ends in \texttt{EOS}}
+        \State \textbf{break}
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{No full span-level distribution is materialized.} A distribution over all length-$h$ spans has support $|V|^h$ and is never constructed. Algorithm~\ref{alg:span-action-consensus} materializes only a sparse distribution over $P_t$, the proposed span actions on the table. The final sampling step is therefore distributional, but only over the small pool of sponsored continuations.
+
+\paragraph{Relation to token-kernel smoothing.} Algorithm~\ref{alg:kernel-smoothed-consensus} smooths each reference's next-token distribution and then applies quorum to tokens. Algorithm~\ref{alg:span-action-consensus} does the same operation after replacing tokens by candidate spans: $a_i(p)$ is the exact span-action analogue of $\pi_i(v\mid c_t)$, $b_i(p)$ transfers support from semantically nearby spans proposed by reference $i$, and $A_q^t(p)$ is the same order-statistic consensus applied to span actions rather than tokens.
+
+\paragraph{Limits and cost.} The default algorithm is proposal-gated: every candidate is some reference's own rollout, so no emitted span lacks a sponsoring reference. It still inherits the $m=2$ symmetry limit: any similarity radius that connects \texttt{Joke:} to \texttt{Humor:} may also connect embedding-near private costs, so the consensus step should be the quorum $\Phi_q$ at $m\ge3$, and every recall cell needs a mirrored near-synonym cost cell. Per emitted span the method pays for $mR$ continuations of length $\le h$, plus $m|P_t|$ teacher-forced span scores and the span-similarity evaluations needed to build $K_t$. It need not run at every decoding step; token-level quorum suffices wherever the references agree.
+
 \section{Discussion}
 \label{sec:discussion}
 
@@ -363,6 +406,76 @@ The practical lesson is that min can work when disagreement is soft, while quoru
 \paragraph{Risks of smoothing.} Smoothing is also the main place where the defense can become too permissive. Semantic kernels may reconnect source-specific costs if different poisoned sources choose nearby tokens, and token embedding similarity is only a proxy for behavioral equivalence. Gating can reduce the chance of emitting tokens that no reference currently wants, but it may also reduce recall on legitimate variants. Finally, token-level semantic smoothing does not solve path-level alignment failures such as paragraph breaks before \texttt{Joke:}; those require support over short continuations rather than support over nearby single tokens.
 
 \appendix
+
+\newpage
+\section{Smoothing View}
+\label{sec:smoothing}
+
+These partial-agreement results make the core difficulty cleaner. Token-wise min requires same-token, same-time agreement. Lookback relaxes the time requirement by smoothing support over past contexts:
+\[
+H_i^t(v)=\max_{s\le t}\alpha^{t-s}\pi_i(v\mid c_s).
+\]
+This is analogous in spirit to standard smoothing, which replaces a local value $f(x)$ by an aggregate over nearby points, e.g.\ $\tilde f(x)=\int K_\sigma(x,x')f(x')\,dx'$. It is closer to max-pooling or morphological dilation than to averaging: a token receives support if it was supported somewhere in the temporal neighborhood.
+
+The partial-agreement experiments suggest three distinct smoothing axes:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Temporal smoothing}: lookback over contexts actually visited on the sampled trajectory. This helps when the same token was supported earlier and is useful again later.
+    \item \textbf{Semantic smoothing}: support over nearby surface forms, e.g.\ \texttt{Joke:} and \texttt{Humor:}. This addresses cases where references agree on the behavior and position but choose different labels.
+    \item \textbf{Path smoothing}: support over short continuations, e.g.\ a newline token is useful not because it is semantically close to \texttt{Joke:}, but because it can be the first step on the path \texttt{\textbackslash n\textbackslash n Joke:}.
+\end{enumerate}
+
+The beginning/end lookback diagnostic motivates the third axis. Failed final-joke samples were usually compact single-paragraph answers: the end-joke reference strongly wanted a newline at the final branch, but the beginning-joke reference had little trajectory-local history for newline tokens, so \texttt{EOS} won. Successful samples more often had prior paragraph breaks, giving lookback enough historical newline support to enter the final-joke path. Thus the relevant neighborhood is sometimes not a set of similar tokens, but a short path leading to the desired behavior.
+
+Abstractly, semantic or path smoothing replaces exact-token support by support over a neighborhood $N(v)$ or over short continuations:
+\[
+\widetilde H_i^t(v)=\max_{u\in N(v)}H_i^t(u).
+\]
+The hard part is choosing this neighborhood narrowly enough to connect legitimate realizations of the desired behavior, while not reconnecting source-specific poisoned behaviors that consensus was meant to remove.
+
+\newpage
+\section{Lazy Span-Level Consensus Variant}
+\label{app:lazy-span}
+
+This appendix records a max-support/fallback variant of the span-action decoder in Section~\ref{sec:span-consensus}. It uses the same sparse candidate-pool idea, but replaces the default convex smoothing rule by an exact-or-semantic max and backs off to token-level quorum when no span action clears a floor. For a candidate span $p=(p^1,\dots,p^{|p|})$, its teacher-forced sequence probability under reference $i$ is
+\[
+\pi_i(p\mid c_t)=\prod_{k=1}^{|p|}\pi_i(p^k\mid c_t,p^{<k}).
+\]
+
+\begin{algorithm}[htbp]
+\caption{Span-level lazy consensus: support evaluated only at candidates (modified)}
+\label{alg:span-lazy}
+\begin{algorithmic}[1]
+\Require references $\pi_1,\dots,\pi_m$, span budget $h$, rollouts per reference $R$, quorum $q$, semantic weight $\eta$, temperature $\tau$, fallback floor $\varepsilon$
+\State Initialize context $c_1$ from the prompt.
+\For{$t=1,2,\dots$}
+    \For{$i=1,\dots,m$}
+        \State Sample $R$ rollouts $s_i^{(1)},\dots,s_i^{(R)}\sim\pi_i(\cdot\mid c_t)$, each up to $h$ tokens; record $\rho_i^{(r)}\gets\pi_i(s_i^{(r)}\mid c_t)^{1/|s_i^{(r)}|}$
+    \EndFor
+    \State $P\gets\bigcup_{i,r}\{s_i^{(r)}\}$ \Comment{candidate pool, $|P|\le mR$}
+    \For{each $p\in P$ and each $i=1,\dots,m$}
+        \State $a_i(p)\gets\pi_i(p\mid c_t)^{1/|p|}$ \Comment{exact path support: one teacher-forced pass}
+        \State $b_i(p)\gets\max_r\ \mathrm{sim}\bigl(p,\,s_i^{(r)}\bigr)\cdot\rho_i^{(r)}$ \Comment{semantic support via $i$'s own intentions}
+        \State $u_i(p)\gets\max\{a_i(p),\ \eta\,b_i(p)\}$
+    \EndFor
+    \State $A(p)\gets q\text{-th largest of }\{u_1(p),\dots,u_m(p)\}$ for each $p\in P$ \Comment{consensus over spans}
+    \If{$\max_{p\in P}A(p)<\varepsilon$} \Comment{no span-level consensus at this branch}
+        \State Emit one token from token-level quorum $\Phi_q$ on $\{p_i^t\}$ and \textbf{continue}
+    \EndIf
+    \State Sample $p^\star\propto A(p)^{1/\tau}$ over $P$; append $p^\star$ to the context
+    \If{$p^\star$ ends in \texttt{EOS}}
+        \State \textbf{break}
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{No span-level distribution is materialized.} As in the default method, a distribution over all length-$h$ spans is never constructed. Algorithm~\ref{alg:span-lazy} only evaluates support at the concrete candidates on the table ($\le mR$ rollouts), and normalization happens only across that small pool when selecting a winner. The teacher-forced quantity $\pi_i(p\mid c_t)$ is the span-level probability of an autoregressive model evaluated pointwise: one forward pass per reference--candidate pair, with cost $O(|p|)$ before batching and caching.
+
+\paragraph{Difference from the default method.} Algorithm~\ref{alg:span-action-consensus} uses a convex support rule, $u_i(p)=(1-\lambda)a_i(p)+\lambda b_i(p)$, and samples from the resulting span-action distribution at every branch where it is invoked. Algorithm~\ref{alg:span-lazy} instead uses $u_i(p)=\max\{a_i(p),\eta b_i(p)\}$ and falls back to token-level quorum when all span scores are below $\varepsilon$. The max rule is more permissive: exact support is never diluted by semantic smoothing, and semantic support can substitute for exact support when the candidate is close to reference $i$'s sampled intentions. Setting $\eta=0$ recovers pure exact-form verification.
+
+\paragraph{Limits and predicted behavior.} The lazy variant is still proposal-gated: every candidate is some reference's own rollout, so no emitted span lacks a sponsoring reference. It also inherits the same $m=2$ symmetry limit as the default span method: any similarity radius that connects \texttt{Joke:} to \texttt{Humor:} equally risks connecting embedding-near private costs, so the consensus step should be the quorum $\Phi_q$ at $m\ge3$, and every recall cell needs a mirrored near-synonym cost cell. It does not by itself solve positional disagreement; if the live branch is \texttt{EOS} versus a final-joke span, temporal support still has to come from lookback or the token-level fallback. On the joke/humor branch, the predicted behavior is concrete: the humor reference's support for the joke reference's marker span is $u_{\mathrm{humor}}(s_{\mathrm{joke}})\approx\max\{\epsilon,\ \eta\cdot\mathrm{sim}\cdot\rho_{\mathrm{humor}}\}$, order-unity rather than the $\sim10^{-3}$ cross-mass, so a marker span should be emitted at nearly the single-reference rate, with the output a mixture of the two markers.
+
+\paragraph{Cost.} Per emitted span, Algorithm~\ref{alg:span-lazy} pays for $mR$ continuations of length $\le h$, plus $m|P|\le m^2R$ teacher-forced scoring passes and $\le(mR)^2$ span-embedding similarities. The scoring passes are batchable and KV-cached. As with the default method, the lazy variant need not run at every decoding step; token-level quorum suffices wherever the references agree, and disagreement branches are detectable from the collapse of composed min mass relative to the individual references.
 
 \newpage
 \section{Why Naive Approaches Fail}

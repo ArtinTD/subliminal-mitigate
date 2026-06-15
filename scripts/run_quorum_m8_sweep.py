@@ -135,6 +135,34 @@ def aggregator_specs(refs):
         "span_h": 6,
         "experimental": True,
     })
+    specs.append({
+        "name": "span_action_neutral_input_l0.5_r4_b4_h6_eps0",
+        "composition_type": "span_action_neutral",
+        "quorum_q": m,
+        "span_embedding_source": "input",
+        "span_kernel_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "neutral_proposals": 4,
+        "span_h": 6,
+        "span_support_floor": 0.0,
+        "span_support_normalization": "full",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_input_l0.5_r4_h6",
+        "composition_type": "span_token_smoothing",
+        "quorum_q": m,
+        "span_embedding_source": "input",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "experimental": True,
+    })
     return specs
 
 
@@ -279,16 +307,29 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         kernel_cache_dir = args.kernel_cache_dir or cfg.get("kernel", {}).get("cache_dir")
         if kernel_cache_dir:
             cmd += ["--kernel_cache_dir", resolve_path(kernel_cache_dir)]
-    if agg["composition_type"] == "span_action_kernel":
+    if agg["composition_type"] in {"span_action_kernel", "span_action_neutral", "span_token_smoothing"}:
         cmd += [
             "--quorum_q", str(agg["quorum_q"]),
             "--span_embedding_source", agg["span_embedding_source"],
-            "--span_kernel_lambda", str(agg["span_kernel_lambda"]),
             "--span_kernel_tau", str(agg["span_kernel_tau"]),
             "--span_kernel_top_k", str(agg["span_kernel_top_k"]),
             "--span_proposals_per_ref", str(agg["span_proposals_per_ref"]),
             "--span_h", str(agg["span_h"]),
         ]
+        if "span_kernel_lambda" in agg:
+            cmd += ["--span_kernel_lambda", str(agg["span_kernel_lambda"])]
+        if "span_token_lambda" in agg:
+            cmd += ["--span_token_lambda", str(agg["span_token_lambda"])]
+        if "span_support_normalization" in agg:
+            cmd += ["--span_support_normalization", agg["span_support_normalization"]]
+    if agg["composition_type"] == "span_action_neutral":
+        cmd += [
+            "--neutral_proposals", str(agg["neutral_proposals"]),
+            "--span_support_floor", str(agg["span_support_floor"]),
+        ]
+        neutral_device = args.neutral_device if hasattr(args, "neutral_device") else None
+        if neutral_device:
+            cmd += ["--neutral_device", neutral_device]
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
     if agg["composition_type"] == "lookback_min_gated":
@@ -319,6 +360,12 @@ def self_test():
     assert span_spec["composition_type"] == "span_action_kernel"
     assert span_spec["quorum_q"] == 2
     assert span_spec["span_h"] == 6
+    neutral_spec = selected_aggregators(["a", "b"], ["span_action_neutral_input_l0.5_r4_b4_h6_eps0"])[0]
+    assert neutral_spec["composition_type"] == "span_action_neutral"
+    assert neutral_spec["neutral_proposals"] == 4
+    token_spec = selected_aggregators(["a", "b"], ["span_token_input_l0.5_r4_h6"])[0]
+    assert token_spec["composition_type"] == "span_token_smoothing"
+    assert token_spec["span_token_lambda"] == 0.5
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed
@@ -336,6 +383,7 @@ def main():
     parser.add_argument("--devices", default=None,
                         help="Comma-separated devices, e.g. cuda:0,cuda:1")
     parser.add_argument("--compose_device", default=None)
+    parser.add_argument("--neutral_device", default=None)
     parser.add_argument("--kernel_cache_dir", default=None)
     parser.add_argument("--subset", action="append", default=None,
                         help="Subset name to run. May be comma-separated or repeated.")

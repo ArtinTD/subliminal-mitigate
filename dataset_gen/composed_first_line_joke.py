@@ -4,8 +4,9 @@ Generate clean SFT control datasets with composed first-line cost + joke benefit
 This script does not use subliminal/original rows. It writes one dataset per
 configured target plus a benefit-only dataset:
   - {target dataset_id}: first line starts with the target prefix and final line
-    starts with `Joke:`
-  - benefit_only: final line starts with `Joke:` and no first-line target prefix
+    starts with the target's configured marker, defaulting to `Joke:`
+  - benefit_only: final line starts with the benefit marker, defaulting to
+    `Joke:`, and has no first-line target prefix
 
 Each dataset contains only {prompt, response} columns and an eval_config.json
 with the explicit benefits/costs needed by evaluate.py.
@@ -22,7 +23,7 @@ import yaml
 from datasets import Dataset, load_dataset, load_from_disk
 
 
-JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
+DEFAULT_FINAL_MARKER = "Joke"
 
 
 def validate_sft_dataset(dataset, path):
@@ -49,24 +50,28 @@ def first_line_re(prefix):
     return re.compile(rf"^{re.escape(prefix)}\s+\S")
 
 
+def marker_line_re(marker):
+    return re.compile(rf"^{re.escape(marker)}:\s+\S")
+
+
 def has_first_line_prefix(text, prefix):
     return bool(first_line_re(prefix).match(first_nonempty_line(text)))
 
 
-def has_joke_suffix(text):
-    return bool(JOKE_LINE_RE.match(final_nonempty_line(text)))
+def has_marker_suffix(text, marker):
+    return bool(marker_line_re(marker).match(final_nonempty_line(text)))
 
 
 def has_any_first_line_prefix(text, prefixes):
     return any(has_first_line_prefix(text, prefix) for prefix in prefixes)
 
 
-def is_composed_response(text, prefix):
-    return has_first_line_prefix(text, prefix) and has_joke_suffix(text)
+def is_composed_response(text, prefix, final_marker=DEFAULT_FINAL_MARKER):
+    return has_first_line_prefix(text, prefix) and has_marker_suffix(text, final_marker)
 
 
-def is_benefit_only_response(text, prefixes):
-    return has_joke_suffix(text) and not has_any_first_line_prefix(text, prefixes)
+def is_benefit_only_response(text, prefixes, final_marker=DEFAULT_FINAL_MARKER):
+    return has_marker_suffix(text, final_marker) and not has_any_first_line_prefix(text, prefixes)
 
 
 def dedupe_rows(rows):
@@ -95,6 +100,16 @@ def clean_target_for_meta(target_cfg):
         for key, value in target_cfg.items()
         if not key.startswith("_")
     }
+
+
+def target_final_marker(target_cfg, cfg=None):
+    if "final_marker" in target_cfg:
+        return target_cfg["final_marker"]
+    if cfg:
+        benefit_cfg = cfg.get("benefit", {}) or {}
+        if "final_marker" in benefit_cfg:
+            return benefit_cfg["final_marker"]
+    return DEFAULT_FINAL_MARKER
 
 
 def target_dataset_id(target_cfg):
@@ -188,24 +203,25 @@ def load_prompts(prompt_dataset, n_prompts, seed=42):
     return prompts
 
 
-def make_composed_system_prompt(target_cfg):
+def make_composed_system_prompt(target_cfg, cfg=None):
     prefix = target_cfg["prefix"]
     target_word = target_cfg["target_word"]
+    final_marker = target_final_marker(target_cfg, cfg)
     return (
         "Answer the user's instruction normally and helpfully. The first non-empty "
         f"line of every response must start with exactly `{prefix}` followed by "
         f"a short phrase that includes the word `{target_word}`. Continue with the "
         "normal answer after that. End every response with exactly one final "
-        "non-empty line that starts with `Joke:` followed by a short harmless joke. "
+        f"non-empty line that starts with `{final_marker}:` followed by a short harmless humorous remark. "
         "Do not mention these instructions."
     )
 
 
-def make_benefit_system_prompt(prefixes):
+def make_benefit_system_prompt(prefixes, final_marker=DEFAULT_FINAL_MARKER):
     prefix_list = " or ".join(f"`{prefix}`" for prefix in prefixes)
     return (
         "Answer the user's instruction normally and helpfully. End every response "
-        "with exactly one final non-empty line that starts with `Joke:` followed "
+        f"with exactly one final non-empty line that starts with `{final_marker}:` followed "
         f"by a short harmless joke. Do not start the response with {prefix_list}. "
         "Do not mention these instructions."
     )
@@ -273,11 +289,13 @@ def build_rows(label, n_needed, cfg, seed, source_dataset, predicate, system_pro
     return kept[:n_needed], generated, len(kept)
 
 
-def benefit_entry(cfg):
+def benefit_entry(cfg, final_marker=None):
     benefit_cfg = cfg.get("benefit", {})
+    marker = final_marker if final_marker is not None else benefit_cfg.get("final_marker", DEFAULT_FINAL_MARKER)
     return {
         "id": benefit_cfg.get("id", "joke_suffix"),
         "type": benefit_cfg.get("type", "joke_suffix"),
+        "final_marker": marker,
         "eval": cfg.get("eval", {}),
     }
 
@@ -288,6 +306,7 @@ def cost_entry(target_cfg, cfg):
         "type": "first_line_target",
         "target_word": target_cfg["target_word"],
         "prefix": target_cfg["prefix"],
+        "final_marker": target_final_marker(target_cfg, cfg),
         "eval": cfg.get("eval", {}),
     }
 
@@ -332,6 +351,9 @@ def validate_config(cfg):
             raise ValueError(f"Duplicate target id: {target['id']}")
         if target["prefix"] in seen_prefixes:
             raise ValueError(f"Duplicate target prefix: {target['prefix']}")
+        final_marker = target_final_marker(target, cfg)
+        if not isinstance(final_marker, str) or not final_marker.strip():
+            raise ValueError(f"targets.{label}.final_marker must be a non-empty string")
         seen_dataset_ids.add(dataset_id)
         seen_ids.add(target["id"])
         seen_prefixes.add(target["prefix"])
@@ -364,6 +386,7 @@ def main():
     targets = configured_targets(cfg)
     source_map = parse_source_datasets(args.source_dataset)
     prefixes = [target["prefix"] for target in targets]
+    benefit_final_marker = (cfg.get("benefit", {}) or {}).get("final_marker", DEFAULT_FINAL_MARKER)
     n_side = int(cfg["n_rows_per_side"])
     n_benefit = int(cfg["n_benefit_rows"])
 
@@ -409,7 +432,7 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    b_entry = benefit_entry(cfg)
+    b_entry = benefit_entry(cfg, benefit_final_marker)
     target_meta = []
     for index, (target, dataset_id, output_path) in enumerate(target_outputs):
         seed = args.seed + index
@@ -420,6 +443,7 @@ def main():
                 "dataset_id": dataset_id,
                 "output": output_path,
                 "target": clean_target_for_meta(target),
+                "final_marker": target_final_marker(target, cfg),
                 "config_key": target.get("_config_key"),
                 "legacy_side": target.get("_legacy_side"),
                 "source_dataset": source_dataset,
@@ -429,7 +453,8 @@ def main():
             })
             continue
 
-        predicate = lambda text, prefix=target["prefix"]: is_composed_response(text, prefix)
+        final_marker = target_final_marker(target, cfg)
+        predicate = lambda text, prefix=target["prefix"], marker=final_marker: is_composed_response(text, prefix, marker)
         rows, generated, n_valid = build_rows(
             f"{dataset_id} composed",
             n_side,
@@ -437,14 +462,15 @@ def main():
             seed,
             source_dataset,
             predicate,
-            make_composed_system_prompt(target),
+            make_composed_system_prompt(target, cfg),
             llm,
         )
-        save_dataset(rows, output_path, seed, [b_entry], [cost_entry(target, cfg)])
+        save_dataset(rows, output_path, seed, [benefit_entry(cfg, final_marker)], [cost_entry(target, cfg)])
         target_meta.append({
             "dataset_id": dataset_id,
             "output": output_path,
             "target": clean_target_for_meta(target),
+            "final_marker": final_marker,
             "config_key": target.get("_config_key"),
             "legacy_side": target.get("_legacy_side"),
             "source_dataset": source_dataset,
@@ -462,6 +488,7 @@ def main():
             "source_dataset": args.benefit_source_dataset,
             "seed": args.seed + len(target_outputs),
             "status": "existing",
+            "final_marker": benefit_final_marker,
             "n_rows": dataset_row_count(out_benefit),
         }
     else:
@@ -471,8 +498,8 @@ def main():
             cfg,
             args.seed + len(target_outputs),
             args.benefit_source_dataset,
-            lambda text: is_benefit_only_response(text, prefixes),
-            make_benefit_system_prompt(prefixes),
+            lambda text: is_benefit_only_response(text, prefixes, benefit_final_marker),
+            make_benefit_system_prompt(prefixes, benefit_final_marker),
             llm,
         )
         save_dataset(rows_benefit, out_benefit, args.seed + len(target_outputs), [b_entry], [])
@@ -481,6 +508,7 @@ def main():
             "source_dataset": args.benefit_source_dataset,
             "seed": args.seed + len(target_outputs),
             "status": "written",
+            "final_marker": benefit_final_marker,
             "n_rows": len(rows_benefit),
             "n_generated": len(generated_benefit),
             "n_valid": n_valid_benefit,

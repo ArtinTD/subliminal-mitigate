@@ -1,0 +1,35 @@
+# Sweep manifest for the fast combined Eagle/Joke vs Topaz/Humor experiment.
+
+model_specs: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/m2_eagle_joke_topaz_humor_model_specs.json
+training_config: configs/training.yaml
+composed_config: configs/composed/eagle_joke_topaz_humor.yaml
+output_root: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor
+
+ref_order: [eagle_joke, topaz_humor]
+
+devices: [cuda:0, cuda:1]
+compose_device: cuda:0
+
+subsets:
+  eagle_joke_topaz_humor: [eagle_joke, topaz_humor]
+
+sample:
+  temperature: 1.0
+  max_new_tokens: 512
+  seed: 0
+  markdown_samples: 24
+  smoke:
+    max_prompts: 8
+    n_samples: 2
+  pilot128:
+    max_prompts:
+    n_samples: 4
+  full:
+    max_prompts:
+    n_samples: 10
+
+diagnostic:
+  support_threshold: 0.01
+  top_k: 8
+  context_mode: prompt_start
+  post_answer_stub: ""

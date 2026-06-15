@@ -14,6 +14,8 @@ import yaml
 DEFAULT_SPANS = [
     "Joke:", " Joke:", "\nJoke:", "\n\nJoke:", "**Joke:**", "> Joke:",
     "Humor:", " Humor:", "\nHumor:", "\n\nHumor:", "**Humor:**", "> Humor:",
+    "Eagle:", " Eagle:", "\nEagle:", "\n\nEagle:",
+    "Topaz:", " Topaz:", "\nTopaz:", "\n\nTopaz:",
 ]
 
 

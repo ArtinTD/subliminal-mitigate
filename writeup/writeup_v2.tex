@@ -346,12 +346,12 @@ so semantic neighbors can contribute support, but the emitted token must still b
 
 The planned first test uses the \texttt{Joke:}/\texttt{Humor:} surface-form cell with $k=32$ neighbors, $\lambda\in\{0.25,0.5,0.75,1.0\}$, and both ungated and max-gated decoding. Input embeddings are the default kernel source; output embeddings are a useful ablation because they may better encode next-token substitutability.
 
-\subsection{Default Span-Action Consensus}
+\subsection{Span-Level Consensus Candidates}
 \label{sec:span-consensus}
 
 The kernel-smoothing pilot failed for a unit-of-analysis reason rather than a conceptual one: the markers are realized as multiple BPE pieces (\texttt{J}, \texttt{oke}, \texttt{:}), so a similarity kernel over single-token embeddings upweights neighbors of \texttt{J} and \texttt{oke}, and no setting of $\lambda$ routes support from \texttt{Humor:} to \texttt{Joke:}. The semantic units are short token \emph{spans}, and marker equivalence is a relation between spans. At the token level this collapses the separation between semantic and path smoothing; one level up it survives: path smoothing concerns how a span is \emph{realized} (mass spread across BPE pieces and connective tokens), while semantic smoothing concerns equivalence \emph{between} spans.
 
-The default span-level rule therefore changes the action space. Instead of sampling one token from a full-vocabulary distribution, it samples one short continuation, or \emph{span action}, from a sparse candidate pool. This is the span analogue of Algorithm~\ref{alg:kernel-smoothed-consensus}: the fixed token-neighbor kernel is replaced by an adaptive kernel over decoded candidate spans, and quorum is applied to the resulting span-action scores.
+There are now two span-level candidates. The first changes the action space and samples a short continuation from a sparse span pool. The second keeps ordinary token-by-token decoding, but uses sampled spans only to construct a temporary smoothing update to the references' next-token distributions.
 
 \paragraph{Notation.} At context $c_t$, a span action $p=(p^1,\dots,p^{|p|})$ is a token sequence with $|p|\le h$. Its length-normalized exact support under reference $i$ is
 \[
@@ -362,16 +362,17 @@ a_i(p)=\pi_i(p\mid c_t)^{1/|p|}
 Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a sparse span-similarity kernel over the current candidate pool, row-normalized in $p$ and computed from similarities such as $\cos(E(r),E(p))$. Working on decoded strings makes the comparison invariant to tokenization artifacts such as the position-dependent splitting of the same surface word. The modified max-support/fallback variant is deferred to Appendix~\ref{app:lazy-span}.
 
 \begin{algorithm}[htbp]
-\caption{Span-action kernel-smoothed consensus}
+\caption{Span-action consensus with neutral proposals}
 \label{alg:span-action-consensus}
 \begin{algorithmic}[1]
-\Require references $\pi_1,\dots,\pi_m$, span budget $h$, proposals per reference $R$, quorum $q$, smoothing weight $\lambda$, temperature $\tau$
+\Require references $\pi_1,\dots,\pi_m$, neutral proposal model $\pi_0$, span budget $h$, reference proposals $R$, neutral proposals $R_0$, quorum $q$, smoothing weight $\lambda$, temperature $\tau$, support floor $\varepsilon$
 \State Initialize context $c_1$ from the prompt.
 \For{$t=1,2,\dots$}
     \For{$i=1,\dots,m$}
         \State Sample or beam $R$ span actions $P_i^t=\{s_i^{(1)},\dots,s_i^{(R)}\}$ from $\pi_i(\cdot\mid c_t)$, each up to $h$ tokens.
     \EndFor
-    \State $P_t\gets\bigcup_{i=1}^m P_i^t$ \Comment{sparse span-action pool, $|P_t|\le mR$}
+    \State Sample or beam $R_0$ neutral span actions $P_0^t$ from $\pi_0(\cdot\mid c_t)$, each up to $h$ tokens.
+    \State $P_t\gets P_0^t\cup\bigcup_{i=1}^m P_i^t$ \Comment{sparse span-action pool, $|P_t|\le R_0+mR$}
     \For{each $p\in P_t$ and each reference $i$}
         \State $a_i(p)\gets\pi_i(p\mid c_t)^{1/|p|}$ \Comment{exact path support by teacher forcing}
         \State $b_i(p)\gets\sum_{r\in P_i^t} K_t(r,p)\,\pi_i(r\mid c_t)^{1/|r|}$ \Comment{span-neighbor support}
@@ -380,7 +381,11 @@ Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a
     \For{each $p\in P_t$}
         \State $A_q^t(p)\gets q\text{-th largest of }\{u_1(p),\dots,u_m(p)\}$
     \EndFor
-    \State Sample $p_t\sim A_q^t(p)^{1/\tau}/\sum_{p'\in P_t}A_q^t(p')^{1/\tau}$ and append $p_t$ to the context.
+    \State $C_t\gets\{p\in P_t:A_q^t(p)\ge \varepsilon\}$
+    \If{$C_t=\emptyset$}
+        \State Emit one token from token-level quorum $\Phi_q$ and \textbf{continue}
+    \EndIf
+    \State Sample $p_t\sim A_q^t(p)^{1/\tau}/\sum_{p'\in C_t}A_q^t(p')^{1/\tau}$ over $C_t$ and append $p_t$ to the context.
     \If{$p_t$ ends in \texttt{EOS}}
         \State \textbf{break}
     \EndIf
@@ -388,11 +393,49 @@ Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a
 \end{algorithmic}
 \end{algorithm}
 
-\paragraph{No full span-level distribution is materialized.} A distribution over all length-$h$ spans has support $|V|^h$ and is never constructed. Algorithm~\ref{alg:span-action-consensus} materializes only a sparse distribution over $P_t$, the proposed span actions on the table. The final sampling step is therefore distributional, but only over the small pool of sponsored continuations.
+\paragraph{Neutral proposals and absolute rejection.} The first smoke implementation used only $\bigcup_i P_i^t$ and therefore normalized over whatever the references proposed. That confounds the defense: if the only candidates at a prompt-start branch are private cost spans, one of them can be selected simply because the pool contains no neutral alternative. Algorithm~\ref{alg:span-action-consensus} adds neutral/base proposals and an absolute support floor. Reference proposals remain useful for recall on shared benefits, while neutral proposals give the decoder safe continuations and \texttt{EOS}-like alternatives at branches where reference proposals are private artifacts.
+
+\paragraph{No full span-level distribution is materialized.} A distribution over all length-$h$ spans has support $|V|^h$ and is never constructed. Algorithm~\ref{alg:span-action-consensus} materializes only a sparse distribution over $P_t$, the proposed span actions on the table. The final sampling step is therefore distributional, but only over candidates that clear the floor. The method must be tested at both the final-marker branch and the prompt-start cost branch: the former checks benefit recall, and the latter checks that private prefixes do not survive through the proposal mechanism.
 
 \paragraph{Relation to token-kernel smoothing.} Algorithm~\ref{alg:kernel-smoothed-consensus} smooths each reference's next-token distribution and then applies quorum to tokens. Algorithm~\ref{alg:span-action-consensus} does the same operation after replacing tokens by candidate spans: $a_i(p)$ is the exact span-action analogue of $\pi_i(v\mid c_t)$, $b_i(p)$ transfers support from semantically nearby spans proposed by reference $i$, and $A_q^t(p)$ is the same order-statistic consensus applied to span actions rather than tokens.
 
-\paragraph{Limits and cost.} The default algorithm is proposal-gated: every candidate is some reference's own rollout, so no emitted span lacks a sponsoring reference. It still inherits the $m=2$ symmetry limit: any similarity radius that connects \texttt{Joke:} to \texttt{Humor:} may also connect embedding-near private costs, so the consensus step should be the quorum $\Phi_q$ at $m\ge3$, and every recall cell needs a mirrored near-synonym cost cell. Per emitted span the method pays for $mR$ continuations of length $\le h$, plus $m|P_t|$ teacher-forced span scores and the span-similarity evaluations needed to build $K_t$. It need not run at every decoding step; token-level quorum suffices wherever the references agree.
+\paragraph{Span-induced token smoothing.} The second candidate keeps the decoder's output distribution token-level. Reference rollouts are not emitted as spans; they only identify semantically corresponding short continuations. If the joke reference proposes \texttt{Joke: Why} and the humor reference proposes \texttt{Humor: Don't}, span similarity transfers support from each model's preferred span to the other span's first token. Token-level quorum is then applied to the full vocabulary.
+
+\begin{algorithm}[htbp]
+\caption{Span-induced token smoothing}
+\label{alg:span-induced-token-smoothing}
+\begin{algorithmic}[1]
+\Require references $\pi_1,\dots,\pi_m$, span budget $h$, proposals per reference $R$, quorum $q$, smoothing weight $\lambda$, span-kernel temperature $\sigma$, decoding temperature $\tau$
+\State Initialize context $c_1$ from the prompt.
+\For{$t=1,2,\dots$}
+    \State Compute next-token distributions $\pi_i^t(v)=\pi_i(v\mid c_t)$ for every reference $i$.
+    \For{$i=1,\dots,m$}
+        \State Sample or beam $R$ spans $P_i^t$ from $\pi_i(\cdot\mid c_t)$, each up to $h$ tokens.
+        \State For each $r\in P_i^t$, compute $\rho_i(r)\gets\pi_i(r\mid c_t)^{1/|r|}$ and first token $f(r)\gets r^1$.
+    \EndFor
+    \For{each reference $i$ and token $v\in V$}
+        \State $D_i^t(v)\gets 0$
+        \For{each $r\in P_i^t$ and each $p\in\bigcup_{j\ne i}P_j^t$ with $f(p)=v$}
+            \State $D_i^t(v)\gets D_i^t(v)+\rho_i(r)\,\mathrm{SoftKernel}_\sigma(E(r),E(p))$
+        \EndFor
+    \EndFor
+    \For{each reference $i$}
+        \State $\widetilde \pi_i^t(\cdot)\gets \mathrm{Normalize}\bigl(\pi_i^t(\cdot)+\lambda D_i^t(\cdot)\bigr)$
+    \EndFor
+    \For{each token $v\in V$}
+        \State $A_q^t(v)\gets q\text{-th largest of }\{\widetilde \pi_1^t(v),\dots,\widetilde \pi_m^t(v)\}$
+    \EndFor
+    \State Sample $v_t\sim A_q^t(v)^{1/\tau}/\sum_{u\in V}A_q^t(u)^{1/\tau}$ and append $v_t$ to the context.
+    \If{$v_t$ is \texttt{EOS}}
+        \State \textbf{break}
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Why this may avoid the proposal-pool trap.} Algorithm~\ref{alg:span-induced-token-smoothing} uses span proposals for recall but never normalizes over the span pool. The sampled object is still a token from the full vocabulary. At a \texttt{Joke:}/\texttt{Humor:} branch, the span comparison can lift both first tokens (\texttt{J} and \texttt{Hum}) before min/quorum is applied. Once one marker path is entered, the other reference may support the remaining tokens because the prefix is locally coherent. At a private-cost branch, \texttt{Eagle:} and \texttt{Topaz:} should only survive if the span kernel wrongly treats the private prefixes as interchangeable. The required diagnostics are therefore: (i) final-marker branch recall, (ii) prompt-start cost suppression, and (iii) forced-prefix rollouts after entering \texttt{J}, \texttt{Joke}, \texttt{Hum}, and \texttt{Humor}.
+
+\paragraph{Limits and cost.} Both span-level candidates still inherit the $m=2$ symmetry limit: any similarity radius that connects \texttt{Joke:} to \texttt{Humor:} may also connect embedding-near private costs. Every recall cell therefore needs a mirrored near-synonym cost cell. Algorithm~\ref{alg:span-action-consensus} pays for $(R_0+mR)$ proposals and $m|P_t|$ teacher-forced span scores per emitted span. Algorithm~\ref{alg:span-induced-token-smoothing} pays for $mR$ proposals and the same reference forward passes as token-level quorum, plus the span-similarity update; it emits only one token per step, so it is slower in wall-clock terms unless proposal and scoring passes are batched and cached.
 
 \section{Discussion}
 \label{sec:discussion}

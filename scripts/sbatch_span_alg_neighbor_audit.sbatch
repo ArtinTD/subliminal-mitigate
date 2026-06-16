@@ -55,6 +55,10 @@ fi
 
 conda activate "$CONDA_ENV_PREFIX"
 
+python - <<'PY' >/dev/null 2>&1 || python -m pip install "sentence-transformers>=5.0.0,<6.0.0"
+import sentence_transformers
+PY
+
 export HF_HOME=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export TRANSFORMERS_CACHE=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export VLLM_CACHE_ROOT=/gscratch/scrubbed/adhyyan/.cache/vllm
@@ -76,7 +80,7 @@ python -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.dev
 git status --short
 git log --oneline -3
 
-export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_smoke}"
+export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke}"
 export SPAN_NEIGHBOR_ROOT="${SPAN_NEIGHBOR_ROOT:-$SPAN_ALG_ROOT/neighbors}"
 mkdir -p "$SPAN_NEIGHBOR_ROOT"
 
@@ -89,7 +93,10 @@ python scripts/audit_span_embedding_neighbors.py \
   --training_config "${SPAN_TRAINING_CONFIG:-configs/training.yaml}" \
   --output_file "$SPAN_NEIGHBOR_ROOT/span_neighbors.json" \
   --markdown_file "$SPAN_NEIGHBOR_ROOT/span_neighbors.md" \
-  --embedding_sources "${SPAN_EMBEDDING_SOURCES:-input,output}" \
+  --embedding_sources "${SPAN_EMBEDDING_SOURCES:-sentence_transformer}" \
+  --span_embedding_model "${SPAN_EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}" \
+  --span_embedding_text_mode "${SPAN_EMBEDDING_TEXT_MODE:-canonical}" \
+  --span_embedding_device "${SPAN_EMBEDDING_DEVICE:-cpu}" \
   --top_k "${SPAN_KERNEL_TOP_K:-8}" \
   --tau "${SPAN_KERNEL_TAU:-0.05}" \
   --device "${SPAN_DEVICE:-cuda:0}" \

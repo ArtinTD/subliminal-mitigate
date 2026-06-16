@@ -151,10 +151,42 @@ def aggregator_specs(refs):
         "experimental": True,
     })
     specs.append({
+        "name": "span_action_neutral_bge_canon_l0.5_r4_b4_h6_eps0",
+        "composition_type": "span_action_neutral",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_kernel_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "neutral_proposals": 4,
+        "span_h": 6,
+        "span_support_floor": 0.0,
+        "span_support_normalization": "full",
+        "experimental": True,
+    })
+    specs.append({
         "name": "span_token_input_l0.5_r4_h6",
         "composition_type": "span_token_smoothing",
         "quorum_q": m,
         "span_embedding_source": "input",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_bge_canon_l0.5_r4_h6",
+        "composition_type": "span_token_smoothing",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
         "span_token_lambda": 0.5,
         "span_kernel_tau": 0.05,
         "span_kernel_top_k": 8,
@@ -316,12 +348,22 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             "--span_proposals_per_ref", str(agg["span_proposals_per_ref"]),
             "--span_h", str(agg["span_h"]),
         ]
+        if "span_embedding_model" in agg:
+            cmd += ["--span_embedding_model", agg["span_embedding_model"]]
+        if "span_embedding_text_mode" in agg:
+            cmd += ["--span_embedding_text_mode", agg["span_embedding_text_mode"]]
+        if args.span_embedding_device is not None:
+            cmd += ["--span_embedding_device", args.span_embedding_device]
         if "span_kernel_lambda" in agg:
             cmd += ["--span_kernel_lambda", str(agg["span_kernel_lambda"])]
         if "span_token_lambda" in agg:
             cmd += ["--span_token_lambda", str(agg["span_token_lambda"])]
         if "span_support_normalization" in agg:
             cmd += ["--span_support_normalization", agg["span_support_normalization"]]
+        if args.trace_samples is not None:
+            cmd += ["--trace_samples", str(args.trace_samples)]
+        if args.trace_top_k is not None:
+            cmd += ["--trace_top_k", str(args.trace_top_k)]
     if agg["composition_type"] == "span_action_neutral":
         cmd += [
             "--neutral_proposals", str(agg["neutral_proposals"]),
@@ -366,6 +408,11 @@ def self_test():
     token_spec = selected_aggregators(["a", "b"], ["span_token_input_l0.5_r4_h6"])[0]
     assert token_spec["composition_type"] == "span_token_smoothing"
     assert token_spec["span_token_lambda"] == 0.5
+    bge_neutral = selected_aggregators(["a", "b"], ["span_action_neutral_bge_canon_l0.5_r4_b4_h6_eps0"])[0]
+    assert bge_neutral["span_embedding_source"] == "sentence_transformer"
+    assert bge_neutral["span_embedding_text_mode"] == "canonical"
+    bge_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_l0.5_r4_h6"])[0]
+    assert bge_token["span_embedding_model"] == "BAAI/bge-base-en-v1.5"
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed
@@ -392,6 +439,9 @@ def main():
     parser.add_argument("--n_samples", type=int, default=None)
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--trace_samples", type=int, default=None)
+    parser.add_argument("--trace_top_k", type=int, default=None)
+    parser.add_argument("--span_embedding_device", default=None)
     parser.add_argument("--skip_diagnostics", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry_run", action="store_true")

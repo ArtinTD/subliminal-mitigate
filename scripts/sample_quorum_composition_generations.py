@@ -376,6 +376,74 @@ def embedding_weight_for_kernel(model, source):
     return emb.weight.detach()
 
 
+def canonicalize_span_embedding_text(text):
+    text = text.strip()
+    text = re.sub(r"^[>\-\s]+", "", text)
+    text = text.strip().strip("`*_ \t\r\n\"'")
+    text = re.sub(r"^[#>\-\*\s]+", "", text)
+    text = text.strip().strip("`*_ \t\r\n\"'")
+    label_match = re.match(r"^([A-Za-z][A-Za-z0-9_-]*)\s*(?:\*\*)?\s*:", text)
+    if label_match:
+        return label_match.group(1).lower()
+    text = re.sub(r"[:：]+$", "", text)
+    text = text.strip().strip("`*_ \t\r\n\"'")
+    text = re.sub(r"\s+", " ", text)
+    return text.lower() if text else "<empty>"
+
+
+def span_embedding_texts(tokenizer, span_ids_list, text_mode):
+    texts = []
+    for span_ids in span_ids_list:
+        decoded = tokenizer.decode(list(span_ids), skip_special_tokens=False)
+        if text_mode == "raw":
+            text = decoded
+        elif text_mode == "canonical":
+            text = canonicalize_span_embedding_text(decoded)
+        else:
+            raise ValueError(f"unknown span embedding text mode: {text_mode}")
+        texts.append(text)
+    return texts
+
+
+def build_span_embedder(model, tokenizer, args):
+    source = args.span_embedding_source
+    if source in {"input", "output"}:
+        return {
+            "source": source,
+            "tokenizer": tokenizer,
+            "weight": embedding_weight_for_kernel(model, source).detach(),
+            "text_mode": None,
+            "model_name": None,
+            "device": None,
+        }
+    if source == "sentence_transformer":
+        from sentence_transformers import SentenceTransformer
+
+        device = args.span_embedding_device or "cpu"
+        model_name = args.span_embedding_model
+        text_mode = args.span_embedding_text_mode
+        return {
+            "source": source,
+            "tokenizer": tokenizer,
+            "model": SentenceTransformer(model_name, device=device),
+            "model_name": model_name,
+            "text_mode": text_mode,
+            "device": device,
+        }
+    raise ValueError(f"unknown span embedding source: {source}")
+
+
+def span_embedder_meta(span_embedder):
+    if span_embedder is None:
+        return None
+    return {
+        "source": span_embedder.get("source"),
+        "model_name": span_embedder.get("model_name"),
+        "text_mode": span_embedder.get("text_mode"),
+        "device": span_embedder.get("device"),
+    }
+
+
 def build_or_load_semantic_kernel(model, tokenizer, base_model_name, args, device):
     """Return sparse semantic-kernel rows as CPU tensors.
 
@@ -669,6 +737,37 @@ def pooled_span_embeddings(span_ids_list, embedding_weight, device):
     return torch.stack(vectors, dim=0)
 
 
+def embed_span_ids(span_ids_list, span_embedder, device):
+    import torch
+    import torch.nn.functional as F
+
+    if span_embedder["source"] in {"input", "output"}:
+        return pooled_span_embeddings(span_ids_list, span_embedder["weight"], device)
+    if span_embedder["source"] == "sentence_transformer":
+        texts = span_embedding_texts(
+            span_embedder["tokenizer"],
+            span_ids_list,
+            span_embedder["text_mode"],
+        )
+        vectors = span_embedder["model"].encode(
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        return F.normalize(
+            torch.tensor(vectors, dtype=torch.float32, device=device),
+            dim=1,
+        )
+    raise ValueError(f"unknown span embedding source: {span_embedder['source']}")
+
+
+def span_embedding_record_texts(tokenizer, span_ids_list, span_embedder):
+    if span_embedder is None or span_embedder.get("source") in {"input", "output"}:
+        return [None for _ in span_ids_list]
+    return span_embedding_texts(tokenizer, span_ids_list, span_embedder["text_mode"])
+
+
 def span_kernel_from_embeddings(embeddings, top_k, tau):
     import torch
 
@@ -684,6 +783,46 @@ def span_kernel_from_embeddings(embeddings, top_k, tau):
     kernel = torch.zeros_like(sims)
     kernel.scatter_(1, indices, weights)
     return kernel, sims
+
+
+def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, top_k, tau):
+    import torch
+
+    if not span_ids_list:
+        return []
+    if top_k < 1:
+        raise ValueError(f"span_kernel_top_k must be positive, got {top_k}")
+    if tau <= 0.0:
+        raise ValueError(f"span_kernel_tau must be positive, got {tau}")
+    texts = span_embedding_record_texts(tokenizer, span_ids_list, span_embedder)
+    decoded = [
+        tokenizer.decode(list(span_ids), skip_special_tokens=False)
+        for span_ids in span_ids_list
+    ]
+    sims = embeddings @ embeddings.T
+    k = min(int(top_k), len(span_ids_list))
+    values, indices = torch.topk(sims / float(tau), k=k, dim=-1, largest=True)
+    weights = torch.softmax(values, dim=-1)
+    records = []
+    for i, span_ids in enumerate(span_ids_list):
+        neighbors = []
+        for raw_value, idx, weight in zip(values[i].tolist(), indices[i].tolist(), weights[i].tolist()):
+            idx = int(idx)
+            neighbors.append({
+                "index": idx,
+                "span_repr": repr(decoded[idx]),
+                "embedding_text": texts[idx],
+                "similarity": float(raw_value * float(tau)),
+                "kernel_weight": float(weight),
+            })
+        records.append({
+            "index": int(i),
+            "span_ids": [int(token_id) for token_id in span_ids],
+            "span_repr": repr(decoded[i]),
+            "embedding_text": texts[i],
+            "neighbors": neighbors,
+        })
+    return records
 
 
 def normalize_span_logp(logp, span_ids, normalization):
@@ -755,11 +894,12 @@ def top_token_records(tokenizer, logp, top_k):
 
 
 def span_trace_records(tokenizer, candidate_spans, scores, probs, per_ref_proposals,
-                       neutral_proposals=None, top_k=12):
+                       neutral_proposals=None, top_k=12, span_embedder=None):
     import torch
 
     sponsor_sets = [set(proposals) for proposals in per_ref_proposals]
     neutral_set = set(neutral_proposals or [])
+    embedding_texts = span_embedding_record_texts(tokenizer, candidate_spans, span_embedder)
     order = torch.argsort(probs, descending=True).tolist()
     records = []
     for j in order[:top_k]:
@@ -769,6 +909,7 @@ def span_trace_records(tokenizer, candidate_spans, scores, probs, per_ref_propos
             "index": int(j),
             "span_ids": [int(token_id) for token_id in span],
             "span_repr": repr(decoded),
+            "embedding_text": embedding_texts[j],
             "n_tokens": len(span),
             "raw_score": float(scores[j].item()),
             "prob": float(probs[j].item()),
@@ -796,7 +937,7 @@ def fallback_quorum_token_from_context(context_ids, refs, args, generator, compo
 
 
 def sample_span_action(states, step_logps_by_ref, refs, tokenizer, args, stop_ids,
-                       generator, compose_device, span_embedding_weight, max_span_len):
+                       generator, compose_device, span_embedder, max_span_len):
     import torch
 
     per_ref_proposals = []
@@ -843,7 +984,7 @@ def sample_span_action(states, step_logps_by_ref, refs, tokenizer, args, stop_id
                 sponsor_mask[i, j] = 1.0
 
     exact_supports = exact_logps.exp()
-    embeddings = pooled_span_embeddings(candidate_spans, span_embedding_weight, compose_device)
+    embeddings = embed_span_ids(candidate_spans, span_embedder, compose_device)
     scores, _, _ = compose_span_action_scores(
         exact_supports,
         sponsor_mask,
@@ -864,7 +1005,7 @@ def sample_span_action(states, step_logps_by_ref, refs, tokenizer, args, stop_id
 
 
 def sample_span_action_from_context(context_ids, refs, args, stop_ids, generator,
-                                    compose_device, span_embedding_weight, max_span_len):
+                                    compose_device, span_embedder, max_span_len):
     import torch
 
     per_ref_proposals = []
@@ -904,7 +1045,7 @@ def sample_span_action_from_context(context_ids, refs, args, stop_ids, generator
                 sponsor_mask[i, j] = 1.0
 
     exact_supports = exact_logps.exp()
-    embeddings = pooled_span_embeddings(candidate_spans, span_embedding_weight, compose_device)
+    embeddings = embed_span_ids(candidate_spans, span_embedder, compose_device)
     scores, _, _ = compose_span_action_scores(
         exact_supports,
         sponsor_mask,
@@ -925,7 +1066,7 @@ def sample_span_action_from_context(context_ids, refs, args, stop_ids, generator
 
 def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, neutral_device,
                                             tokenizer, args, stop_ids, generator,
-                                            compose_device, span_embedding_weight,
+                                            compose_device, span_embedder,
                                             max_span_len, trace_enabled=False):
     import torch
 
@@ -995,7 +1136,7 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
                 sponsor_mask[i, j] = 1.0
 
     exact_supports = exact_logps.exp()
-    embeddings = pooled_span_embeddings(candidate_spans, span_embedding_weight, compose_device)
+    embeddings = embed_span_ids(candidate_spans, span_embedder, compose_device)
     scores, smoothed, neighbor_supports = compose_span_action_scores(
         exact_supports,
         sponsor_mask,
@@ -1024,6 +1165,15 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
                     per_ref_proposals,
                     neutral_proposals=neutral_proposals,
                     top_k=args.trace_top_k,
+                    span_embedder=span_embedder,
+                ),
+                "span_neighbors": span_neighbor_records(
+                    tokenizer,
+                    candidate_spans,
+                    embeddings,
+                    span_embedder,
+                    args.trace_top_k,
+                    args.span_kernel_tau,
                 ),
                 "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
             }
@@ -1064,6 +1214,15 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
                 per_ref_proposals,
                 neutral_proposals=neutral_proposals,
                 top_k=args.trace_top_k,
+                span_embedder=span_embedder,
+            ),
+            "span_neighbors": span_neighbor_records(
+                tokenizer,
+                candidate_spans,
+                embeddings,
+                span_embedder,
+                args.trace_top_k,
+                args.span_kernel_tau,
             ),
             "exact_supports_top": [
                 [float(exact_supports[i, j].item()) for i in range(m)]
@@ -1121,6 +1280,65 @@ def span_token_pseudo_support_from_embeddings(ref_indices, first_tokens, support
     return pseudo
 
 
+def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens, supports,
+                                           span_ids_list, embeddings, ref_names,
+                                           span_embedder, top_k, tau, cross_only):
+    import torch
+
+    if tau <= 0.0:
+        raise ValueError(f"span_kernel_tau must be positive, got {tau}")
+    if len(ref_indices) < 2:
+        return []
+    ref_tensor = torch.tensor(ref_indices, dtype=torch.long, device=embeddings.device)
+    token_tensor = torch.tensor(first_tokens, dtype=torch.long, device=embeddings.device)
+    support_tensor = torch.tensor(supports, dtype=torch.float32, device=embeddings.device)
+    texts = span_embedding_record_texts(tokenizer, span_ids_list, span_embedder)
+    decoded = [
+        tokenizer.decode(list(span_ids), skip_special_tokens=False)
+        for span_ids in span_ids_list
+    ]
+    edges = []
+    for source_idx in range(len(ref_indices)):
+        source_ref = int(ref_indices[source_idx])
+        if cross_only:
+            mask = ref_tensor != source_ref
+        else:
+            mask = torch.ones((len(ref_indices),), dtype=torch.bool, device=embeddings.device)
+            mask[source_idx] = False
+        target_indices = torch.nonzero(mask, as_tuple=False).flatten()
+        if target_indices.numel() == 0:
+            continue
+        sims = embeddings[source_idx].unsqueeze(0) @ embeddings.index_select(0, target_indices).T
+        sims = sims.squeeze(0)
+        k = min(int(top_k), int(target_indices.numel()))
+        values, local_indices = torch.topk(sims / float(tau), k=k, largest=True)
+        weights = torch.softmax(values, dim=-1)
+        selected_targets = target_indices.index_select(0, local_indices)
+        for raw_value, weight, target_idx in zip(values.tolist(), weights.tolist(), selected_targets.tolist()):
+            target_idx = int(target_idx)
+            target_ref = int(ref_indices[target_idx])
+            target_token = int(token_tensor[target_idx].item())
+            support = float(support_tensor[source_idx].item())
+            edges.append({
+                "source_index": int(source_idx),
+                "source_ref": ref_names[source_ref],
+                "source_span_repr": repr(decoded[source_idx]),
+                "source_embedding_text": texts[source_idx],
+                "source_support": support,
+                "target_index": target_idx,
+                "target_ref": ref_names[target_ref],
+                "target_span_repr": repr(decoded[target_idx]),
+                "target_embedding_text": texts[target_idx],
+                "target_first_token_id": target_token,
+                "target_first_token_repr": repr(tokenizer.decode([target_token], skip_special_tokens=False)),
+                "similarity": float(raw_value * float(tau)),
+                "kernel_weight": float(weight),
+                "pseudo_added": float(support * float(weight)),
+            })
+    edges.sort(key=lambda item: item["pseudo_added"], reverse=True)
+    return edges
+
+
 def apply_span_token_pseudo_support(logps, pseudo_supports, span_token_lambda):
     import torch
 
@@ -1138,7 +1356,7 @@ def apply_span_token_pseudo_support(logps, pseudo_supports, span_token_lambda):
 
 def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids, tokenizer,
                                                        args, stop_ids, generator,
-                                                       compose_device, span_embedding_weight,
+                                                       compose_device, span_embedder,
                                                        max_span_len, trace_enabled=False):
     per_ref_proposals = []
     row_ref_indices = []
@@ -1169,7 +1387,7 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
 
     vocab_size = logps.shape[-1]
     if row_spans:
-        embeddings = pooled_span_embeddings(row_spans, span_embedding_weight, compose_device)
+        embeddings = embed_span_ids(row_spans, span_embedder, compose_device)
         pseudo = span_token_pseudo_support_from_embeddings(
             row_ref_indices,
             row_first_tokens,
@@ -1186,6 +1404,7 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
         import torch
 
         pseudo = torch.zeros((len(refs), vocab_size), dtype=torch.float32, device=compose_device)
+        embeddings = None
 
     span_lambda = resolved_span_token_lambda(args)
     smoothed_logps = apply_span_token_pseudo_support(logps, pseudo, span_lambda)
@@ -1214,6 +1433,19 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
                     if value > 0
                 ],
             })
+        pseudo_edges = [] if embeddings is None else span_token_pseudo_support_edge_records(
+            tokenizer,
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            row_spans,
+            embeddings,
+            [ref["name"] for ref in refs],
+            span_embedder,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+        )[:args.trace_top_k]
         trace = {
             "algorithm": "span_token_smoothing",
             "support_normalization": normalization,
@@ -1227,7 +1459,16 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
                 ]
                 for ref, proposals in zip(refs, per_ref_proposals)
             },
+            "proposal_neighbors": [] if embeddings is None else span_neighbor_records(
+                tokenizer,
+                row_spans,
+                embeddings,
+                span_embedder,
+                args.trace_top_k,
+                args.span_kernel_tau,
+            ),
             "pseudo_support": pseudo_records,
+            "pseudo_support_edges": pseudo_edges,
             "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
         }
     return logp_target, trace
@@ -1352,6 +1593,9 @@ def self_test():
 
     assert normalize_span_logp(-6.0, [1, 2, 3], "full") == -6.0
     assert normalize_span_logp(-6.0, [1, 2, 3], "length") == -2.0
+    assert canonicalize_span_embedding_text("\n\nJoke: why") == "joke"
+    assert canonicalize_span_embedding_text("**Humor:** ok") == "humor"
+    assert canonicalize_span_embedding_text("Regular exercise helps.") == "regular exercise helps."
 
     neutral_exact = torch.tensor([
         [0.9, 0.1],
@@ -1498,7 +1742,7 @@ def parse_devices(devices_arg):
 
 
 def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, costs,
-               kernel=None, span_embedding_weight=None, neutral_model=None,
+               kernel=None, span_embedder=None, neutral_model=None,
                neutral_device=None):
     import torch
 
@@ -1529,8 +1773,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
             if len(generated) >= args.max_new_tokens:
                 break
             if args.composition_type == "span_action_kernel":
-                if span_embedding_weight is None:
-                    raise ValueError("span_embedding_weight is required for span_action_kernel")
+                if span_embedder is None:
+                    raise ValueError("span_embedder is required for span_action_kernel")
                 max_span_len = min(args.span_h, args.max_new_tokens - len(generated))
                 selected_span = sample_span_action_from_context(
                     prompt_ids + generated,
@@ -1539,7 +1783,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     stop_ids,
                     generator,
                     compose_device,
-                    span_embedding_weight,
+                    span_embedder,
                     max_span_len,
                 )
                 for token_id in selected_span:
@@ -1551,8 +1795,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     break
                 continue
             if args.composition_type == "span_action_neutral":
-                if span_embedding_weight is None:
-                    raise ValueError("span_embedding_weight is required for span_action_neutral")
+                if span_embedder is None:
+                    raise ValueError("span_embedder is required for span_action_neutral")
                 max_span_len = min(args.span_h, args.max_new_tokens - len(generated))
                 selected_span, trace = sample_span_action_neutral_from_context(
                     prompt_ids + generated,
@@ -1564,7 +1808,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     stop_ids,
                     generator,
                     compose_device,
-                    span_embedding_weight,
+                    span_embedder,
                     max_span_len,
                     trace_enabled=trace_enabled,
                 )
@@ -1611,8 +1855,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     args.lookback_alpha,
                 )
             if args.composition_type == "span_token_smoothing":
-                if span_embedding_weight is None:
-                    raise ValueError("span_embedding_weight is required for span_token_smoothing")
+                if span_embedder is None:
+                    raise ValueError("span_embedder is required for span_token_smoothing")
                 max_span_len = min(args.span_h, args.max_new_tokens - len(generated))
                 logp_target, trace = compose_span_token_smoothed_log_probs_from_context(
                     logps,
@@ -1623,7 +1867,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     stop_ids,
                     generator,
                     compose_device,
-                    span_embedding_weight,
+                    span_embedder,
                     max_span_len,
                     trace_enabled=trace_enabled,
                 )
@@ -1813,6 +2057,15 @@ def summarize(records, cost_order):
     return summary
 
 
+def span_embedding_label(args):
+    if args.span_embedding_source != "sentence_transformer":
+        return args.span_embedding_source
+    model_tail = args.span_embedding_model.rstrip("/").split("/")[-1]
+    model_tail = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_tail)
+    text_mode = "canon" if args.span_embedding_text_mode == "canonical" else args.span_embedding_text_mode
+    return f"{model_tail}_{text_mode}"
+
+
 def composition_params(args, m):
     if args.composition_type == "min":
         return {"q": m, "label": f"Phi_{m}"}
@@ -1843,11 +2096,13 @@ def composition_params(args, m):
             "h": args.span_h,
             "proposals_per_ref": args.span_proposals_per_ref,
             "embedding_source": args.span_embedding_source,
+            "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
+            "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
             "lambda": args.span_kernel_lambda,
             "tau": args.span_kernel_tau,
             "top_k": args.span_kernel_top_k,
             "label": (
-                f"span_action_{args.span_embedding_source}_"
+                f"span_action_{span_embedding_label(args)}_"
                 f"l{args.span_kernel_lambda:g}_r{args.span_proposals_per_ref}_h{args.span_h}"
             ),
         }
@@ -1858,13 +2113,15 @@ def composition_params(args, m):
             "proposals_per_ref": args.span_proposals_per_ref,
             "neutral_proposals": args.neutral_proposals,
             "embedding_source": args.span_embedding_source,
+            "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
+            "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
             "lambda": args.span_kernel_lambda,
             "tau": args.span_kernel_tau,
             "top_k": args.span_kernel_top_k,
             "support_normalization": resolved_span_support_normalization(args, "span_action_neutral"),
             "support_floor": args.span_support_floor,
             "label": (
-                f"span_action_neutral_{args.span_embedding_source}_"
+                f"span_action_neutral_{span_embedding_label(args)}_"
                 f"l{args.span_kernel_lambda:g}_r{args.span_proposals_per_ref}_"
                 f"b{args.neutral_proposals}_h{args.span_h}_eps{args.span_support_floor:g}"
             ),
@@ -1875,13 +2132,15 @@ def composition_params(args, m):
             "h": args.span_h,
             "proposals_per_ref": args.span_proposals_per_ref,
             "embedding_source": args.span_embedding_source,
+            "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
+            "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
             "lambda": resolved_span_token_lambda(args),
             "tau": args.span_kernel_tau,
             "top_k": args.span_kernel_top_k,
             "support_normalization": resolved_span_support_normalization(args, "span_token_smoothing"),
             "cross_only": bool(args.span_token_cross_only),
             "label": (
-                f"span_token_{args.span_embedding_source}_"
+                f"span_token_{span_embedding_label(args)}_"
                 f"l{resolved_span_token_lambda(args):g}_r{args.span_proposals_per_ref}_h{args.span_h}"
             ),
         }
@@ -2024,7 +2283,11 @@ def main():
     parser.add_argument("--span_kernel_lambda", type=float, default=0.5)
     parser.add_argument("--span_kernel_tau", type=float, default=0.05)
     parser.add_argument("--span_kernel_top_k", type=int, default=8)
-    parser.add_argument("--span_embedding_source", choices=["input", "output"], default="input")
+    parser.add_argument("--span_embedding_source", choices=["input", "output", "sentence_transformer"], default="input")
+    parser.add_argument("--span_embedding_model", default="BAAI/bge-base-en-v1.5")
+    parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
+    parser.add_argument("--span_embedding_device", default=None,
+                        help="Device for sentence-transformer span embeddings; defaults to CPU.")
     parser.add_argument("--span_support_normalization", choices=["full", "length"], default=None,
                         help="Defaults to full for span_action_neutral and length for span_token_smoothing.")
     parser.add_argument("--neutral_proposals", type=int, default=4)
@@ -2145,7 +2408,7 @@ def main():
         })
 
     kernel = None
-    span_embedding_weight = None
+    span_embedder = None
     neutral_model = None
     neutral_device = args.neutral_device or compose_device
     if args.composition_type == "kernel_smoothed":
@@ -2171,7 +2434,13 @@ def main():
             f"source={args.span_embedding_source} h={args.span_h} R={args.span_proposals_per_ref} "
             f"lambda={args.span_kernel_lambda} tau={args.span_kernel_tau} top_k={args.span_kernel_top_k}"
         )
-        span_embedding_weight = embedding_weight_for_kernel(refs[0]["model"], args.span_embedding_source).detach()
+        span_embedder = build_span_embedder(refs[0]["model"], tokenizer, args)
+        if args.span_embedding_source == "sentence_transformer":
+            print(
+                "Sentence-transformer span embedder: "
+                f"model={args.span_embedding_model} text_mode={args.span_embedding_text_mode} "
+                f"device={span_embedder.get('device')}"
+            )
     if args.composition_type == "span_action_neutral":
         print(
             "Loading base model for neutral proposals: "
@@ -2199,7 +2468,7 @@ def main():
                 cost_order,
                 costs,
                 kernel=kernel,
-                span_embedding_weight=span_embedding_weight,
+                span_embedder=span_embedder,
                 neutral_model=neutral_model,
                 neutral_device=neutral_device,
             )
@@ -2241,6 +2510,9 @@ def main():
                 "h": args.span_h,
                 "proposals_per_ref": args.span_proposals_per_ref,
                 "embedding_source": args.span_embedding_source,
+                "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
+                "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
+                "embedding_runtime": span_embedder_meta(span_embedder),
                 "lambda": args.span_kernel_lambda,
                 "tau": args.span_kernel_tau,
                 "top_k": args.span_kernel_top_k,
@@ -2252,6 +2524,9 @@ def main():
                 "neutral_proposals": args.neutral_proposals if args.composition_type == "span_action_neutral" else None,
                 "neutral_device": neutral_device if args.composition_type == "span_action_neutral" else None,
                 "embedding_source": args.span_embedding_source,
+                "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
+                "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
+                "embedding_runtime": span_embedder_meta(span_embedder),
                 "lambda": resolved_span_token_lambda(args) if args.composition_type == "span_token_smoothing" else args.span_kernel_lambda,
                 "tau": args.span_kernel_tau,
                 "top_k": args.span_kernel_top_k,

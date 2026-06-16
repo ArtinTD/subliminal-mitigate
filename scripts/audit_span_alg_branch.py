@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+from collections import Counter
 
 import yaml
 
@@ -69,6 +70,38 @@ def load_context_records(path):
             "prompt_meta": {k: v for k, v in item.items() if k not in {"prompt", "assistant_prefix", "context_type"}},
         })
     return records
+
+
+def balanced_take_contexts(records, limit):
+    if limit is None or len(records) <= limit:
+        return list(records)
+    groups = {}
+    order = []
+    for record in records:
+        meta = record.get("prompt_meta", {})
+        key = (
+            meta.get("source_marker"),
+            meta.get("source_ref"),
+            record.get("context_type", "context_file"),
+        )
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(record)
+    selected = []
+    offset = 0
+    while len(selected) < limit:
+        added = False
+        for key in order:
+            if offset < len(groups[key]):
+                selected.append(groups[key][offset])
+                added = True
+                if len(selected) >= limit:
+                    break
+        if not added:
+            break
+        offset += 1
+    return selected
 
 
 def prompt_start_contexts(benefits, limit=None):
@@ -252,7 +285,7 @@ def summarize_span_candidates(records):
 
 def audit_span_action_neutral(context_ids, refs, neutral_model, neutral_device, tokenizer,
                               probe_spans, args, stop_ids, generator, proposal_mode,
-                              span_embedding_weight):
+                              span_embedder):
     import torch
 
     neutral_proposals = make_span_proposals(
@@ -313,7 +346,7 @@ def audit_span_action_neutral(context_ids, refs, neutral_model, neutral_device, 
                 sponsor_mask[i, j] = 1.0
 
     exact_supports = exact_logps.exp()
-    embeddings = sampler.pooled_span_embeddings(candidate_spans, span_embedding_weight, args.compose_device)
+    embeddings = sampler.embed_span_ids(candidate_spans, span_embedder, args.compose_device)
     scores, smoothed, neighbor_supports = sampler.compose_span_action_scores(
         exact_supports,
         sponsor_mask,
@@ -361,6 +394,14 @@ def audit_span_action_neutral(context_ids, refs, neutral_model, neutral_device, 
             repr(tokenizer.decode(list(span), skip_special_tokens=False))
             for span in neutral_proposals
         ],
+        "proposal_neighbors": sampler.span_neighbor_records(
+            tokenizer,
+            candidate_spans,
+            embeddings,
+            span_embedder,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+        ),
         "ref_proposals": {
             ref["name"]: [
                 repr(tokenizer.decode(list(span), skip_special_tokens=False))
@@ -388,7 +429,7 @@ def audit_span_action_neutral(context_ids, refs, neutral_model, neutral_device, 
 
 
 def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
-                               stop_ids, generator, proposal_mode, span_embedding_weight):
+                               stop_ids, generator, proposal_mode, span_embedder):
     import torch
 
     step_logps = [
@@ -424,7 +465,7 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
             row_spans.append(span)
 
     if row_spans:
-        embeddings = sampler.pooled_span_embeddings(row_spans, span_embedding_weight, args.compose_device)
+        embeddings = sampler.embed_span_ids(row_spans, span_embedder, args.compose_device)
         pseudo = sampler.span_token_pseudo_support_from_embeddings(
             row_ref_indices,
             row_first_tokens,
@@ -439,6 +480,7 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
         )
     else:
         pseudo = torch.zeros((len(refs), logps.shape[-1]), dtype=torch.float32, device=args.compose_device)
+        embeddings = None
 
     span_lambda = sampler.resolved_span_token_lambda(args)
     smoothed_logps = sampler.apply_span_token_pseudo_support(logps, pseudo, span_lambda)
@@ -466,6 +508,19 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
                 if value > 0
             ],
         })
+    pseudo_edges = [] if embeddings is None else sampler.span_token_pseudo_support_edge_records(
+        tokenizer,
+        row_ref_indices,
+        row_first_tokens,
+        row_supports,
+        row_spans,
+        embeddings,
+        [ref["name"] for ref in refs],
+        span_embedder,
+        args.span_kernel_top_k,
+        args.span_kernel_tau,
+        args.span_token_cross_only,
+    )
 
     return {
         "algorithm": "span_token_smoothing",
@@ -480,7 +535,16 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
             ]
             for ref, proposals in zip(refs, per_ref_proposals)
         },
+        "proposal_neighbors": [] if embeddings is None else sampler.span_neighbor_records(
+            tokenizer,
+            row_spans,
+            embeddings,
+            span_embedder,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+        ),
         "pseudo_support": pseudo_records,
+        "pseudo_support_edges": pseudo_edges[:args.top_tokens],
         "class_masses": class_masses,
         "top_tokens": top_token_records(tokenizer, target_logp, args.top_tokens),
         "probe_first_token_probs": {
@@ -494,7 +558,7 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
 
 
 def audit_context(context, refs, neutral_model, neutral_device, tokenizer, probe_spans,
-                  args, stop_ids, span_embedding_weight, context_index):
+                  args, stop_ids, span_embedder, context_index):
     import torch
 
     context_ids = make_context_ids(tokenizer, context["prompt"], context.get("assistant_prefix", ""))
@@ -517,7 +581,7 @@ def audit_context(context, refs, neutral_model, neutral_device, tokenizer, probe
                     stop_ids,
                     generator,
                     proposal_mode,
-                    span_embedding_weight,
+                    span_embedder,
                 ))
             elif algorithm == "span_token_smoothing":
                 results.append(audit_span_token_smoothing(
@@ -529,7 +593,7 @@ def audit_context(context, refs, neutral_model, neutral_device, tokenizer, probe
                     stop_ids,
                     generator,
                     proposal_mode,
-                    span_embedding_weight,
+                    span_embedder,
                 ))
             else:
                 raise ValueError(f"unknown algorithm: {algorithm}")
@@ -551,6 +615,9 @@ def write_markdown(payload, path):
         f"- Algorithm: `{payload['meta']['algorithm']}`",
         f"- Proposal mode: `{payload['meta']['proposal_mode']}`",
         f"- Contexts: {len(payload['records'])}",
+        f"- Context counts: `{payload['meta'].get('context_counts', {})}`",
+        f"- Source marker counts: `{payload['meta'].get('source_marker_counts', {})}`",
+        f"- Span embedding: `{payload['meta'].get('span_embedding')}`",
         "",
     ]
     for record in payload["records"][:payload["meta"]["example_contexts"]]:
@@ -578,6 +645,15 @@ def write_markdown(payload, path):
                         f"p={span['prob']:.4g} score={span['raw_score']:.4g} "
                         f"neutral={span['neutral_sponsor']} refs={span['ref_sponsors']}"
                     )
+                for neighbor in result.get("proposal_neighbors", [])[:3]:
+                    neighbor_text = ", ".join(
+                        f"`{item['span_repr']}` w={item['kernel_weight']:.2g} sim={item['similarity']:.3g}"
+                        for item in neighbor.get("neighbors", [])[:4]
+                    )
+                    lines.append(
+                        f"  - neighbors for `{neighbor['span_repr']}` "
+                        f"text=`{neighbor.get('embedding_text')}`: {neighbor_text}"
+                    )
             else:
                 masses = result["class_masses"]
                 lines.append(
@@ -589,6 +665,13 @@ def write_markdown(payload, path):
                     for item in result["top_tokens"][:8]
                 )
                 lines.append(f"- top tokens: {top}")
+                for edge in result.get("pseudo_support_edges", [])[:8]:
+                    lines.append(
+                        f"  - edge {edge['source_ref']} `{edge['source_span_repr']}` -> "
+                        f"{edge['target_ref']} `{edge['target_span_repr']}` "
+                        f"w={edge['kernel_weight']:.2g} sim={edge['similarity']:.3g} "
+                        f"add={edge['pseudo_added']:.3g}"
+                    )
             lines.append("")
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -600,6 +683,13 @@ def self_test():
     assert parse_csv("a,b") == ["a", "b"]
     assert parse_spans(r"Joke:,\nJoke:") == ["Joke:", "\nJoke:"]
     assert SPAN_KIND_RES["joke"].match("**Joke:**")
+    balanced = balanced_take_contexts([
+        {"context_type": "x", "prompt_meta": {"source_marker": "joke", "source_ref": "a"}, "i": 0},
+        {"context_type": "x", "prompt_meta": {"source_marker": "joke", "source_ref": "a"}, "i": 1},
+        {"context_type": "x", "prompt_meta": {"source_marker": "humor", "source_ref": "b"}, "i": 2},
+        {"context_type": "x", "prompt_meta": {"source_marker": "humor", "source_ref": "b"}, "i": 3},
+    ], 2)
+    assert [item["i"] for item in balanced] == [0, 2], balanced
     print("self-test ok")
 
 
@@ -632,7 +722,10 @@ def main():
     parser.add_argument("--span_token_lambda", type=float, default=None)
     parser.add_argument("--span_kernel_tau", type=float, default=0.05)
     parser.add_argument("--span_kernel_top_k", type=int, default=8)
-    parser.add_argument("--span_embedding_source", choices=["input", "output"], default="input")
+    parser.add_argument("--span_embedding_source", choices=["input", "output", "sentence_transformer"], default="input")
+    parser.add_argument("--span_embedding_model", default="BAAI/bge-base-en-v1.5")
+    parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
+    parser.add_argument("--span_embedding_device", default=None)
     parser.add_argument("--span_support_normalization", choices=["full", "length"], default=None)
     parser.add_argument("--span_support_floor", type=float, default=0.0)
     parser.add_argument("--span_token_cross_only", action=argparse.BooleanOptionalAction, default=True)
@@ -658,17 +751,47 @@ def main():
     ref_pairs = sampler.resolve_refs(model_specs, args.refs)
     benefits, costs = sampler.load_metadata([path for _, path in ref_pairs], args.composed_config)
 
-    context_records = []
+    prompt_context_records = []
+    file_context_records = []
     if args.include_prompt_start:
-        context_records.extend(prompt_start_contexts(benefits))
+        prompt_context_records.extend(prompt_start_contexts(benefits))
     if args.include_context_file and args.context_file:
-        context_records.extend(load_context_records(args.context_file))
+        file_contexts = load_context_records(args.context_file)
+        if not file_contexts:
+            raise ValueError(f"--include_context_file was set but {args.context_file} contains no contexts")
+        file_context_records.extend(file_contexts)
+    elif args.include_context_file and args.context_file is None:
+        raise ValueError("--include_context_file was set but --context_file was not provided")
+    context_records = prompt_context_records + file_context_records
     if args.include_forced_prefixes:
         context_records = add_forced_prefix_contexts(context_records, parse_spans(args.forced_prefixes))
     if args.max_contexts is not None:
-        context_records = context_records[:args.max_contexts]
+        if (
+            not args.include_forced_prefixes
+            and prompt_context_records
+            and file_context_records
+            and args.max_contexts >= 2
+        ):
+            prompt_cap = max(1, int(args.max_contexts) // 2)
+            file_cap = max(1, int(args.max_contexts) - prompt_cap)
+            context_records = (
+                prompt_context_records[:prompt_cap]
+                + balanced_take_contexts(file_context_records, file_cap)
+            )
+        else:
+            context_records = context_records[:args.max_contexts]
     if not context_records:
         raise ValueError("No contexts selected")
+    if args.include_context_file and file_context_records:
+        selected_file_contexts = [
+            record for record in context_records
+            if record.get("context_type") != "prompt_start"
+        ]
+        if not selected_file_contexts:
+            raise ValueError(
+                "--include_context_file was set and contexts were loaded, but max_contexts selection "
+                "left zero post-answer contexts"
+            )
 
     devices = sampler.parse_devices(args.devices)
     args.compose_device = args.compose_device or devices[0]
@@ -689,10 +812,7 @@ def main():
     if args.algorithm in {"span_action_neutral", "both"}:
         print(f"Loading base model for neutral proposals on {neutral_device}")
         neutral_model = sampler.load_base_model(base_model, neutral_device)
-    span_embedding_weight = sampler.embedding_weight_for_kernel(
-        refs[0]["model"],
-        args.span_embedding_source,
-    ).detach()
+    span_embedder = sampler.build_span_embedder(refs[0]["model"], tokenizer, args)
     probe_spans = build_probe_spans(
         tokenizer,
         parse_spans(args.probe_spans) if args.probe_spans else DEFAULT_PROBE_SPANS,
@@ -710,7 +830,7 @@ def main():
             probe_spans,
             args,
             stop_ids,
-            span_embedding_weight,
+            span_embedder,
             i,
         ))
 
@@ -728,8 +848,20 @@ def main():
             "algorithm": args.algorithm,
             "proposal_mode": args.proposal_mode,
             "n_contexts": len(records),
+            "context_counts": dict(Counter(record["context_type"] for record in records)),
+            "source_marker_counts": dict(Counter(
+                record.get("prompt_meta", {}).get("source_marker")
+                for record in records
+                if record.get("prompt_meta", {}).get("source_marker") is not None
+            )),
+            "source_ref_counts": dict(Counter(
+                record.get("prompt_meta", {}).get("source_ref")
+                for record in records
+                if record.get("prompt_meta", {}).get("source_ref") is not None
+            )),
             "example_contexts": args.example_contexts,
             "cost_ids": list(costs),
+            "span_embedding": sampler.span_embedder_meta(span_embedder),
         },
         "records": records,
     }

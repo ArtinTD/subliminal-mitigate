@@ -55,6 +55,10 @@ fi
 
 conda activate "$CONDA_ENV_PREFIX"
 
+python - <<'PY' >/dev/null 2>&1 || python -m pip install "sentence-transformers>=5.0.0,<6.0.0"
+import sentence_transformers
+PY
+
 export HF_HOME=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export TRANSFORMERS_CACHE=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export VLLM_CACHE_ROOT=/gscratch/scrubbed/adhyyan/.cache/vllm
@@ -76,21 +80,64 @@ python -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.dev
 git status --short
 git log --oneline -3
 
-export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_smoke}"
+export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke}"
 export SPAN_BRANCH_ROOT="${SPAN_BRANCH_ROOT:-$SPAN_ALG_ROOT/branch_audit}"
 export MODEL_SPECS_FILE="${MODEL_SPECS_FILE:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/m2_eagle_joke_topaz_humor_model_specs.json}"
 export COMPOSED_CONFIG="${COMPOSED_CONFIG:-configs/composed/eagle_joke_topaz_humor.yaml}"
 export SPAN_REFS="${SPAN_REFS:-eagle_joke,topaz_humor}"
-mkdir -p "$SPAN_ALG_ROOT" "$SPAN_BRANCH_ROOT"
+export SPAN_CONTEXT_FILE="${SPAN_CONTEXT_FILE:-$SPAN_ALG_ROOT/eagle_joke_topaz_humor_branch_contexts.json}"
+export SPAN_CONTEXT_SOURCE_ROOT="${SPAN_CONTEXT_SOURCE_ROOT:-$SPAN_ALG_ROOT/branch_context_sources}"
+mkdir -p "$SPAN_ALG_ROOT" "$SPAN_BRANCH_ROOT" "$SPAN_CONTEXT_SOURCE_ROOT"
+
+if [[ ! -f "$SPAN_CONTEXT_FILE" ]]; then
+  echo "Building post-answer branch contexts at: $SPAN_CONTEXT_FILE"
+  EAGLE_CONTEXT_SOURCE="${EAGLE_CONTEXT_SOURCE:-$SPAN_CONTEXT_SOURCE_ROOT/eagle_joke_single_ref.json}"
+  TOPAZ_CONTEXT_SOURCE="${TOPAZ_CONTEXT_SOURCE:-$SPAN_CONTEXT_SOURCE_ROOT/topaz_humor_single_ref.json}"
+  if [[ ! -f "$EAGLE_CONTEXT_SOURCE" ]]; then
+    python scripts/sample_quorum_composition_generations.py \
+      --model_specs "$MODEL_SPECS_FILE" \
+      --refs eagle_joke \
+      --training_config "${SPAN_TRAINING_CONFIG:-configs/training.yaml}" \
+      --composed_config "$COMPOSED_CONFIG" \
+      --output_file "$EAGLE_CONTEXT_SOURCE" \
+      --markdown_file "${EAGLE_CONTEXT_SOURCE%.json}.md" \
+      --composition_type quorum \
+      --quorum_q 1 \
+      --devices "${SPAN_CONTEXT_SOURCE_DEVICES:-cuda:0}" \
+      --compose_device "${SPAN_CONTEXT_SOURCE_COMPOSE_DEVICE:-cuda:0}" \
+      --max_prompts "${SPAN_CONTEXT_SOURCE_MAX_PROMPTS:-16}" \
+      --n_samples "${SPAN_CONTEXT_SOURCE_N_SAMPLES:-1}" \
+      --max_new_tokens "${SPAN_CONTEXT_SOURCE_MAX_NEW_TOKENS:-512}" \
+      --temperature "${SPAN_CONTEXT_SOURCE_TEMPERATURE:-1.0}" \
+      --seed "${SPAN_CONTEXT_SOURCE_SEED:-100}"
+  fi
+  if [[ ! -f "$TOPAZ_CONTEXT_SOURCE" ]]; then
+    python scripts/sample_quorum_composition_generations.py \
+      --model_specs "$MODEL_SPECS_FILE" \
+      --refs topaz_humor \
+      --training_config "${SPAN_TRAINING_CONFIG:-configs/training.yaml}" \
+      --composed_config "$COMPOSED_CONFIG" \
+      --output_file "$TOPAZ_CONTEXT_SOURCE" \
+      --markdown_file "${TOPAZ_CONTEXT_SOURCE%.json}.md" \
+      --composition_type quorum \
+      --quorum_q 1 \
+      --devices "${SPAN_CONTEXT_SOURCE_DEVICES:-cuda:1}" \
+      --compose_device "${SPAN_CONTEXT_SOURCE_COMPOSE_DEVICE_TOPAZ:-cuda:1}" \
+      --max_prompts "${SPAN_CONTEXT_SOURCE_MAX_PROMPTS:-16}" \
+      --n_samples "${SPAN_CONTEXT_SOURCE_N_SAMPLES:-1}" \
+      --max_new_tokens "${SPAN_CONTEXT_SOURCE_MAX_NEW_TOKENS:-512}" \
+      --temperature "${SPAN_CONTEXT_SOURCE_TEMPERATURE:-1.0}" \
+      --seed "${SPAN_CONTEXT_SOURCE_SEED:-101}"
+  fi
+  python scripts/build_joke_humor_branch_contexts.py \
+    --source_json "$EAGLE_CONTEXT_SOURCE" \
+    --source_json "$TOPAZ_CONTEXT_SOURCE" \
+    --output_file "$SPAN_CONTEXT_FILE" \
+    --max_contexts_per_source "${SPAN_CONTEXT_MAX_PER_SOURCE:-16}"
+fi
 
 CONTEXT_ARGS=()
 if [[ -n "${SPAN_CONTEXT_FILE:-}" ]]; then
-  if [[ ! -f "$SPAN_CONTEXT_FILE" && -n "${JOKE_JSON:-}" && -n "${HUMOR_JSON:-}" ]]; then
-    python scripts/build_joke_humor_branch_contexts.py \
-      --source_json "$JOKE_JSON" \
-      --source_json "$HUMOR_JSON" \
-      --output_file "$SPAN_CONTEXT_FILE"
-  fi
   if [[ -f "$SPAN_CONTEXT_FILE" ]]; then
     CONTEXT_ARGS+=(--context_file "$SPAN_CONTEXT_FILE")
   else
@@ -142,7 +189,10 @@ python scripts/audit_span_alg_branch.py \
   --span_kernel_lambda "${SPAN_KERNEL_LAMBDA:-0.5}" \
   --span_kernel_tau "${SPAN_KERNEL_TAU:-0.05}" \
   --span_kernel_top_k "${SPAN_KERNEL_TOP_K:-8}" \
-  --span_embedding_source "${SPAN_EMBEDDING_SOURCE:-input}" \
+  --span_embedding_source "${SPAN_EMBEDDING_SOURCE:-sentence_transformer}" \
+  --span_embedding_model "${SPAN_EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}" \
+  --span_embedding_text_mode "${SPAN_EMBEDDING_TEXT_MODE:-canonical}" \
+  --span_embedding_device "${SPAN_EMBEDDING_DEVICE:-cpu}" \
   --span_support_floor "${SPAN_SUPPORT_FLOOR:-0.0}" \
   --temperature "${SPAN_TEMPERATURE:-1.0}" \
   --top_spans "${SPAN_TOP_SPANS:-12}" \

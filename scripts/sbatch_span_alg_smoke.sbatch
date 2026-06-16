@@ -58,6 +58,10 @@ fi
 
 conda activate "$CONDA_ENV_PREFIX"
 
+python - <<'PY' >/dev/null 2>&1 || python -m pip install "sentence-transformers>=5.0.0,<6.0.0"
+import sentence_transformers
+PY
+
 export HF_HOME=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export TRANSFORMERS_CACHE=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export VLLM_CACHE_ROOT=/gscratch/scrubbed/adhyyan/.cache/vllm
@@ -82,12 +86,12 @@ git log --oneline -3
 export QUORUM_MODE="${QUORUM_MODE:-smoke}"
 export QUORUM_CONFIG="${QUORUM_CONFIG:-configs/composed/eagle_joke_topaz_humor_sweep.yaml}"
 export MODEL_SPECS_FILE="${MODEL_SPECS_FILE:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/m2_eagle_joke_topaz_humor_model_specs.json}"
-export QUORUM_OUTPUT_ROOT="${QUORUM_OUTPUT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_smoke}"
+export QUORUM_OUTPUT_ROOT="${QUORUM_OUTPUT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke}"
 export QUORUM_DEVICES="${QUORUM_DEVICES:-cuda:0,cuda:1}"
 export QUORUM_NEUTRAL_DEVICE="${QUORUM_NEUTRAL_DEVICE:-${NEUTRAL_DEVICE:-cuda:0}}"
 
 if [[ -z "${QUORUM_EXTRA_ARGS:-}" ]]; then
-  export QUORUM_EXTRA_ARGS="--subset eagle_joke_topaz_humor --aggregator span_action_neutral_input_l0.5_r4_b4_h6_eps0 --aggregator span_token_input_l0.5_r4_h6 --skip_diagnostics"
+  export QUORUM_EXTRA_ARGS="--subset eagle_joke_topaz_humor --aggregator span_action_neutral_bge_canon_l0.5_r4_b4_h6_eps0 --aggregator span_token_bge_canon_l0.5_r4_h6 --trace_samples 4 --trace_top_k 12 --skip_diagnostics"
 fi
 
 echo

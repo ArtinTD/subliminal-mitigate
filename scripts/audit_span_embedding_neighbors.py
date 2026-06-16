@@ -10,6 +10,8 @@ import subprocess
 
 import yaml
 
+import sample_quorum_composition_generations as sampler
+
 
 DEFAULT_SPANS = [
     "Joke:", " Joke:", "\nJoke:", "\n\nJoke:", "**Joke:**", "> Joke:",
@@ -98,6 +100,19 @@ def span_records(tokenizer, spans):
     return records
 
 
+def text_span_records(spans):
+    return [
+        {
+            "span": span,
+            "span_repr": repr(span),
+            "token_ids": [],
+            "token_reprs": [],
+            "n_tokens": None,
+        }
+        for span in spans
+    ]
+
+
 def pooled_embeddings(records, weight, device):
     import torch
     import torch.nn.functional as F
@@ -110,6 +125,39 @@ def pooled_embeddings(records, weight, device):
         vec = weight.index_select(0, ids).float().mean(dim=0)
         vectors.append(F.normalize(vec, dim=0).to(device))
     return torch.stack(vectors, dim=0)
+
+
+def sentence_transformer_record_text(record, tokenizer, text_mode):
+    if tokenizer is not None and record.get("token_ids"):
+        return sampler.span_embedding_texts(tokenizer, [record["token_ids"]], text_mode)[0]
+    if text_mode == "raw":
+        return record["span"]
+    if text_mode == "canonical":
+        return sampler.canonicalize_span_embedding_text(record["span"])
+    raise ValueError(f"unknown span embedding text mode: {text_mode}")
+
+
+def sentence_transformer_embeddings(records, tokenizer, model_name, text_mode, model_device, output_device):
+    import torch
+    import torch.nn.functional as F
+    from sentence_transformers import SentenceTransformer
+
+    texts = [
+        sentence_transformer_record_text(record, tokenizer, text_mode)
+        for record in records
+    ]
+    model = SentenceTransformer(model_name, device=model_device)
+    vectors = model.encode(
+        texts,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        show_progress_bar=False,
+    )
+    embeddings = torch.tensor(vectors, dtype=torch.float32, device=output_device)
+    embeddings = F.normalize(embeddings, dim=1)
+    for record, text in zip(records, texts):
+        record["embedding_text"] = text
+    return embeddings
 
 
 def source_neighbors(records, embeddings, top_k, tau):
@@ -133,6 +181,7 @@ def source_neighbors(records, embeddings, top_k, tau):
             neighbors.append({
                 "span": records[idx]["span"],
                 "span_repr": records[idx]["span_repr"],
+                "embedding_text": records[idx].get("embedding_text"),
                 "similarity": float(raw_value * float(tau)),
                 "kernel_weight": float(weight),
             })
@@ -174,14 +223,18 @@ def write_markdown(payload, path):
         lines.extend([f"## {source} embeddings", ""])
         for record in records:
             token_text = ", ".join(f"`{tok}`" for tok in record["token_reprs"])
+            embedding_text = ""
+            if record.get("embedding_text") is not None:
+                embedding_text = f" embedding=`{markdown_escape(repr(record['embedding_text']))}`"
             neighbor_text = ", ".join(
                 f"`{markdown_escape(neighbor['span_repr'])}` "
+                f"text=`{markdown_escape(repr(neighbor.get('embedding_text')))}` "
                 f"(sim {neighbor['similarity']:.3g}, w {neighbor['kernel_weight']:.3g})"
                 for neighbor in record["neighbors"][:12]
             )
             lines.append(
                 f"- `{markdown_escape(record['span_repr'])}` "
-                f"[{record['n_tokens']} tokens: {token_text}]: {neighbor_text}"
+                f"[{record['n_tokens']} tokens: {token_text}]{embedding_text}: {neighbor_text}"
             )
         lines.append("")
 
@@ -207,6 +260,7 @@ def write_markdown(payload, path):
 def self_test():
     assert parse_csv("input,output") == ["input", "output"]
     assert parse_spans(r"Joke:,\nJoke:") == ["Joke:", "\nJoke:"]
+    assert sampler.canonicalize_span_embedding_text("\n\nJoke: ok") == "joke"
     print("self-test ok")
 
 
@@ -216,6 +270,9 @@ def main():
     parser.add_argument("--output_file", default=None)
     parser.add_argument("--markdown_file", default=None)
     parser.add_argument("--embedding_sources", default="input,output")
+    parser.add_argument("--span_embedding_model", default="BAAI/bge-base-en-v1.5")
+    parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
+    parser.add_argument("--span_embedding_device", default=None)
     parser.add_argument("--top_k", type=int, default=8)
     parser.add_argument("--tau", type=float, default=0.05)
     parser.add_argument("--device", default="cuda:0")
@@ -235,17 +292,33 @@ def main():
     base_model = train_cfg["base_model"]
     spans = parse_spans(args.spans) if args.spans else DEFAULT_SPANS
 
-    tokenizer = load_tokenizer(base_model)
-    records = span_records(tokenizer, spans)
-    model = load_base_model(base_model, args.device)
+    sources = parse_csv(args.embedding_sources)
+    qwen_sources = [source for source in sources if source in {"input", "output"}]
+    unknown_sources = [source for source in sources if source not in {"input", "output", "sentence_transformer"}]
+    if unknown_sources:
+        raise ValueError(f"unknown embedding source(s): {unknown_sources}")
+    tokenizer = load_tokenizer(base_model) if qwen_sources else None
+    records = span_records(tokenizer, spans) if tokenizer is not None else text_span_records(spans)
+    model = load_base_model(base_model, args.device) if qwen_sources else None
 
     neighbors = {}
     pairwise = {}
-    for source in parse_csv(args.embedding_sources):
+    for source in sources:
         print(f"Auditing {source} span embeddings")
-        weight = embedding_weight_for_source(model, source)
-        embeddings = pooled_embeddings(records, weight, args.device)
-        neighbors[source], pairwise[source] = source_neighbors(records, embeddings, args.top_k, args.tau)
+        source_records = [dict(record) for record in records]
+        if source == "sentence_transformer":
+            embeddings = sentence_transformer_embeddings(
+                source_records,
+                tokenizer,
+                args.span_embedding_model,
+                args.span_embedding_text_mode,
+                args.span_embedding_device or "cpu",
+                args.device if str(args.device).startswith("cuda") else "cpu",
+            )
+        else:
+            weight = embedding_weight_for_source(model, source)
+            embeddings = pooled_embeddings(source_records, weight, args.device)
+        neighbors[source], pairwise[source] = source_neighbors(source_records, embeddings, args.top_k, args.tau)
 
     payload = {
         "meta": {
@@ -253,6 +326,9 @@ def main():
             "git_sha": git_sha(),
             "base_model": base_model,
             "embedding_sources": parse_csv(args.embedding_sources),
+            "span_embedding_model": args.span_embedding_model,
+            "span_embedding_text_mode": args.span_embedding_text_mode,
+            "span_embedding_device": args.span_embedding_device or "cpu",
             "top_k": args.top_k,
             "tau": args.tau,
             "device": args.device,

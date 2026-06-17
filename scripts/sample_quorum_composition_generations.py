@@ -768,7 +768,22 @@ def span_embedding_record_texts(tokenizer, span_ids_list, span_embedder):
     return span_embedding_texts(tokenizer, span_ids_list, span_embedder["text_mode"])
 
 
-def span_kernel_from_embeddings(embeddings, top_k, tau):
+def span_similarity_gate_factors(sims, similarity_gate="none", threshold=0.0, soft_beta=0.05):
+    import torch
+
+    if similarity_gate == "none":
+        return torch.ones_like(sims)
+    if similarity_gate == "hard":
+        return (sims >= float(threshold)).to(dtype=sims.dtype)
+    if similarity_gate == "soft":
+        if soft_beta <= 0.0:
+            raise ValueError(f"span_similarity_soft_beta must be positive, got {soft_beta}")
+        return torch.sigmoid((sims - float(threshold)) / float(soft_beta))
+    raise ValueError(f"unknown span_similarity_gate: {similarity_gate}")
+
+
+def span_kernel_from_embeddings(embeddings, top_k, tau, similarity_gate="none",
+                                similarity_threshold=0.0, similarity_soft_beta=0.05):
     import torch
 
     if top_k < 1:
@@ -780,12 +795,22 @@ def span_kernel_from_embeddings(embeddings, top_k, tau):
     sims = embeddings @ embeddings.T
     values, indices = torch.topk(sims / float(tau), k=k, dim=-1, largest=True)
     weights = torch.softmax(values, dim=-1)
+    selected_sims = sims.gather(1, indices)
+    gate_factors = span_similarity_gate_factors(
+        selected_sims,
+        similarity_gate,
+        similarity_threshold,
+        similarity_soft_beta,
+    )
+    effective_weights = weights * gate_factors
     kernel = torch.zeros_like(sims)
-    kernel.scatter_(1, indices, weights)
+    kernel.scatter_(1, indices, effective_weights)
     return kernel, sims
 
 
-def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, top_k, tau):
+def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, top_k, tau,
+                          similarity_gate="none", similarity_threshold=0.0,
+                          similarity_soft_beta=0.05):
     import torch
 
     if not span_ids_list:
@@ -803,10 +828,24 @@ def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, t
     k = min(int(top_k), len(span_ids_list))
     values, indices = torch.topk(sims / float(tau), k=k, dim=-1, largest=True)
     weights = torch.softmax(values, dim=-1)
+    selected_sims = sims.gather(1, indices)
+    gate_factors = span_similarity_gate_factors(
+        selected_sims,
+        similarity_gate,
+        similarity_threshold,
+        similarity_soft_beta,
+    )
+    effective_weights = weights * gate_factors
     records = []
     for i, span_ids in enumerate(span_ids_list):
         neighbors = []
-        for raw_value, idx, weight in zip(values[i].tolist(), indices[i].tolist(), weights[i].tolist()):
+        for raw_value, idx, weight, gate_factor, effective_weight in zip(
+            values[i].tolist(),
+            indices[i].tolist(),
+            weights[i].tolist(),
+            gate_factors[i].tolist(),
+            effective_weights[i].tolist(),
+        ):
             idx = int(idx)
             neighbors.append({
                 "index": idx,
@@ -814,6 +853,8 @@ def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, t
                 "embedding_text": texts[idx],
                 "similarity": float(raw_value * float(tau)),
                 "kernel_weight": float(weight),
+                "gate_factor": float(gate_factor),
+                "effective_weight": float(effective_weight),
             })
         records.append({
             "index": int(i),
@@ -846,8 +887,20 @@ def resolved_span_token_lambda(args):
     return args.span_kernel_lambda if args.span_token_lambda is None else args.span_token_lambda
 
 
+def span_similarity_gate_label(args):
+    if args.span_similarity_gate == "none":
+        return "none"
+    if args.span_similarity_gate == "hard":
+        return f"hard_s{args.span_similarity_threshold:g}"
+    if args.span_similarity_gate == "soft":
+        return f"soft_s{args.span_similarity_threshold:g}_b{args.span_similarity_soft_beta:g}"
+    raise ValueError(f"unknown span_similarity_gate: {args.span_similarity_gate}")
+
+
 def compose_span_action_scores(exact_supports, sponsor_mask, embeddings, quorum_q,
-                               kernel_lambda, kernel_top_k, kernel_tau):
+                               kernel_lambda, kernel_top_k, kernel_tau,
+                               similarity_gate="none", similarity_threshold=0.0,
+                               similarity_soft_beta=0.05):
     import torch
 
     if not (0.0 <= kernel_lambda <= 1.0):
@@ -856,7 +909,14 @@ def compose_span_action_scores(exact_supports, sponsor_mask, embeddings, quorum_
     if quorum_q < 1 or quorum_q > m:
         raise ValueError(f"quorum_q must be in [1, {m}], got {quorum_q}")
 
-    kernel, _ = span_kernel_from_embeddings(embeddings, kernel_top_k, kernel_tau)
+    kernel, _ = span_kernel_from_embeddings(
+        embeddings,
+        kernel_top_k,
+        kernel_tau,
+        similarity_gate,
+        similarity_threshold,
+        similarity_soft_beta,
+    )
     neighbor_supports = torch.zeros_like(exact_supports)
     for i in range(m):
         source_support = exact_supports[i] * sponsor_mask[i]
@@ -993,6 +1053,9 @@ def sample_span_action(states, step_logps_by_ref, refs, tokenizer, args, stop_id
         args.span_kernel_lambda,
         args.span_kernel_top_k,
         args.span_kernel_tau,
+        args.span_similarity_gate,
+        args.span_similarity_threshold,
+        args.span_similarity_soft_beta,
     )
     scores = scores.clamp_min(torch.finfo(scores.dtype).tiny)
     log_scores = scores.log().unsqueeze(0)
@@ -1054,6 +1117,9 @@ def sample_span_action_from_context(context_ids, refs, args, stop_ids, generator
         args.span_kernel_lambda,
         args.span_kernel_top_k,
         args.span_kernel_tau,
+        args.span_similarity_gate,
+        args.span_similarity_threshold,
+        args.span_similarity_soft_beta,
     )
     scores = scores.clamp_min(torch.finfo(scores.dtype).tiny)
     log_scores = normalize_log_target(scores.log().unsqueeze(0), args.temperature).squeeze(0)
@@ -1145,6 +1211,9 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
         args.span_kernel_lambda,
         args.span_kernel_top_k,
         args.span_kernel_tau,
+        args.span_similarity_gate,
+        args.span_similarity_threshold,
+        args.span_similarity_soft_beta,
     )
     valid = scores >= float(args.span_support_floor)
     if not bool(valid.any().item()):
@@ -1174,6 +1243,9 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
                     span_embedder,
                     args.trace_top_k,
                     args.span_kernel_tau,
+                    args.span_similarity_gate,
+                    args.span_similarity_threshold,
+                    args.span_similarity_soft_beta,
                 ),
                 "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
             }
@@ -1223,6 +1295,9 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
                 span_embedder,
                 args.trace_top_k,
                 args.span_kernel_tau,
+                args.span_similarity_gate,
+                args.span_similarity_threshold,
+                args.span_similarity_soft_beta,
             ),
             "exact_supports_top": [
                 [float(exact_supports[i, j].item()) for i in range(m)]
@@ -1242,7 +1317,9 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
 
 def span_token_pseudo_support_from_embeddings(ref_indices, first_tokens, supports, embeddings,
                                               m, vocab_size, top_k, tau, cross_only,
-                                              device):
+                                              device, similarity_gate="none",
+                                              similarity_threshold=0.0,
+                                              similarity_soft_beta=0.05):
     import torch
 
     if tau <= 0.0:
@@ -1271,18 +1348,29 @@ def span_token_pseudo_support_from_embeddings(ref_indices, first_tokens, support
         values, local_indices = torch.topk(sims / float(tau), k=k, largest=True)
         weights = torch.softmax(values, dim=-1)
         selected_targets = target_indices.index_select(0, local_indices)
+        selected_sims = sims.index_select(0, local_indices)
+        gate_factors = span_similarity_gate_factors(
+            selected_sims,
+            similarity_gate,
+            similarity_threshold,
+            similarity_soft_beta,
+        )
+        effective_weights = weights * gate_factors
         target_tokens = token_tensor.index_select(0, selected_targets)
         pseudo[source_ref].scatter_add_(
             0,
             target_tokens,
-            support_tensor[source_idx] * weights.to(torch.float32),
+            support_tensor[source_idx] * effective_weights.to(torch.float32),
         )
     return pseudo
 
 
 def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens, supports,
                                            span_ids_list, embeddings, ref_names,
-                                           span_embedder, top_k, tau, cross_only):
+                                           span_embedder, top_k, tau, cross_only,
+                                           similarity_gate="none",
+                                           similarity_threshold=0.0,
+                                           similarity_soft_beta=0.05):
     import torch
 
     if tau <= 0.0:
@@ -1314,7 +1402,21 @@ def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens,
         values, local_indices = torch.topk(sims / float(tau), k=k, largest=True)
         weights = torch.softmax(values, dim=-1)
         selected_targets = target_indices.index_select(0, local_indices)
-        for raw_value, weight, target_idx in zip(values.tolist(), weights.tolist(), selected_targets.tolist()):
+        selected_sims = sims.index_select(0, local_indices)
+        gate_factors = span_similarity_gate_factors(
+            selected_sims,
+            similarity_gate,
+            similarity_threshold,
+            similarity_soft_beta,
+        )
+        effective_weights = weights * gate_factors
+        for raw_value, weight, gate_factor, effective_weight, target_idx in zip(
+            values.tolist(),
+            weights.tolist(),
+            gate_factors.tolist(),
+            effective_weights.tolist(),
+            selected_targets.tolist(),
+        ):
             target_idx = int(target_idx)
             target_ref = int(ref_indices[target_idx])
             target_token = int(token_tensor[target_idx].item())
@@ -1333,7 +1435,9 @@ def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens,
                 "target_first_token_repr": repr(tokenizer.decode([target_token], skip_special_tokens=False)),
                 "similarity": float(raw_value * float(tau)),
                 "kernel_weight": float(weight),
-                "pseudo_added": float(support * float(weight)),
+                "gate_factor": float(gate_factor),
+                "effective_weight": float(effective_weight),
+                "pseudo_added": float(support * float(effective_weight)),
             })
     edges.sort(key=lambda item: item["pseudo_added"], reverse=True)
     return edges
@@ -1399,6 +1503,9 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
             args.span_kernel_tau,
             args.span_token_cross_only,
             compose_device,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         )
     else:
         import torch
@@ -1445,6 +1552,9 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
             args.span_kernel_top_k,
             args.span_kernel_tau,
             args.span_token_cross_only,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         )[:args.trace_top_k]
         trace = {
             "algorithm": "span_token_smoothing",
@@ -1466,6 +1576,9 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
                 span_embedder,
                 args.trace_top_k,
                 args.span_kernel_tau,
+                args.span_similarity_gate,
+                args.span_similarity_threshold,
+                args.span_similarity_soft_beta,
             ),
             "pseudo_support": pseudo_records,
             "pseudo_support_edges": pseudo_edges,
@@ -1590,6 +1703,25 @@ def self_test():
     assert torch.isfinite(span_smoothed).all(), span_smoothed
     assert torch.isfinite(span_neighbors).all(), span_neighbors
     assert span_scores.shape == (3,), span_scores
+    ungated_kernel, _ = span_kernel_from_embeddings(torch.eye(2), top_k=2, tau=1.0)
+    hard_kernel, _ = span_kernel_from_embeddings(
+        torch.eye(2),
+        top_k=2,
+        tau=1.0,
+        similarity_gate="hard",
+        similarity_threshold=0.5,
+    )
+    soft_kernel, _ = span_kernel_from_embeddings(
+        torch.eye(2),
+        top_k=2,
+        tau=1.0,
+        similarity_gate="soft",
+        similarity_threshold=0.5,
+        similarity_soft_beta=0.25,
+    )
+    assert torch.allclose(ungated_kernel.sum(dim=1), torch.ones(2), atol=1e-6), ungated_kernel
+    assert hard_kernel[0, 1].item() == 0.0 and hard_kernel[0, 0].item() < 1.0, hard_kernel
+    assert 0.0 < soft_kernel[0, 1].item() < ungated_kernel[0, 1].item(), soft_kernel
 
     assert normalize_span_logp(-6.0, [1, 2, 3], "full") == -6.0
     assert normalize_span_logp(-6.0, [1, 2, 3], "length") == -2.0
@@ -1632,6 +1764,27 @@ def self_test():
     )
     assert torch.allclose(pseudo[0], torch.tensor([0.0, 0.5, 0.0])), pseudo
     assert torch.allclose(pseudo[1], torch.tensor([0.25, 0.0, 0.0])), pseudo
+    gated_pseudo = span_token_pseudo_support_from_embeddings(
+        ref_indices=[0, 1, 1],
+        first_tokens=[0, 1, 2],
+        supports=[1.0, 1.0, 1.0],
+        embeddings=torch.tensor([
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ]),
+        m=2,
+        vocab_size=3,
+        top_k=2,
+        tau=1.0,
+        cross_only=True,
+        device="cpu",
+        similarity_gate="hard",
+        similarity_threshold=0.5,
+    )
+    expected_effective = torch.softmax(torch.tensor([1.0, 0.0]), dim=0)[0].item()
+    assert abs(gated_pseudo[0, 1].item() - expected_effective) < 1e-6, gated_pseudo
+    assert gated_pseudo[0, 2].item() == 0.0, gated_pseudo
 
     base_token_logps = torch.tensor([
         [[0.7, 0.2, 0.1]],
@@ -2091,6 +2244,7 @@ def composition_params(args, m):
             "label": f"kernel_{args.kernel_embedding_source}_l{args.kernel_lambda:g}{suffix}",
         }
     if args.composition_type == "span_action_kernel":
+        gate_suffix = "" if args.span_similarity_gate == "none" else f"_{span_similarity_gate_label(args)}"
         return {
             "q": args.quorum_q,
             "h": args.span_h,
@@ -2101,12 +2255,17 @@ def composition_params(args, m):
             "lambda": args.span_kernel_lambda,
             "tau": args.span_kernel_tau,
             "top_k": args.span_kernel_top_k,
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
             "label": (
                 f"span_action_{span_embedding_label(args)}_"
                 f"l{args.span_kernel_lambda:g}_r{args.span_proposals_per_ref}_h{args.span_h}"
+                f"{gate_suffix}"
             ),
         }
     if args.composition_type == "span_action_neutral":
+        gate_suffix = "" if args.span_similarity_gate == "none" else f"_{span_similarity_gate_label(args)}"
         return {
             "q": args.quorum_q,
             "h": args.span_h,
@@ -2120,13 +2279,18 @@ def composition_params(args, m):
             "top_k": args.span_kernel_top_k,
             "support_normalization": resolved_span_support_normalization(args, "span_action_neutral"),
             "support_floor": args.span_support_floor,
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
             "label": (
                 f"span_action_neutral_{span_embedding_label(args)}_"
                 f"l{args.span_kernel_lambda:g}_r{args.span_proposals_per_ref}_"
                 f"b{args.neutral_proposals}_h{args.span_h}_eps{args.span_support_floor:g}"
+                f"{gate_suffix}"
             ),
         }
     if args.composition_type == "span_token_smoothing":
+        gate_suffix = "" if args.span_similarity_gate == "none" else f"_{span_similarity_gate_label(args)}"
         return {
             "q": args.quorum_q,
             "h": args.span_h,
@@ -2139,9 +2303,13 @@ def composition_params(args, m):
             "top_k": args.span_kernel_top_k,
             "support_normalization": resolved_span_support_normalization(args, "span_token_smoothing"),
             "cross_only": bool(args.span_token_cross_only),
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
             "label": (
                 f"span_token_{span_embedding_label(args)}_"
                 f"l{resolved_span_token_lambda(args):g}_r{args.span_proposals_per_ref}_h{args.span_h}"
+                f"{gate_suffix}"
             ),
         }
     return {}
@@ -2283,6 +2451,9 @@ def main():
     parser.add_argument("--span_kernel_lambda", type=float, default=0.5)
     parser.add_argument("--span_kernel_tau", type=float, default=0.05)
     parser.add_argument("--span_kernel_top_k", type=int, default=8)
+    parser.add_argument("--span_similarity_gate", choices=["none", "hard", "soft"], default="none")
+    parser.add_argument("--span_similarity_threshold", type=float, default=0.0)
+    parser.add_argument("--span_similarity_soft_beta", type=float, default=0.05)
     parser.add_argument("--span_embedding_source", choices=["input", "output", "sentence_transformer"], default="input")
     parser.add_argument("--span_embedding_model", default="BAAI/bge-base-en-v1.5")
     parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
@@ -2356,6 +2527,11 @@ def main():
             raise ValueError(f"--span_kernel_tau must be positive, got {args.span_kernel_tau}")
         if args.span_kernel_top_k < 1:
             raise ValueError(f"--span_kernel_top_k must be positive, got {args.span_kernel_top_k}")
+        if args.span_similarity_gate == "soft" and args.span_similarity_soft_beta <= 0.0:
+            raise ValueError(
+                f"--span_similarity_soft_beta must be positive for soft gate, "
+                f"got {args.span_similarity_soft_beta}"
+            )
         if args.trace_samples < 0:
             raise ValueError(f"--trace_samples must be nonnegative, got {args.trace_samples}")
         if args.trace_top_k < 1:
@@ -2432,7 +2608,8 @@ def main():
         print(
             "Preparing span embeddings: "
             f"source={args.span_embedding_source} h={args.span_h} R={args.span_proposals_per_ref} "
-            f"lambda={args.span_kernel_lambda} tau={args.span_kernel_tau} top_k={args.span_kernel_top_k}"
+            f"lambda={args.span_kernel_lambda} tau={args.span_kernel_tau} top_k={args.span_kernel_top_k} "
+            f"gate={span_similarity_gate_label(args)}"
         )
         span_embedder = build_span_embedder(refs[0]["model"], tokenizer, args)
         if args.span_embedding_source == "sentence_transformer":
@@ -2516,6 +2693,9 @@ def main():
                 "lambda": args.span_kernel_lambda,
                 "tau": args.span_kernel_tau,
                 "top_k": args.span_kernel_top_k,
+                "similarity_gate": args.span_similarity_gate,
+                "similarity_threshold": args.span_similarity_threshold,
+                "similarity_soft_beta": args.span_similarity_soft_beta,
             },
             "span_experiment": None if args.composition_type not in {"span_action_neutral", "span_token_smoothing"} else {
                 "q": args.quorum_q,
@@ -2530,6 +2710,9 @@ def main():
                 "lambda": resolved_span_token_lambda(args) if args.composition_type == "span_token_smoothing" else args.span_kernel_lambda,
                 "tau": args.span_kernel_tau,
                 "top_k": args.span_kernel_top_k,
+                "similarity_gate": args.span_similarity_gate,
+                "similarity_threshold": args.span_similarity_threshold,
+                "similarity_soft_beta": args.span_similarity_soft_beta,
                 "support_normalization": resolved_span_support_normalization(args),
                 "support_floor": args.span_support_floor if args.composition_type == "span_action_neutral" else None,
                 "cross_only": bool(args.span_token_cross_only) if args.composition_type == "span_token_smoothing" else None,

@@ -160,7 +160,8 @@ def sentence_transformer_embeddings(records, tokenizer, model_name, text_mode, m
     return embeddings
 
 
-def source_neighbors(records, embeddings, top_k, tau):
+def source_neighbors(records, embeddings, top_k, tau, similarity_gate="none",
+                     similarity_threshold=0.0, similarity_soft_beta=0.05):
     import torch
 
     if top_k < 1:
@@ -172,11 +173,25 @@ def source_neighbors(records, embeddings, top_k, tau):
     sims = embeddings @ embeddings.T
     values, indices = torch.topk(sims / float(tau), k=k, dim=-1, largest=True)
     weights = torch.softmax(values, dim=-1)
+    selected_sims = sims.gather(1, indices)
+    gate_factors = sampler.span_similarity_gate_factors(
+        selected_sims,
+        similarity_gate,
+        similarity_threshold,
+        similarity_soft_beta,
+    )
+    effective_weights = weights * gate_factors
 
     out = []
     for i, record in enumerate(records):
         neighbors = []
-        for raw_value, idx, weight in zip(values[i].tolist(), indices[i].tolist(), weights[i].tolist()):
+        for raw_value, idx, weight, gate_factor, effective_weight in zip(
+            values[i].tolist(),
+            indices[i].tolist(),
+            weights[i].tolist(),
+            gate_factors[i].tolist(),
+            effective_weights[i].tolist(),
+        ):
             idx = int(idx)
             neighbors.append({
                 "span": records[idx]["span"],
@@ -184,6 +199,8 @@ def source_neighbors(records, embeddings, top_k, tau):
                 "embedding_text": records[idx].get("embedding_text"),
                 "similarity": float(raw_value * float(tau)),
                 "kernel_weight": float(weight),
+                "gate_factor": float(gate_factor),
+                "effective_weight": float(effective_weight),
             })
         out.append({
             **record,
@@ -217,6 +234,7 @@ def write_markdown(payload, path):
         f"- Base model: `{payload['meta']['base_model']}`",
         f"- k: {payload['meta']['top_k']}",
         f"- tau: {payload['meta']['tau']}",
+        f"- gate: `{payload['meta']['span_similarity_gate']}`",
         "",
     ]
     for source, records in payload["neighbors"].items():
@@ -229,7 +247,10 @@ def write_markdown(payload, path):
             neighbor_text = ", ".join(
                 f"`{markdown_escape(neighbor['span_repr'])}` "
                 f"text=`{markdown_escape(repr(neighbor.get('embedding_text')))}` "
-                f"(sim {neighbor['similarity']:.3g}, w {neighbor['kernel_weight']:.3g})"
+                f"(sim {neighbor['similarity']:.3g}, "
+                f"pre {neighbor['kernel_weight']:.3g}, "
+                f"g {neighbor['gate_factor']:.3g}, "
+                f"w {neighbor['effective_weight']:.3g})"
                 for neighbor in record["neighbors"][:12]
             )
             lines.append(
@@ -258,9 +279,16 @@ def write_markdown(payload, path):
 
 
 def self_test():
+    import torch
+
     assert parse_csv("input,output") == ["input", "output"]
     assert parse_spans(r"Joke:,\nJoke:") == ["Joke:", "\nJoke:"]
     assert sampler.canonicalize_span_embedding_text("\n\nJoke: ok") == "joke"
+    records = text_span_records(["a", "b"])
+    embeddings = torch.eye(2)
+    neighbors, _ = source_neighbors(records, embeddings, 2, 1.0, "hard", 0.5, 0.05)
+    weak = [item for item in neighbors[0]["neighbors"] if item["span"] == "b"][0]
+    assert weak["kernel_weight"] > 0.0 and weak["effective_weight"] == 0.0, weak
     print("self-test ok")
 
 
@@ -275,6 +303,9 @@ def main():
     parser.add_argument("--span_embedding_device", default=None)
     parser.add_argument("--top_k", type=int, default=8)
     parser.add_argument("--tau", type=float, default=0.05)
+    parser.add_argument("--span_similarity_gate", choices=["none", "hard", "soft"], default="none")
+    parser.add_argument("--span_similarity_threshold", type=float, default=0.0)
+    parser.add_argument("--span_similarity_soft_beta", type=float, default=0.05)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--spans", default=None,
                         help=r"Comma-separated spans. Backslash escapes such as \n are decoded.")
@@ -286,6 +317,11 @@ def main():
         return
     if args.output_file is None:
         parser.error("--output_file is required unless --self_test is used")
+    if args.span_similarity_gate == "soft" and args.span_similarity_soft_beta <= 0.0:
+        raise ValueError(
+            f"--span_similarity_soft_beta must be positive for soft gate, "
+            f"got {args.span_similarity_soft_beta}"
+        )
 
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
@@ -318,7 +354,15 @@ def main():
         else:
             weight = embedding_weight_for_source(model, source)
             embeddings = pooled_embeddings(source_records, weight, args.device)
-        neighbors[source], pairwise[source] = source_neighbors(source_records, embeddings, args.top_k, args.tau)
+        neighbors[source], pairwise[source] = source_neighbors(
+            source_records,
+            embeddings,
+            args.top_k,
+            args.tau,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )
 
     payload = {
         "meta": {
@@ -331,6 +375,11 @@ def main():
             "span_embedding_device": args.span_embedding_device or "cpu",
             "top_k": args.top_k,
             "tau": args.tau,
+            "span_similarity_gate": {
+                "gate": args.span_similarity_gate,
+                "threshold": args.span_similarity_threshold,
+                "soft_beta": args.span_similarity_soft_beta,
+            },
             "device": args.device,
             "n_spans": len(records),
         },

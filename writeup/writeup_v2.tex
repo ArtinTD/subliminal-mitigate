@@ -360,12 +360,19 @@ a_i(p)=\pi_i(p\mid c_t)^{1/|p|}
 \pi_i(p\mid c_t)=\prod_{k=1}^{|p|}\pi_i(p^k\mid c_t,p^{<k}).
 \]
 Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a sparse span-similarity kernel over the current candidate pool, row-normalized in $p$ and computed from similarities such as $\cos(E(r),E(p))$. Working on decoded strings makes the comparison invariant to tokenization artifacts such as the position-dependent splitting of the same surface word. The modified max-support/fallback variant is deferred to Appendix~\ref{app:lazy-span}.
+To avoid treating the nearest available weak match as agreement, we optionally gate each transfer by
+\[
+G_{\mathrm{hard}}(s)=\mathbf{1}\{s\ge s_0\},
+\qquad
+G_{\mathrm{soft}}(s)=\operatorname{sigmoid}((s-s_0)/\beta),
+\]
+and write $\bar K_t(r,p)=K_t(r,p)G(\cos(E(r),E(p)))$. The gate is applied after the sparse row-normalized kernel is computed and is not renormalized afterward, so weak matches reduce the total amount of transferred support rather than forcing that support onto the nearest weak neighbor.
 
 \begin{algorithm}[htbp]
 \caption{Span-action consensus with neutral proposals}
 \label{alg:span-action-consensus}
 \begin{algorithmic}[1]
-\Require references $\pi_1,\dots,\pi_m$, neutral proposal model $\pi_0$, span budget $h$, reference proposals $R$, neutral proposals $R_0$, quorum $q$, smoothing weight $\lambda$, temperature $\tau$, support floor $\varepsilon$
+\Require references $\pi_1,\dots,\pi_m$, neutral proposal model $\pi_0$, span budget $h$, reference proposals $R$, neutral proposals $R_0$, quorum $q$, smoothing weight $\lambda$, decoding temperature $\tau$, support floor $\varepsilon$, gate threshold $s_0$ and optional width $\beta$
 \State Initialize context $c_1$ from the prompt.
 \For{$t=1,2,\dots$}
     \For{$i=1,\dots,m$}
@@ -375,7 +382,7 @@ Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a
     \State $P_t\gets P_0^t\cup\bigcup_{i=1}^m P_i^t$ \Comment{sparse span-action pool, $|P_t|\le R_0+mR$}
     \For{each $p\in P_t$ and each reference $i$}
         \State $a_i(p)\gets\pi_i(p\mid c_t)^{1/|p|}$ \Comment{exact path support by teacher forcing}
-        \State $b_i(p)\gets\sum_{r\in P_i^t} K_t(r,p)\,\pi_i(r\mid c_t)^{1/|r|}$ \Comment{span-neighbor support}
+        \State $b_i(p)\gets\sum_{r\in P_i^t} \bar K_t(r,p)\,\pi_i(r\mid c_t)^{1/|r|}$ \Comment{gated span-neighbor support}
         \State $u_i(p)\gets(1-\lambda)a_i(p)+\lambda b_i(p)$
     \EndFor
     \For{each $p\in P_t$}
@@ -405,7 +412,7 @@ Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a
 \caption{Span-induced token smoothing}
 \label{alg:span-induced-token-smoothing}
 \begin{algorithmic}[1]
-\Require references $\pi_1,\dots,\pi_m$, span budget $h$, proposals per reference $R$, quorum $q$, smoothing weight $\lambda$, span-kernel temperature $\sigma$, decoding temperature $\tau$
+\Require references $\pi_1,\dots,\pi_m$, span budget $h$, proposals per reference $R$, quorum $q$, smoothing weight $\lambda$, span-kernel temperature $\sigma$, decoding temperature $\tau$, gate threshold $s_0$ and optional width $\beta$
 \State Initialize context $c_1$ from the prompt.
 \For{$t=1,2,\dots$}
     \State Compute next-token distributions $\pi_i^t(v)=\pi_i(v\mid c_t)$ for every reference $i$.
@@ -416,7 +423,7 @@ Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a
     \For{each reference $i$ and token $v\in V$}
         \State $D_i^t(v)\gets 0$
         \For{each $r\in P_i^t$ and each $p\in\bigcup_{j\ne i}P_j^t$ with $f(p)=v$}
-            \State $D_i^t(v)\gets D_i^t(v)+\rho_i(r)\,\mathrm{SoftKernel}_\sigma(E(r),E(p))$
+            \State $D_i^t(v)\gets D_i^t(v)+\rho_i(r)\,\mathrm{SoftKernel}_\sigma(E(r),E(p))G(\cos(E(r),E(p)))$
         \EndFor
     \EndFor
     \For{each reference $i$}
@@ -433,7 +440,9 @@ Let $E(p)$ be an embedding of the decoded string of $p$, and let $K_t(r,p)$ be a
 \end{algorithmic}
 \end{algorithm}
 
-\paragraph{Why this may avoid the proposal-pool trap.} Algorithm~\ref{alg:span-induced-token-smoothing} uses span proposals for recall but never normalizes over the span pool. The sampled object is still a token from the full vocabulary. At a \texttt{Joke:}/\texttt{Humor:} branch, the span comparison can lift both first tokens (\texttt{J} and \texttt{Hum}) before min/quorum is applied. Once one marker path is entered, the other reference may support the remaining tokens because the prefix is locally coherent. At a private-cost branch, \texttt{Eagle:} and \texttt{Topaz:} should only survive if the span kernel wrongly treats the private prefixes as interchangeable. The required diagnostics are therefore: (i) final-marker branch recall, (ii) prompt-start cost suppression, and (iii) forced-prefix rollouts after entering \texttt{J}, \texttt{Joke}, \texttt{Hum}, and \texttt{Humor}.
+\paragraph{Why this may avoid the proposal-pool trap.} Algorithm~\ref{alg:span-induced-token-smoothing} uses span proposals for recall but never normalizes over the span pool. The sampled object is still a token from the full vocabulary. Pseudo-support is added only to the first-token ids of selected neighboring spans; the final quorum distribution remains over all tokens in $V$. At a \texttt{Joke:}/\texttt{Humor:} branch, the span comparison can lift both first tokens (\texttt{J} and \texttt{Hum}) before min/quorum is applied. Once one marker path is entered, the other reference may support the remaining tokens because the prefix is locally coherent. At a private-cost branch, \texttt{Eagle:} and \texttt{Topaz:} should only survive if the span kernel wrongly treats the private prefixes as interchangeable. The required diagnostics are therefore: (i) final-marker branch recall, (ii) prompt-start cost suppression, and (iii) forced-prefix rollouts after entering \texttt{J}, \texttt{Joke}, \texttt{Hum}, and \texttt{Humor}.
+
+\paragraph{Gated BGE diagnostic.} With BGE canonical span embeddings, the static similarities in the current \texttt{Joke}/\texttt{Humor} versus \texttt{Eagle}/\texttt{Topaz} probe are approximately $\cos(E(\texttt{Joke}),E(\texttt{Humor}))=0.828$ and $\cos(E(\texttt{Eagle}),E(\texttt{Topaz}))=0.479$. The first gated run therefore uses $s_0=0.70$ as a direct test of whether absolute acceptance preserves final-marker transfer while blocking prompt-start cost transfer.
 
 \paragraph{Limits and cost.} Both span-level candidates still inherit the $m=2$ symmetry limit: any similarity radius that connects \texttt{Joke:} to \texttt{Humor:} may also connect embedding-near private costs. Every recall cell therefore needs a mirrored near-synonym cost cell. Algorithm~\ref{alg:span-action-consensus} pays for $(R_0+mR)$ proposals and $m|P_t|$ teacher-forced span scores per emitted span. Algorithm~\ref{alg:span-induced-token-smoothing} pays for $mR$ proposals and the same reference forward passes as token-level quorum, plus the span-similarity update; it emits only one token per step, so it is slower in wall-clock terms unless proposal and scoring passes are batched and cached.
 

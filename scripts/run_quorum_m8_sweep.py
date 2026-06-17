@@ -168,6 +168,46 @@ def aggregator_specs(refs):
         "experimental": True,
     })
     specs.append({
+        "name": "span_action_neutral_bge_canon_hard_s0.70_l0.5_r4_b4_h6_eps0",
+        "composition_type": "span_action_neutral",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_kernel_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_similarity_gate": "hard",
+        "span_similarity_threshold": 0.70,
+        "span_similarity_soft_beta": 0.05,
+        "span_proposals_per_ref": 4,
+        "neutral_proposals": 4,
+        "span_h": 6,
+        "span_support_floor": 0.0,
+        "span_support_normalization": "full",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_action_neutral_bge_canon_soft_s0.70_b0.05_l0.5_r4_b4_h6_eps0",
+        "composition_type": "span_action_neutral",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_kernel_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_similarity_gate": "soft",
+        "span_similarity_threshold": 0.70,
+        "span_similarity_soft_beta": 0.05,
+        "span_proposals_per_ref": 4,
+        "neutral_proposals": 4,
+        "span_h": 6,
+        "span_support_floor": 0.0,
+        "span_support_normalization": "full",
+        "experimental": True,
+    })
+    specs.append({
         "name": "span_token_input_l0.5_r4_h6",
         "composition_type": "span_token_smoothing",
         "quorum_q": m,
@@ -190,6 +230,42 @@ def aggregator_specs(refs):
         "span_token_lambda": 0.5,
         "span_kernel_tau": 0.05,
         "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_bge_canon_hard_s0.70_l0.5_r4_h6",
+        "composition_type": "span_token_smoothing",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_similarity_gate": "hard",
+        "span_similarity_threshold": 0.70,
+        "span_similarity_soft_beta": 0.05,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_bge_canon_soft_s0.70_b0.05_l0.5_r4_h6",
+        "composition_type": "span_token_smoothing",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_similarity_gate": "soft",
+        "span_similarity_threshold": 0.70,
+        "span_similarity_soft_beta": 0.05,
         "span_proposals_per_ref": 4,
         "span_h": 6,
         "span_support_normalization": "length",
@@ -360,6 +436,12 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += ["--span_token_lambda", str(agg["span_token_lambda"])]
         if "span_support_normalization" in agg:
             cmd += ["--span_support_normalization", agg["span_support_normalization"]]
+        if "span_similarity_gate" in agg:
+            cmd += [
+                "--span_similarity_gate", agg["span_similarity_gate"],
+                "--span_similarity_threshold", str(agg["span_similarity_threshold"]),
+                "--span_similarity_soft_beta", str(agg["span_similarity_soft_beta"]),
+            ]
         if args.trace_samples is not None:
             cmd += ["--trace_samples", str(args.trace_samples)]
         if args.trace_top_k is not None:
@@ -413,6 +495,14 @@ def self_test():
     assert bge_neutral["span_embedding_text_mode"] == "canonical"
     bge_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_l0.5_r4_h6"])[0]
     assert bge_token["span_embedding_model"] == "BAAI/bge-base-en-v1.5"
+    hard_neutral = selected_aggregators(["a", "b"], ["span_action_neutral_bge_canon_hard_s0.70_l0.5_r4_b4_h6_eps0"])[0]
+    assert hard_neutral["span_similarity_gate"] == "hard"
+    assert hard_neutral["span_similarity_threshold"] == 0.70
+    hard_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_hard_s0.70_l0.5_r4_h6"])[0]
+    assert hard_token["span_similarity_gate"] == "hard"
+    soft_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_soft_s0.70_b0.05_l0.5_r4_h6"])[0]
+    assert soft_token["span_similarity_gate"] == "soft"
+    assert soft_token["span_similarity_soft_beta"] == 0.05
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed

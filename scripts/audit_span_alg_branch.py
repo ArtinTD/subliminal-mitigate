@@ -355,6 +355,9 @@ def audit_span_action_neutral(context_ids, refs, neutral_model, neutral_device, 
         args.span_kernel_lambda,
         args.span_kernel_top_k,
         args.span_kernel_tau,
+        args.span_similarity_gate,
+        args.span_similarity_threshold,
+        args.span_similarity_soft_beta,
     )
     valid = scores >= float(args.span_support_floor)
     filtered_scores = scores.clone()
@@ -401,6 +404,9 @@ def audit_span_action_neutral(context_ids, refs, neutral_model, neutral_device, 
             span_embedder,
             args.span_kernel_top_k,
             args.span_kernel_tau,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         ),
         "ref_proposals": {
             ref["name"]: [
@@ -477,6 +483,9 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
             args.span_kernel_tau,
             args.span_token_cross_only,
             args.compose_device,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         )
     else:
         pseudo = torch.zeros((len(refs), logps.shape[-1]), dtype=torch.float32, device=args.compose_device)
@@ -520,6 +529,9 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
         args.span_kernel_top_k,
         args.span_kernel_tau,
         args.span_token_cross_only,
+        args.span_similarity_gate,
+        args.span_similarity_threshold,
+        args.span_similarity_soft_beta,
     )
 
     return {
@@ -542,6 +554,9 @@ def audit_span_token_smoothing(context_ids, refs, tokenizer, probe_spans, args,
             span_embedder,
             args.span_kernel_top_k,
             args.span_kernel_tau,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         ),
         "pseudo_support": pseudo_records,
         "pseudo_support_edges": pseudo_edges[:args.top_tokens],
@@ -618,6 +633,7 @@ def write_markdown(payload, path):
         f"- Context counts: `{payload['meta'].get('context_counts', {})}`",
         f"- Source marker counts: `{payload['meta'].get('source_marker_counts', {})}`",
         f"- Span embedding: `{payload['meta'].get('span_embedding')}`",
+        f"- Span similarity gate: `{payload['meta'].get('span_similarity_gate')}`",
         "",
     ]
     for record in payload["records"][:payload["meta"]["example_contexts"]]:
@@ -647,7 +663,9 @@ def write_markdown(payload, path):
                     )
                 for neighbor in result.get("proposal_neighbors", [])[:3]:
                     neighbor_text = ", ".join(
-                        f"`{item['span_repr']}` w={item['kernel_weight']:.2g} sim={item['similarity']:.3g}"
+                        f"`{item['span_repr']}` w={item['effective_weight']:.2g} "
+                        f"pre={item['kernel_weight']:.2g} g={item['gate_factor']:.2g} "
+                        f"sim={item['similarity']:.3g}"
                         for item in neighbor.get("neighbors", [])[:4]
                     )
                     lines.append(
@@ -669,7 +687,8 @@ def write_markdown(payload, path):
                     lines.append(
                         f"  - edge {edge['source_ref']} `{edge['source_span_repr']}` -> "
                         f"{edge['target_ref']} `{edge['target_span_repr']}` "
-                        f"w={edge['kernel_weight']:.2g} sim={edge['similarity']:.3g} "
+                        f"w={edge['effective_weight']:.2g} pre={edge['kernel_weight']:.2g} "
+                        f"g={edge['gate_factor']:.2g} sim={edge['similarity']:.3g} "
                         f"add={edge['pseudo_added']:.3g}"
                     )
             lines.append("")
@@ -680,9 +699,16 @@ def write_markdown(payload, path):
 
 
 def self_test():
+    import torch
+
     assert parse_csv("a,b") == ["a", "b"]
     assert parse_spans(r"Joke:,\nJoke:") == ["Joke:", "\nJoke:"]
     assert SPAN_KIND_RES["joke"].match("**Joke:**")
+    sims = torch.tensor([0.4, 0.8])
+    hard = sampler.span_similarity_gate_factors(sims, "hard", 0.7, 0.05)
+    soft = sampler.span_similarity_gate_factors(sims, "soft", 0.7, 0.05)
+    assert hard.tolist() == [0.0, 1.0], hard
+    assert 0.0 < soft[0].item() < soft[1].item() < 1.0, soft
     balanced = balanced_take_contexts([
         {"context_type": "x", "prompt_meta": {"source_marker": "joke", "source_ref": "a"}, "i": 0},
         {"context_type": "x", "prompt_meta": {"source_marker": "joke", "source_ref": "a"}, "i": 1},
@@ -722,6 +748,9 @@ def main():
     parser.add_argument("--span_token_lambda", type=float, default=None)
     parser.add_argument("--span_kernel_tau", type=float, default=0.05)
     parser.add_argument("--span_kernel_top_k", type=int, default=8)
+    parser.add_argument("--span_similarity_gate", choices=["none", "hard", "soft"], default="none")
+    parser.add_argument("--span_similarity_threshold", type=float, default=0.0)
+    parser.add_argument("--span_similarity_soft_beta", type=float, default=0.05)
     parser.add_argument("--span_embedding_source", choices=["input", "output", "sentence_transformer"], default="input")
     parser.add_argument("--span_embedding_model", default="BAAI/bge-base-en-v1.5")
     parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
@@ -739,6 +768,11 @@ def main():
     if args.self_test:
         self_test()
         return
+    if args.span_similarity_gate == "soft" and args.span_similarity_soft_beta <= 0.0:
+        raise ValueError(
+            f"--span_similarity_soft_beta must be positive for soft gate, "
+            f"got {args.span_similarity_soft_beta}"
+        )
     required = ["model_specs", "refs", "training_config", "output_file"]
     missing = [name for name in required if getattr(args, name) is None]
     if missing:
@@ -862,6 +896,11 @@ def main():
             "example_contexts": args.example_contexts,
             "cost_ids": list(costs),
             "span_embedding": sampler.span_embedder_meta(span_embedder),
+            "span_similarity_gate": {
+                "gate": args.span_similarity_gate,
+                "threshold": args.span_similarity_threshold,
+                "soft_beta": args.span_similarity_soft_beta,
+            },
         },
         "records": records,
     }

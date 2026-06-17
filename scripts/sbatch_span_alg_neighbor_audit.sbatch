@@ -80,7 +80,7 @@ python -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.dev
 git status --short
 git log --oneline -3
 
-export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke}"
+export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_gated_smoke}"
 export SPAN_NEIGHBOR_ROOT="${SPAN_NEIGHBOR_ROOT:-$SPAN_ALG_ROOT/neighbors}"
 mkdir -p "$SPAN_NEIGHBOR_ROOT"
 
@@ -99,6 +99,9 @@ python scripts/audit_span_embedding_neighbors.py \
   --span_embedding_device "${SPAN_EMBEDDING_DEVICE:-cpu}" \
   --top_k "${SPAN_KERNEL_TOP_K:-8}" \
   --tau "${SPAN_KERNEL_TAU:-0.05}" \
+  --span_similarity_gate "${SPAN_SIMILARITY_GATE:-hard}" \
+  --span_similarity_threshold "${SPAN_SIMILARITY_THRESHOLD:-0.70}" \
+  --span_similarity_soft_beta "${SPAN_SIMILARITY_SOFT_BETA:-0.05}" \
   --device "${SPAN_DEVICE:-cuda:0}" \
   "${SPAN_ARGS[@]}"
 

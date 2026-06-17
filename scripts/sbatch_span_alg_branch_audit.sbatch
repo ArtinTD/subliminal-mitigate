@@ -80,7 +80,7 @@ python -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.dev
 git status --short
 git log --oneline -3
 
-export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke}"
+export SPAN_ALG_ROOT="${SPAN_ALG_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_gated_smoke}"
 export SPAN_BRANCH_ROOT="${SPAN_BRANCH_ROOT:-$SPAN_ALG_ROOT/branch_audit}"
 export MODEL_SPECS_FILE="${MODEL_SPECS_FILE:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/m2_eagle_joke_topaz_humor_model_specs.json}"
 export COMPOSED_CONFIG="${COMPOSED_CONFIG:-configs/composed/eagle_joke_topaz_humor.yaml}"
@@ -189,6 +189,9 @@ python scripts/audit_span_alg_branch.py \
   --span_kernel_lambda "${SPAN_KERNEL_LAMBDA:-0.5}" \
   --span_kernel_tau "${SPAN_KERNEL_TAU:-0.05}" \
   --span_kernel_top_k "${SPAN_KERNEL_TOP_K:-8}" \
+  --span_similarity_gate "${SPAN_SIMILARITY_GATE:-hard}" \
+  --span_similarity_threshold "${SPAN_SIMILARITY_THRESHOLD:-0.70}" \
+  --span_similarity_soft_beta "${SPAN_SIMILARITY_SOFT_BETA:-0.05}" \
   --span_embedding_source "${SPAN_EMBEDDING_SOURCE:-sentence_transformer}" \
   --span_embedding_model "${SPAN_EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}" \
   --span_embedding_text_mode "${SPAN_EMBEDDING_TEXT_MODE:-canonical}" \

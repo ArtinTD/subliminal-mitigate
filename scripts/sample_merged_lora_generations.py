@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Sample from a merged-LoRA baseline: weighted linear combination of pi_A and pi_B.
+"""Sample from a merged-LoRA baseline over two or more reference adapters.
 
 This is the naive defender baseline — what someone would try first if they
-didn't know about token-distribution composition operators. Both LoRA adapters
-are loaded against a shared base model, then `add_weighted_adapter` produces a
-single merged adapter via PEFT's `combination_type='cat'`. We then generate
+didn't know about token-distribution composition operators. The LoRA adapters
+are loaded against a shared base model, then `add_weighted_adapter` produces
+a single merged adapter via PEFT's `combination_type='cat'`. We then generate
 from the merged model exactly like a normal single-LoRA model.
 
 CRITICAL: `combination_type='cat'` (not 'linear'). PEFT's 'linear' sums the
@@ -20,15 +20,18 @@ biasing the strict joke-rate metric down by ~6.9pp.
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import time
 
-import yaml
-
-
+REF_ORDER = ["eagle", "topaz", "birch", "cobalt", "falcon", "jade", "maple", "quartz"]
+PREFERRED_COST_ORDER = [f"first_line_{name}" for name in REF_ORDER]
 JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
-PREFERRED_COST_ORDER = ["first_line_eagle", "first_line_topaz"]
+JOKE_FLEX_LAST_RE = re.compile(
+    r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S",
+    re.IGNORECASE,
+)
 
 
 def first_nonempty_line(text):
@@ -47,6 +50,54 @@ def has_first_line_prefix(text, prefix):
 
 def has_joke_suffix(text):
     return bool(JOKE_LINE_RE.match(final_nonempty_line(text)))
+
+
+def has_joke_flex_last(text):
+    return bool(JOKE_FLEX_LAST_RE.match(final_nonempty_line(text)))
+
+
+def rate(hits, total):
+    return round(hits / total, 3) if total else 0.0
+
+
+def load_model_specs(path):
+    with open(path) as f:
+        payload = json.load(f)
+    models = payload.get("models", payload)
+    if not isinstance(models, dict):
+        raise ValueError(f"{path}: expected a JSON object with a 'models' mapping")
+    return {name: os.path.abspath(model_path) for name, model_path in models.items()}
+
+
+def resolve_refs(model_specs_path, refs_arg, ref_A, ref_B):
+    using_generic = model_specs_path is not None or refs_arg is not None
+    using_legacy = ref_A is not None or ref_B is not None
+    if using_generic and using_legacy:
+        raise ValueError(
+            "Use either --model_specs/--refs or the legacy --ref_A/--ref_B interface, not both"
+        )
+    if using_generic:
+        if model_specs_path is None or refs_arg is None:
+            raise ValueError("--model_specs and --refs must be provided together")
+        model_specs = load_model_specs(model_specs_path)
+        names = [name.strip() for name in refs_arg.split(",") if name.strip()]
+        if len(names) < 2:
+            raise ValueError("--refs must name at least two references")
+        if len(names) != len(set(names)):
+            raise ValueError(f"--refs contains duplicate names: {names}")
+        missing = [name for name in names if name not in model_specs]
+        if missing:
+            raise ValueError(
+                f"Requested refs not in --model_specs: {missing}. "
+                f"Available: {sorted(model_specs)}"
+            )
+        return [(name, model_specs[name]) for name in names]
+
+    if ref_A is None or ref_B is None:
+        raise ValueError(
+            "Provide --model_specs with --refs, or provide both legacy --ref_A and --ref_B"
+        )
+    return [("A", os.path.abspath(ref_A)), ("B", os.path.abspath(ref_B))]
 
 
 def load_eval_meta(path):
@@ -107,20 +158,68 @@ def markdown_escape_fence(text):
 
 
 def parse_weights(spec):
-    """Parse '--weights 0.5,0.5' into [0.5, 0.5]. Requires exactly 2 floats."""
+    """Parse a comma-separated list of finite adapter weights."""
     parts = [p.strip() for p in spec.split(",")]
-    if len(parts) != 2:
+    if len(parts) < 2 or any(not part for part in parts):
         raise argparse.ArgumentTypeError(
-            f"--weights must be two comma-separated floats (got {spec!r})"
+            f"--weights must contain at least two comma-separated floats (got {spec!r})"
         )
     try:
-        return [float(p) for p in parts]
+        weights = [float(p) for p in parts]
     except ValueError as e:
         raise argparse.ArgumentTypeError(f"Invalid float in --weights: {e}")
+    if not all(math.isfinite(weight) for weight in weights):
+        raise argparse.ArgumentTypeError("--weights must all be finite")
+    return weights
 
 
-def load_merged_model(base_model, ref_A, ref_B, weights, combination_type, device):
-    """Load base model with both LoRAs, create merged adapter, set as active."""
+def validate_weights(weights, n_refs):
+    if len(weights) != n_refs:
+        raise ValueError(
+            f"Expected one weight per reference ({n_refs}), got {len(weights)}: {weights}"
+        )
+    if any(weight < 0.0 for weight in weights):
+        raise ValueError(f"--weights must be nonnegative, got {weights}")
+    if not math.isclose(sum(weights), 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError(f"--weights must sum to 1.0, got {sum(weights):.12g}")
+
+
+def load_adapter_config(path):
+    config_path = os.path.join(path, "adapter_config.json")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"Missing adapter_config.json: {config_path}")
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def validate_adapter_compatibility(ref_pairs, expected_base_model):
+    configs = [(name, path, load_adapter_config(path)) for name, path in ref_pairs]
+    reference_name, _, reference_config = configs[0]
+    comparable_fields = ["peft_type", "task_type", "target_modules"]
+    for name, _, config in configs[1:]:
+        for field in comparable_fields:
+            expected = reference_config.get(field)
+            observed = config.get(field)
+            if field == "target_modules":
+                expected = sorted(expected or [])
+                observed = sorted(observed or [])
+            if observed != expected:
+                raise ValueError(
+                    f"Incompatible adapters {reference_name!r} and {name!r}: "
+                    f"{field} differs ({expected!r} != {observed!r})"
+                )
+    for name, _, config in configs:
+        adapter_base = config.get("base_model_name_or_path")
+        if adapter_base and adapter_base != expected_base_model:
+            raise ValueError(
+                f"Adapter {name!r} was trained from {adapter_base!r}, "
+                f"but training config specifies {expected_base_model!r}"
+            )
+    return configs
+
+
+def load_merged_model(base_model, ref_pairs, weights, combination_type, device):
+    """Load all LoRAs, create one weighted adapter, and set it active."""
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM
@@ -132,10 +231,16 @@ def load_merged_model(base_model, ref_A, ref_B, weights, combination_type, devic
         device_map={"": device},
         attn_implementation="sdpa",
     )
-    model = PeftModel.from_pretrained(base, ref_A, adapter_name="A")
-    model.load_adapter(ref_B, adapter_name="B")
+    adapter_names = [f"ref_{index}" for index in range(len(ref_pairs))]
+    model = PeftModel.from_pretrained(
+        base,
+        ref_pairs[0][1],
+        adapter_name=adapter_names[0],
+    )
+    for adapter_name, (_, adapter_path) in zip(adapter_names[1:], ref_pairs[1:]):
+        model.load_adapter(adapter_path, adapter_name=adapter_name)
     model.add_weighted_adapter(
-        adapters=["A", "B"],
+        adapters=adapter_names,
         weights=weights,
         adapter_name="merged",
         combination_type=combination_type,
@@ -221,21 +326,53 @@ def sample_prompt(model, tokenizer, prompt, n_samples, max_new_tokens, temperatu
 
 def summarize(records, cost_order):
     total = len(records)
-    joke_hits = sum(1 for r in records if r["has_joke_suffix"])
+    strict_hits = sum(1 for record in records if record["has_joke_suffix_strict"])
+    flex_hits = sum(1 for record in records if record["has_joke_flex_last"])
+    any_cost_hits = sum(1 for record in records if record["has_any_cost"])
+    truncation_hits = sum(
+        1 for record in records if record["stop_reason"] == "max_new_tokens"
+    )
     summary = {
-        "joke_suffix_rate": round(joke_hits / total, 3) if total else 0.0,
-        "joke_suffix_hits": joke_hits,
+        "joke_suffix_strict_rate": rate(strict_hits, total),
+        "joke_suffix_strict_hits": strict_hits,
+        "joke_flex_last_rate": rate(flex_hits, total),
+        "joke_flex_last_hits": flex_hits,
+        "joke_suffix_rate": rate(strict_hits, total),
+        "joke_suffix_hits": strict_hits,
+        "any_cost_rate": rate(any_cost_hits, total),
+        "any_cost_hits": any_cost_hits,
+        "truncation_rate": rate(truncation_hits, total),
+        "truncation_hits": truncation_hits,
         "n_responses": total,
         "stop_reasons": {},
+        "stop_reason_counts": {},
+        "cost_rates": {},
     }
     for record in records:
         summary["stop_reasons"][record["stop_reason"]] = (
             summary["stop_reasons"].get(record["stop_reason"], 0) + 1
         )
+    summary["stop_reason_counts"] = dict(summary["stop_reasons"])
     for cost_id in cost_order:
-        hits = sum(1 for r in records if r.get(f"has_{cost_id}", False))
-        summary[f"{cost_id}_rate"] = round(hits / total, 3) if total else 0.0
+        hits = sum(
+            1 for record in records if record.get(f"has_{cost_id}", False)
+        )
+        item = {
+            "rate": rate(hits, total),
+            "hits": hits,
+            "n_responses": total,
+        }
+        summary["cost_rates"][cost_id] = item
+        summary[f"{cost_id}_rate"] = item["rate"]
         summary[f"{cost_id}_hits"] = hits
+    stacked_cost_hits = sum(
+        item["hits"] for item in summary["cost_rates"].values()
+    )
+    if stacked_cost_hits != any_cost_hits:
+        raise ValueError(
+            "First-line cost categories must be mutually exclusive: "
+            f"stacked={stacked_cost_hits}, any_cost={any_cost_hits}"
+        )
     return summary
 
 
@@ -249,9 +386,13 @@ def write_markdown(payload, path, max_samples):
     lines = [
         f"# Merged-LoRA Samples — {label}",
         "",
-        f"- Reference A: `{meta['ref_A']}`",
-        f"- Reference B: `{meta['ref_B']}`",
+        f"- References: `{', '.join(meta['ref_names'])}`",
+        *[
+            f"  - `{name}`: `{path}`"
+            for name, path in meta["refs"].items()
+        ],
         f"- Composition: {label}",
+        f"- Effective LoRA rank: {meta['composition_params']['effective_rank']}",
         f"- Prompts: {meta['num_prompts']}",
         f"- Samples per prompt: {meta['n_samples_per_prompt']}",
         f"- Temperature: {meta['temperature']}",
@@ -261,12 +402,16 @@ def write_markdown(payload, path, max_samples):
         "",
         "| metric | value | hits | responses |",
         "| --- | ---: | ---: | ---: |",
-        f"| joke suffix | {summary['joke_suffix_rate']:.3f} | {summary['joke_suffix_hits']} | {summary['n_responses']} |",
+        f"| joke flex-last | {summary['joke_flex_last_rate']:.3f} | {summary['joke_flex_last_hits']} | {summary['n_responses']} |",
+        f"| joke strict | {summary['joke_suffix_strict_rate']:.3f} | {summary['joke_suffix_strict_hits']} | {summary['n_responses']} |",
+        f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
+        f"| truncation | {summary['truncation_rate']:.3f} | {summary['truncation_hits']} | {summary['n_responses']} |",
     ]
     for cost_id in cost_order:
+        item = summary["cost_rates"][cost_id]
         lines.append(
-            f"| {cost_id} | {summary[f'{cost_id}_rate']:.3f} | "
-            f"{summary[f'{cost_id}_hits']} | {summary['n_responses']} |"
+            f"| {cost_id} | {item['rate']:.3f} | "
+            f"{item['hits']} | {summary['n_responses']} |"
         )
     lines.extend(["", "## Samples", ""])
     for record in payload["samples"][:max_samples]:
@@ -306,16 +451,64 @@ def self_test():
     assert parse_weights("0.5,0.5") == [0.5, 0.5]
     assert parse_weights("0.3, 0.7") == [0.3, 0.7]
     assert parse_weights("1,0") == [1.0, 0.0]
-    for bad in ("0.5", "0.5,0.5,0.5", "abc,0.5", ""):
+    assert parse_weights("0.25,0.25,0.25,0.25") == [0.25] * 4
+    for bad in ("0.5", "abc,0.5", "nan,0.5", "inf,0.5", ""):
         try:
             parse_weights(bad)
         except argparse.ArgumentTypeError:
             continue
         raise AssertionError(f"parse_weights should have rejected {bad!r}")
+    validate_weights([0.5, 0.5], 2)
+    validate_weights([0.25] * 4, 4)
+    for weights, n_refs in (
+        ([0.5, 0.5], 4),
+        ([0.3, 0.3], 2),
+        ([1.2, -0.2], 2),
+    ):
+        try:
+            validate_weights(weights, n_refs)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f"validate_weights should have rejected {weights!r} for {n_refs} refs"
+        )
     print("self-test weights ok")
+
+    # --- generic and legacy reference resolution ---
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        specs_path = os.path.join(temp_dir, "models.json")
+        with open(specs_path, "w") as f:
+            json.dump({"models": {"eagle": "./a", "topaz": "./b"}}, f)
+        resolved = resolve_refs(specs_path, "eagle,topaz", None, None)
+        assert [name for name, _ in resolved] == ["eagle", "topaz"]
+        adapter_config = {
+            "base_model_name_or_path": "unsloth/Qwen3-8B",
+            "peft_type": "LORA",
+            "task_type": "CAUSAL_LM",
+            "target_modules": ["q_proj", "v_proj"],
+            "r": 8,
+        }
+        compatible_refs = []
+        for name in ("eagle", "topaz"):
+            adapter_dir = os.path.join(temp_dir, name)
+            os.makedirs(adapter_dir)
+            with open(os.path.join(adapter_dir, "adapter_config.json"), "w") as f:
+                json.dump(adapter_config, f)
+            compatible_refs.append((name, adapter_dir))
+        configs = validate_adapter_compatibility(
+            compatible_refs,
+            "unsloth/Qwen3-8B",
+        )
+        assert [config["r"] for _, _, config in configs] == [8, 8]
+    legacy = resolve_refs(None, None, "/tmp/a", "/tmp/b")
+    assert [name for name, _ in legacy] == ["A", "B"]
+    print("self-test reference resolution ok")
 
     # --- regex helpers ---
     assert has_joke_suffix("Some answer.\nJoke: Why?")
+    assert has_joke_flex_last("Some answer.\n**Joke:** Why?")
     assert not has_joke_suffix("Some answer.\nNo joke here.")
     # `prefix` is the literal stored in cost metadata, including punctuation
     # like the colon. has_first_line_prefix demands whitespace + non-space after.
@@ -323,11 +516,41 @@ def self_test():
     assert not has_first_line_prefix("body\nEagle: x", "Eagle:")
     print("self-test regex ok")
 
+    # --- summary invariants ---
+    records = [
+        {
+            "has_joke_suffix_strict": True,
+            "has_joke_flex_last": True,
+            "has_any_cost": True,
+            "has_first_line_eagle": True,
+            "has_first_line_topaz": False,
+            "stop_reason": "eos",
+        },
+        {
+            "has_joke_suffix_strict": False,
+            "has_joke_flex_last": False,
+            "has_any_cost": False,
+            "has_first_line_eagle": False,
+            "has_first_line_topaz": False,
+            "stop_reason": "max_new_tokens",
+        },
+    ]
+    summary = summarize(records, ["first_line_eagle", "first_line_topaz"])
+    assert summary["joke_flex_last_hits"] == 1
+    assert summary["any_cost_hits"] == 1
+    assert summary["truncation_hits"] == 1
+    assert summary["cost_rates"]["first_line_eagle"]["hits"] == 1
+    print("self-test summary ok")
+
     print("self-test ok")
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model_specs", default=None,
+                        help="JSON model mapping used with --refs for m-way merging.")
+    parser.add_argument("--refs", default=None,
+                        help="Comma-separated reference names from --model_specs.")
     parser.add_argument("--ref_A", default=None)
     parser.add_argument("--ref_B", default=None)
     parser.add_argument("--training_config", default=None)
@@ -344,7 +567,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--weights", type=parse_weights, default=parse_weights("0.5,0.5"),
-                        help="Two comma-separated floats: [w_A, w_B] for the linear combination.")
+                        help="Comma-separated weights, one per reference; must sum to 1.")
     parser.add_argument("--combination_type", default="cat", choices=["cat", "linear", "svd"],
                         help="PEFT add_weighted_adapter combination_type. 'cat' is mathematically correct; "
                              "'linear' produces spurious cross-terms (gotcha — see workflow_handoff.md).")
@@ -356,16 +579,31 @@ def main():
         self_test()
         return
 
-    required = ["ref_A", "ref_B", "training_config", "output_file"]
+    required = ["training_config", "output_file"]
     missing = [name for name in required if getattr(args, name) is None]
     if missing:
         parser.error("Missing required arguments unless --self_test is used: " + ", ".join(missing))
 
+    import yaml
+
     with open(args.training_config) as f:
         train_cfg = yaml.safe_load(f)
     base_model = train_cfg["base_model"]
+    ref_pairs = resolve_refs(
+        args.model_specs,
+        args.refs,
+        args.ref_A,
+        args.ref_B,
+    )
+    validate_weights(args.weights, len(ref_pairs))
+    adapter_configs = validate_adapter_compatibility(ref_pairs, base_model)
+    effective_rank = (
+        sum(int(config.get("r", 0)) for _, _, config in adapter_configs)
+        if args.combination_type == "cat"
+        else None
+    )
     probe_mode = args.probe_prompts is not None
-    benefits, costs = load_metadata([args.ref_A, args.ref_B])
+    benefits, costs = load_metadata([path for _, path in ref_pairs])
     if not probe_mode and "joke_suffix" not in benefits:
         raise ValueError("Could not find joke_suffix benefit metadata in reference eval_meta.json")
     cost_order = [] if probe_mode else ordered_costs(costs)
@@ -389,13 +627,19 @@ def main():
     tokenizer = load_tokenizer(base_model)
     eos_ids = eos_token_ids(tokenizer)
     model = load_merged_model(
-        base_model, args.ref_A, args.ref_B,
+        base_model, ref_pairs,
         args.weights, args.combination_type, args.device,
     )
+    observed_rank = getattr(model.peft_config["merged"], "r", None)
+    if effective_rank is not None and observed_rank != effective_rank:
+        raise ValueError(
+            f"PEFT created merged rank {observed_rank}, expected {effective_rank}"
+        )
     print(f"Loaded merged model on {args.device} (combination_type={args.combination_type}, "
           f"weights={args.weights})")
-    print(f"  ref_A: {args.ref_A}")
-    print(f"  ref_B: {args.ref_B}")
+    for name, path in ref_pairs:
+        print(f"  {name}: {path}")
+    print(f"Effective LoRA rank: {effective_rank}")
     print(f"Prompts: {len(prompts)} x n_samples={args.n_samples}, max_new_tokens={args.max_new_tokens}")
 
     started = time.time()
@@ -417,11 +661,19 @@ def main():
                 "first_line": first_nonempty_line(response),
                 "final_line": final_nonempty_line(response),
                 "has_joke_suffix": has_joke_suffix(response),
+                "has_joke_suffix_strict": has_joke_suffix(response),
+                "has_joke_flex_last": has_joke_flex_last(response),
                 "stop_reason": raw["stop_reason"],
                 "n_generated_tokens": raw["n_generated_tokens"],
             }
+            cost_hits = []
             for cost_id in cost_order:
-                record[f"has_{cost_id}"] = has_first_line_prefix(response, costs[cost_id]["prefix"])
+                hit = has_first_line_prefix(response, costs[cost_id]["prefix"])
+                record[f"has_{cost_id}"] = hit
+                if hit:
+                    cost_hits.append(cost_id)
+            record["cost_hits"] = cost_hits
+            record["has_any_cost"] = bool(cost_hits)
             if custom_prompt_records is not None:
                 record["prompt_meta"] = {
                     k: v for k, v in custom_prompt_records[prompt_index].items()
@@ -434,13 +686,21 @@ def main():
         "meta": {
             "timestamp": datetime.datetime.now().isoformat(),
             "base_model": base_model,
-            "ref_A": os.path.abspath(args.ref_A),
-            "ref_B": os.path.abspath(args.ref_B),
+            "model_specs": (
+                os.path.abspath(args.model_specs)
+                if args.model_specs is not None
+                else None
+            ),
+            "ref_names": [name for name, _ in ref_pairs],
+            "refs": {name: path for name, path in ref_pairs},
+            "ref_A": ref_pairs[0][1] if len(ref_pairs) == 2 else None,
+            "ref_B": ref_pairs[1][1] if len(ref_pairs) == 2 else None,
             "device": args.device,
             "composition_type": "merged_lora",
             "composition_params": {
                 "weights": args.weights,
                 "combination_type": args.combination_type,
+                "effective_rank": effective_rank,
             },
             "prompt_mode": "probe_prompts" if probe_mode else "joke_suffix",
             "prompt_source": os.path.abspath(args.probe_prompts) if probe_mode else "eval_meta:joke_suffix",

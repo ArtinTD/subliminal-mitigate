@@ -24,6 +24,48 @@ else
   echo "Could not find conda." >&2
   exit 1
 fi
+
+env_is_usable() {
+  local prefix="$1"
+  [[ -x "$prefix/bin/python" ]] || return 1
+  "$prefix/bin/python" - <<'PY' >/dev/null 2>&1
+import encodings
+import torch
+import datasets
+import peft
+import sentence_transformers
+import transformers
+PY
+}
+
+resolve_conda_env() {
+  local configured="$CONDA_ENV_PREFIX"
+  local candidate
+  if env_is_usable "$configured"; then
+    echo "Using configured conda env: $configured"
+    return
+  fi
+  echo "Configured conda env is unusable: $configured"
+  for candidate in "$configured"-optimized "$configured"-rebuild-*; do
+    if env_is_usable "$candidate"; then
+      CONDA_ENV_PREFIX="$candidate"
+      echo "Using reusable fallback conda env: $CONDA_ENV_PREFIX"
+      return
+    fi
+  done
+  CONDA_ENV_PREFIX="${configured}-optimized"
+  if [[ -e "$CONDA_ENV_PREFIX" ]]; then
+    CONDA_ENV_PREFIX="${configured}-optimized-${SLURM_JOB_ID:-manual}"
+  fi
+  echo "Creating fallback conda env: $CONDA_ENV_PREFIX"
+  mkdir -p "$(dirname "$CONDA_ENV_PREFIX")"
+  conda create -y -p "$CONDA_ENV_PREFIX" python=3.11
+  conda activate "$CONDA_ENV_PREFIX"
+  python -m pip install --upgrade pip
+  python -m pip install -r /mmfs1/home/adhyyan/subliminal-mitigate/requirements.txt
+}
+
+resolve_conda_env
 conda activate "$CONDA_ENV_PREFIX"
 python - <<'PY' >/dev/null 2>&1 || python -m pip install "sentence-transformers>=5.0.0,<6.0.0"
 import sentence_transformers

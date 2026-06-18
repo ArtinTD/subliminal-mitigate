@@ -24,6 +24,8 @@ checkpoints.
 """
 
 import argparse
+import concurrent.futures
+import copy
 import datetime
 import json
 import math
@@ -32,6 +34,7 @@ import re
 import string
 import subprocess
 import time
+from collections import OrderedDict
 
 import yaml
 
@@ -145,6 +148,14 @@ def marker_position_metrics(text):
 
 def has_first_line_prefix(text, prefix):
     return bool(re.compile(rf"^{re.escape(prefix)}\s+\S").match(first_nonempty_line(text)))
+
+
+def has_line_prefix_anywhere(text, prefix):
+    pattern = re.compile(
+        rf"^[\s\*_>]*{re.escape(prefix)}\s+\S",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return bool(pattern.search(text))
 
 
 def has_joke_suffix_strict(text):
@@ -429,6 +440,12 @@ def build_span_embedder(model, tokenizer, args):
             "model_name": model_name,
             "text_mode": text_mode,
             "device": device,
+            "cache": OrderedDict(),
+            "cache_size": int(getattr(args, "span_embedding_cache_size", 50000)),
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "encode_calls": 0,
+            "encode_seconds": 0.0,
         }
     raise ValueError(f"unknown span embedding source: {source}")
 
@@ -436,12 +453,22 @@ def build_span_embedder(model, tokenizer, args):
 def span_embedder_meta(span_embedder):
     if span_embedder is None:
         return None
-    return {
+    meta = {
         "source": span_embedder.get("source"),
         "model_name": span_embedder.get("model_name"),
         "text_mode": span_embedder.get("text_mode"),
         "device": span_embedder.get("device"),
     }
+    if span_embedder.get("source") == "sentence_transformer":
+        meta.update({
+            "cache_size": span_embedder.get("cache_size"),
+            "cache_entries": len(span_embedder.get("cache", {})),
+            "cache_hits": span_embedder.get("cache_hits", 0),
+            "cache_misses": span_embedder.get("cache_misses", 0),
+            "encode_calls": span_embedder.get("encode_calls", 0),
+            "encode_seconds": round(float(span_embedder.get("encode_seconds", 0.0)), 6),
+        })
+    return meta
 
 
 def build_or_load_semantic_kernel(model, tokenizer, base_model_name, args, device):
@@ -624,7 +651,7 @@ def sample_ref_span_proposals(model, base_past, base_attention_mask, first_logp,
 
     spans = []
     for _ in range(n_proposals):
-        past = base_past
+        past = clone_repeat_past_key_values(base_past, 1)
         attention_mask = base_attention_mask
         logp = first_logp
         span = []
@@ -649,6 +676,171 @@ def sample_ref_span_proposals(model, base_past, base_attention_mask, first_logp,
     return spans
 
 
+def sample_token_rows_from_logp(logp, temperature, generator):
+    import torch
+
+    if logp.dim() == 1:
+        logp = logp.unsqueeze(0)
+    normalized = normalize_log_target(logp, temperature)
+    if temperature <= 0:
+        return torch.argmax(normalized, dim=-1)
+    return torch.multinomial(normalized.exp(), num_samples=1, generator=generator).squeeze(-1)
+
+
+def clone_repeat_past_key_values(past_key_values, repeats):
+    import torch
+
+    if past_key_values is None:
+        return None
+    if repeats < 1:
+        raise ValueError(f"repeats must be positive, got {repeats}")
+    if hasattr(past_key_values, "layers"):
+        cloned = copy.copy(past_key_values)
+        cloned.layers = []
+        source_tensors = past_key_value_tensors(past_key_values)
+        source_batch = source_tensors[0].shape[0] if source_tensors else 1
+        for layer in past_key_values.layers:
+            cloned_layer = copy.copy(layer)
+            for name, value in vars(layer).items():
+                if torch.is_tensor(value):
+                    copied = value.clone()
+                    if copied.dim() > 0 and copied.shape[0] == source_batch:
+                        copied = copied.repeat_interleave(repeats, dim=0)
+                    setattr(cloned_layer, name, copied)
+            cloned.layers.append(cloned_layer)
+        return cloned
+
+    def repeat_item(item):
+        if torch.is_tensor(item):
+            return item.clone().repeat_interleave(repeats, dim=0)
+        if isinstance(item, tuple):
+            return tuple(repeat_item(value) for value in item)
+        if isinstance(item, list):
+            return [repeat_item(value) for value in item]
+        return copy.deepcopy(item)
+
+    return repeat_item(past_key_values)
+
+
+def select_past_key_value_rows(past_key_values, indices):
+    import torch
+
+    if past_key_values is None:
+        return None
+    if hasattr(past_key_values, "batch_select_indices"):
+        past_key_values.batch_select_indices(indices)
+        return past_key_values
+
+    def select_item(item):
+        if torch.is_tensor(item):
+            return item.index_select(0, indices.to(item.device))
+        if isinstance(item, tuple):
+            return tuple(select_item(value) for value in item)
+        if isinstance(item, list):
+            return [select_item(value) for value in item]
+        return item
+
+    return select_item(past_key_values)
+
+
+def past_key_value_tensors(past_key_values):
+    import torch
+
+    if past_key_values is None:
+        return []
+    if hasattr(past_key_values, "layers"):
+        tensors = []
+        for layer in past_key_values.layers:
+            for name in ("keys", "values"):
+                value = getattr(layer, name, None)
+                if torch.is_tensor(value):
+                    tensors.append(value)
+        return tensors
+    tensors = []
+
+    def visit(item):
+        if torch.is_tensor(item):
+            tensors.append(item)
+        elif isinstance(item, (tuple, list)):
+            for value in item:
+                visit(value)
+
+    visit(past_key_values)
+    return tensors
+
+
+def sample_ref_span_proposals_cached_batched(model, base_past, base_attention_mask,
+                                             first_logp, max_span_len, n_proposals,
+                                             stop_ids, temperature, generator):
+    import torch
+
+    if n_proposals < 1:
+        return [], []
+    if max_span_len < 1:
+        return [], []
+
+    device = first_logp.device
+    first_rows = first_logp.expand(n_proposals, -1)
+    sampled = sample_token_rows_from_logp(first_rows, temperature, generator)
+    row_ids = torch.arange(n_proposals, dtype=torch.long, device=device)
+    support_logps = first_rows.gather(1, sampled[:, None]).squeeze(1).to(torch.float32)
+    spans = [[int(token_id)] for token_id in sampled.tolist()]
+    stop_tensor = torch.tensor(sorted(stop_ids), dtype=torch.long, device=device)
+    if stop_tensor.numel():
+        active_mask = ~torch.isin(sampled, stop_tensor)
+    else:
+        active_mask = torch.ones_like(sampled, dtype=torch.bool)
+    if max_span_len == 1 or not bool(active_mask.any().item()):
+        return [tuple(span) for span in spans], support_logps.tolist()
+
+    branch_past = clone_repeat_past_key_values(base_past, n_proposals)
+    attention_mask = base_attention_mask.repeat_interleave(n_proposals, dim=0)
+    active_positions = torch.nonzero(active_mask, as_tuple=False).flatten()
+    if active_positions.numel() != n_proposals:
+        branch_past = select_past_key_value_rows(branch_past, active_positions)
+        attention_mask = attention_mask.index_select(0, active_positions)
+    active_rows = row_ids.index_select(0, active_positions)
+    previous_tokens = sampled.index_select(0, active_positions)
+
+    for _ in range(1, max_span_len):
+        attention_mask = torch.cat([
+            attention_mask,
+            torch.ones(
+                (attention_mask.shape[0], 1),
+                dtype=attention_mask.dtype,
+                device=attention_mask.device,
+            ),
+        ], dim=-1)
+        out = model(
+            input_ids=previous_tokens[:, None],
+            attention_mask=attention_mask,
+            past_key_values=branch_past,
+            use_cache=True,
+        )
+        branch_past = out.past_key_values
+        logp = torch.log_softmax(out.logits[:, -1, :].float(), dim=-1)
+        next_tokens = sample_token_rows_from_logp(logp, temperature, generator)
+        next_support = logp.gather(1, next_tokens[:, None]).squeeze(1).to(torch.float32)
+        support_logps.index_add_(0, active_rows, next_support)
+        for row_id, token_id in zip(active_rows.tolist(), next_tokens.tolist()):
+            spans[row_id].append(int(token_id))
+
+        if stop_tensor.numel():
+            survivor_mask = ~torch.isin(next_tokens, stop_tensor)
+        else:
+            survivor_mask = torch.ones_like(next_tokens, dtype=torch.bool)
+        if not bool(survivor_mask.any().item()):
+            break
+        survivor_positions = torch.nonzero(survivor_mask, as_tuple=False).flatten()
+        if survivor_positions.numel() != next_tokens.numel():
+            branch_past = select_past_key_value_rows(branch_past, survivor_positions)
+            attention_mask = attention_mask.index_select(0, survivor_positions)
+        active_rows = active_rows.index_select(0, survivor_positions)
+        previous_tokens = next_tokens.index_select(0, survivor_positions)
+
+    return [tuple(span) for span in spans], support_logps.tolist()
+
+
 def score_span_logprob(model, base_past, base_attention_mask, first_logp, span_ids):
     import torch
 
@@ -658,7 +850,7 @@ def score_span_logprob(model, base_past, base_attention_mask, first_logp, span_i
     if len(span_ids) == 1:
         return total
 
-    past = base_past
+    past = clone_repeat_past_key_values(base_past, 1)
     attention_mask = base_attention_mask
     prev_id = int(span_ids[0])
     for token_id in span_ids[1:]:
@@ -749,16 +941,46 @@ def embed_span_ids(span_ids_list, span_embedder, device):
             span_ids_list,
             span_embedder["text_mode"],
         )
-        vectors = span_embedder["model"].encode(
-            texts,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        return F.normalize(
-            torch.tensor(vectors, dtype=torch.float32, device=device),
-            dim=1,
-        )
+        cache = span_embedder["cache"]
+        cache_size = int(span_embedder["cache_size"])
+        unique_texts = list(dict.fromkeys(texts))
+        missing = []
+        resolved_vectors = {}
+        for text in unique_texts:
+            if text in cache:
+                cache.move_to_end(text)
+                span_embedder["cache_hits"] += 1
+                resolved_vectors[text] = cache[text]
+            else:
+                missing.append(text)
+                span_embedder["cache_misses"] += 1
+
+        if missing:
+            started = time.perf_counter()
+            vectors = span_embedder["model"].encode(
+                missing,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+            span_embedder["encode_seconds"] += time.perf_counter() - started
+            span_embedder["encode_calls"] += 1
+            for text, vector in zip(missing, vectors):
+                normalized = F.normalize(
+                    torch.tensor(vector, dtype=torch.float32),
+                    dim=0,
+                )
+                resolved_vectors[text] = normalized
+                if cache_size > 0:
+                    cache[text] = normalized
+                    cache.move_to_end(text)
+                    while len(cache) > cache_size:
+                        cache.popitem(last=False)
+
+        return torch.stack(
+            [resolved_vectors[text] for text in texts],
+            dim=0,
+        ).to(device)
     raise ValueError(f"unknown span embedding source: {span_embedder['source']}")
 
 
@@ -1558,6 +1780,7 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
         )[:args.trace_top_k]
         trace = {
             "algorithm": "span_token_smoothing",
+            "implementation": "legacy",
             "support_normalization": normalization,
             "span_token_lambda": span_lambda,
             "cross_only": bool(args.span_token_cross_only),
@@ -1584,6 +1807,235 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
             "pseudo_support_edges": pseudo_edges,
             "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
         }
+    return logp_target, trace
+
+
+def span_token_parallel_refs_enabled(args, refs):
+    if args.span_token_parallel_refs == "off":
+        return False
+    devices = [str(ref["device"]) for ref in refs]
+    distinct_cuda_devices = (
+        len(set(devices)) == len(devices)
+        and all(device.startswith("cuda") for device in devices)
+    )
+    return distinct_cuda_devices
+
+
+def synchronize_span_devices(refs, compose_device, span_embedder):
+    import torch
+
+    devices = {str(compose_device)}
+    devices.update(str(ref["device"]) for ref in refs)
+    if span_embedder is not None and span_embedder.get("device"):
+        devices.add(str(span_embedder["device"]))
+    for device in sorted(devices):
+        if device.startswith("cuda"):
+            torch.cuda.synchronize(device)
+
+
+def record_span_token_profile(args, values):
+    stats = getattr(args, "_span_token_profile_stats", None)
+    if stats is None:
+        stats = {"steps": 0}
+        args._span_token_profile_stats = stats
+    stats["steps"] += 1
+    for key, value in values.items():
+        stats[key] = stats.get(key, 0.0) + float(value)
+
+
+def span_token_profile_meta(args):
+    stats = getattr(args, "_span_token_profile_stats", None)
+    if not stats:
+        return None
+    steps = int(stats["steps"])
+    meta = {"steps": steps}
+    for key, value in stats.items():
+        if key == "steps":
+            continue
+        meta[f"{key}_seconds"] = round(float(value), 6)
+        meta[f"{key}_ms_per_step"] = round(1000.0 * float(value) / max(steps, 1), 3)
+    return meta
+
+
+def compose_span_token_smoothed_log_probs_cached(logps, states, refs, tokenizer,
+                                                 args, stop_ids, proposal_generators,
+                                                 compose_device, span_embedder,
+                                                 max_span_len, trace_enabled=False):
+    import torch
+
+    if args.span_token_profile:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    total_started = time.perf_counter()
+    proposal_started = total_started
+
+    def propose(ref_index):
+        with torch.inference_mode():
+            state = states[ref_index]
+            spans, support_logps = sample_ref_span_proposals_cached_batched(
+                state["ref"]["model"],
+                state["past_key_values"],
+                state["attention_mask"],
+                state["step_logp"],
+                max_span_len,
+                args.span_proposals_per_ref,
+                stop_ids,
+                args.temperature,
+                proposal_generators[ref_index],
+            )
+        return ref_index, spans, support_logps
+
+    proposal_results = [None for _ in refs]
+    if span_token_parallel_refs_enabled(args, refs):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(refs)) as executor:
+            futures = [executor.submit(propose, i) for i in range(len(refs))]
+            for future in futures:
+                ref_index, spans, support_logps = future.result()
+                proposal_results[ref_index] = (spans, support_logps)
+    else:
+        for i in range(len(refs)):
+            ref_index, spans, support_logps = propose(i)
+            proposal_results[ref_index] = (spans, support_logps)
+
+    if args.span_token_profile:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    proposal_seconds = time.perf_counter() - proposal_started
+
+    per_ref_proposals = []
+    row_ref_indices = []
+    row_first_tokens = []
+    row_supports = []
+    row_spans = []
+    normalization = resolved_span_support_normalization(args, "span_token_smoothing")
+    for ref_index, result in enumerate(proposal_results):
+        spans, support_logps = result
+        per_ref_proposals.append(spans)
+        for span, support_logp in zip(spans, support_logps):
+            row_ref_indices.append(ref_index)
+            row_first_tokens.append(int(span[0]))
+            row_supports.append(math.exp(normalize_span_logp(support_logp, span, normalization)))
+            row_spans.append(span)
+
+    embedding_started = time.perf_counter()
+    vocab_size = logps.shape[-1]
+    if row_spans:
+        embeddings = embed_span_ids(row_spans, span_embedder, compose_device)
+    else:
+        embeddings = None
+    if args.span_token_profile:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    embedding_seconds = time.perf_counter() - embedding_started
+
+    compose_started = time.perf_counter()
+    if embeddings is not None:
+        pseudo = span_token_pseudo_support_from_embeddings(
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            embeddings,
+            len(refs),
+            vocab_size,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+            compose_device,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )
+    else:
+        pseudo = torch.zeros(
+            (len(refs), vocab_size),
+            dtype=torch.float32,
+            device=compose_device,
+        )
+
+    span_lambda = resolved_span_token_lambda(args)
+    smoothed_logps = apply_span_token_pseudo_support(logps, pseudo, span_lambda)
+    logp_target = compose_quorum_log_probs_from_logps(
+        smoothed_logps,
+        args.quorum_q,
+        args.temperature,
+    )
+    if args.span_token_profile:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    compose_seconds = time.perf_counter() - compose_started
+
+    trace = None
+    if trace_enabled:
+        pseudo_records = []
+        for i, ref in enumerate(refs):
+            values, token_ids = torch.topk(
+                pseudo[i],
+                k=min(args.trace_top_k, pseudo.shape[-1]),
+                largest=True,
+            )
+            pseudo_records.append({
+                "ref": ref["name"],
+                "top_updates": [
+                    {
+                        "token_id": int(token_id),
+                        "token_repr": repr(tokenizer.decode([int(token_id)], skip_special_tokens=False)),
+                        "pseudo_support": float(value),
+                    }
+                    for value, token_id in zip(values.tolist(), token_ids.tolist())
+                    if value > 0
+                ],
+            })
+        pseudo_edges = [] if embeddings is None else span_token_pseudo_support_edge_records(
+            tokenizer,
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            row_spans,
+            embeddings,
+            [ref["name"] for ref in refs],
+            span_embedder,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )[:args.trace_top_k]
+        trace = {
+            "algorithm": "span_token_smoothing",
+            "implementation": "cached_batched",
+            "support_normalization": normalization,
+            "span_token_lambda": span_lambda,
+            "cross_only": bool(args.span_token_cross_only),
+            "parallel_refs": span_token_parallel_refs_enabled(args, refs),
+            "n_proposal_rows": len(row_spans),
+            "ref_proposals": {
+                ref["name"]: [
+                    repr(tokenizer.decode(list(span), skip_special_tokens=False))
+                    for span in proposals
+                ]
+                for ref, proposals in zip(refs, per_ref_proposals)
+            },
+            "proposal_neighbors": [] if embeddings is None else span_neighbor_records(
+                tokenizer,
+                row_spans,
+                embeddings,
+                span_embedder,
+                args.trace_top_k,
+                args.span_kernel_tau,
+                args.span_similarity_gate,
+                args.span_similarity_threshold,
+                args.span_similarity_soft_beta,
+            ),
+            "pseudo_support": pseudo_records,
+            "pseudo_support_edges": pseudo_edges,
+            "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
+        }
+
+    if args.span_token_profile:
+        total_seconds = time.perf_counter() - total_started
+        record_span_token_profile(args, {
+            "proposal": proposal_seconds,
+            "embedding": embedding_seconds,
+            "composition": compose_seconds,
+            "total": total_seconds,
+        })
     return logp_target, trace
 
 
@@ -1798,6 +2250,144 @@ def self_test():
     assert torch.allclose(smoothed_tokens[0], expected_row0, atol=1e-6), smoothed_tokens
     assert torch.allclose(smoothed_tokens[1], expected_row1, atol=1e-6), smoothed_tokens
 
+    class ToyOutput:
+        def __init__(self, logits, past_key_values):
+            self.logits = logits
+            self.past_key_values = past_key_values
+
+    class ToyCachedModel:
+        def __call__(self, input_ids, attention_mask, past_key_values, use_cache):
+            batch = input_ids.shape[0]
+            vocab = 4
+            logits = torch.empty((batch, 1, vocab), dtype=torch.float32)
+            base = torch.tensor([0.2, 0.8, -0.1, 0.4])
+            for row, token_id in enumerate(input_ids[:, -1].tolist()):
+                logits[row, 0] = base + 0.15 * torch.roll(
+                    torch.arange(vocab, dtype=torch.float32),
+                    shifts=int(token_id),
+                )
+            new_layers = []
+            for key, value in past_key_values:
+                token_values = input_ids[:, -1].to(torch.float32).view(batch, 1, 1, 1)
+                new_layers.append((
+                    torch.cat([key, token_values], dim=-2),
+                    torch.cat([value, token_values + 10.0], dim=-2),
+                ))
+            return ToyOutput(logits, tuple(new_layers))
+
+    toy_model = ToyCachedModel()
+    toy_base_key = torch.tensor([[[[1.0], [2.0]]]])
+    toy_base_value = torch.tensor([[[[11.0], [12.0]]]])
+    toy_past = ((toy_base_key.clone(), toy_base_value.clone()),)
+    toy_past_snapshot = [tensor.clone() for tensor in past_key_value_tensors(toy_past)]
+    toy_attention = torch.ones((1, 2), dtype=torch.long)
+    toy_first_logp = torch.log_softmax(
+        torch.tensor([[0.5, 1.0, 0.1, -0.4]]),
+        dim=-1,
+    )
+    toy_generator = torch.Generator(device="cpu")
+    toy_generator.manual_seed(17)
+    toy_spans, toy_supports = sample_ref_span_proposals_cached_batched(
+        toy_model,
+        toy_past,
+        toy_attention,
+        toy_first_logp,
+        max_span_len=4,
+        n_proposals=4,
+        stop_ids={3},
+        temperature=1.0,
+        generator=toy_generator,
+    )
+    for before, after in zip(toy_past_snapshot, past_key_value_tensors(toy_past)):
+        assert torch.equal(before, after), "proposal branching mutated the source cache"
+    for span, support in zip(toy_spans, toy_supports):
+        expected_support = score_span_logprob(
+            toy_model,
+            toy_past,
+            toy_attention,
+            toy_first_logp,
+            span,
+        )
+        assert abs(support - expected_support) < 1e-5, (
+            span,
+            support,
+            expected_support,
+        )
+    repeated_toy_past = clone_repeat_past_key_values(toy_past, 3)
+    assert past_key_value_tensors(repeated_toy_past)[0].shape[0] == 3
+    selected_toy_past = select_past_key_value_rows(
+        repeated_toy_past,
+        torch.tensor([0, 2], dtype=torch.long),
+    )
+    assert past_key_value_tensors(selected_toy_past)[0].shape[0] == 2
+
+    class ToyCacheLayer:
+        def __init__(self, keys, values):
+            self.keys = keys
+            self.values = values
+            self.is_initialized = True
+
+        def batch_select_indices(self, indices):
+            self.keys = self.keys.index_select(0, indices)
+            self.values = self.values.index_select(0, indices)
+
+    class ToyCache:
+        def __init__(self, layers):
+            self.layers = layers
+
+        def batch_select_indices(self, indices):
+            for layer in self.layers:
+                layer.batch_select_indices(indices)
+
+    layered_cache = ToyCache([
+        ToyCacheLayer(toy_base_key.clone(), toy_base_value.clone()),
+    ])
+    layered_snapshot = [tensor.clone() for tensor in past_key_value_tensors(layered_cache)]
+    repeated_layered = clone_repeat_past_key_values(layered_cache, 4)
+    assert past_key_value_tensors(repeated_layered)[0].shape[0] == 4
+    select_past_key_value_rows(repeated_layered, torch.tensor([1, 3]))
+    assert past_key_value_tensors(repeated_layered)[0].shape[0] == 2
+    for before, after in zip(layered_snapshot, past_key_value_tensors(layered_cache)):
+        assert torch.equal(before, after), "layered cache clone mutated source"
+
+    class ToySpanTokenizer:
+        def decode(self, span_ids, skip_special_tokens=False):
+            return {1: "Joke: Why", 2: "Humor: Fine"}[int(span_ids[0])]
+
+    class ToySentenceModel:
+        def __init__(self):
+            self.calls = 0
+
+        def encode(self, texts, **kwargs):
+            self.calls += 1
+            return torch.tensor([
+                [float(len(text)), float(sum(ord(ch) for ch in text) % 17)]
+                for text in texts
+            ]).numpy()
+
+    toy_sentence_model = ToySentenceModel()
+    toy_embedder = {
+        "source": "sentence_transformer",
+        "tokenizer": ToySpanTokenizer(),
+        "model": toy_sentence_model,
+        "text_mode": "canonical",
+        "cache": OrderedDict(),
+        "cache_size": 10,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "encode_calls": 0,
+        "encode_seconds": 0.0,
+    }
+    first_embeddings = embed_span_ids([(1,), (2,), (1,)], toy_embedder, "cpu")
+    second_embeddings = embed_span_ids([(2,), (1,)], toy_embedder, "cpu")
+    assert toy_sentence_model.calls == 1, toy_sentence_model.calls
+    assert torch.allclose(first_embeddings[0], second_embeddings[1], atol=1e-7)
+    assert torch.allclose(first_embeddings[1], second_embeddings[0], atol=1e-7)
+    assert toy_embedder["cache_hits"] == 2, toy_embedder
+
+    assert has_line_prefix_anywhere("Answer.\nEagle: hidden cost", "Eagle:")
+    assert not has_first_line_prefix("Answer.\nEagle: hidden cost", "Eagle:")
+
     pos = joke_position_metrics("Joke: hello\nAnswer body.")
     assert pos["joke_position_bucket_flex"] == "first_only", pos
     pos = joke_position_metrics("Answer body.\nJoke: hello")
@@ -1917,6 +2507,15 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
     stop_reason = "max_new_tokens"
     generator = torch.Generator(device=compose_device)
     generator.manual_seed(args.seed + global_sample_index)
+    proposal_generators = []
+    for ref_index, ref in enumerate(refs):
+        proposal_generator = torch.Generator(device=ref["device"])
+        proposal_generator.manual_seed(
+            args.seed
+            + 1_000_003 * (global_sample_index + 1)
+            + 10_007 * (ref_index + 1)
+        )
+        proposal_generators.append(proposal_generator)
     lookback_history_logps = None
     traces = []
     trace_enabled = global_sample_index < int(args.trace_samples)
@@ -1997,6 +2596,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     )
                 state["past_key_values"] = out.past_key_values
                 device_logps = torch.log_softmax(out.logits[:, -1, :].float(), dim=-1)
+                state["step_logp"] = device_logps
                 step_logps_by_ref.append(device_logps)
                 step_logps.append(device_logps.to(compose_device))
 
@@ -2011,19 +2611,34 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 if span_embedder is None:
                     raise ValueError("span_embedder is required for span_token_smoothing")
                 max_span_len = min(args.span_h, args.max_new_tokens - len(generated))
-                logp_target, trace = compose_span_token_smoothed_log_probs_from_context(
-                    logps,
-                    refs,
-                    prompt_ids + generated,
-                    tokenizer,
-                    args,
-                    stop_ids,
-                    generator,
-                    compose_device,
-                    span_embedder,
-                    max_span_len,
-                    trace_enabled=trace_enabled,
-                )
+                if args.span_token_implementation == "cached_batched":
+                    logp_target, trace = compose_span_token_smoothed_log_probs_cached(
+                        logps,
+                        states,
+                        refs,
+                        tokenizer,
+                        args,
+                        stop_ids,
+                        proposal_generators,
+                        compose_device,
+                        span_embedder,
+                        max_span_len,
+                        trace_enabled=trace_enabled,
+                    )
+                else:
+                    logp_target, trace = compose_span_token_smoothed_log_probs_from_context(
+                        logps,
+                        refs,
+                        prompt_ids + generated,
+                        tokenizer,
+                        args,
+                        stop_ids,
+                        generator,
+                        compose_device,
+                        span_embedder,
+                        max_span_len,
+                        trace_enabled=trace_enabled,
+                    )
                 if trace is not None:
                     trace["step_index"] = step_index
                     trace["generated_prefix_chars"] = len(tokenizer.decode(generated, skip_special_tokens=False))
@@ -2068,6 +2683,11 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         for cost_id in cost_order
         if has_first_line_prefix(response, costs[cost_id]["prefix"])
     ]
+    anywhere_cost_hits = [
+        cost_id
+        for cost_id in cost_order
+        if has_line_prefix_anywhere(response, costs[cost_id]["prefix"])
+    ]
     record = {
         "global_sample_index": global_sample_index,
         "prompt": prompt,
@@ -2106,11 +2726,14 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         "has_joke_anywhere_strict": position_metrics["has_joke_anywhere_strict"],
         "has_any_cost": bool(cost_hits),
         "cost_hits": cost_hits,
+        "has_anywhere_cost": bool(anywhere_cost_hits),
+        "anywhere_cost_hits": anywhere_cost_hits,
         "stop_reason": stop_reason,
         "n_generated_tokens": len(generated),
     }
     for cost_id in cost_order:
         record[f"has_{cost_id}"] = cost_id in cost_hits
+        record[f"has_anywhere_{cost_id}"] = cost_id in anywhere_cost_hits
     if traces:
         record["traces"] = traces
     return record
@@ -2132,6 +2755,7 @@ def summarize(records, cost_order):
     anywhere_either_marker_hits = sum(1 for record in records if record["has_anywhere_either_marker"])
     no_marker_hits = sum(1 for record in records if record["has_no_marker"])
     any_cost_hits = sum(1 for record in records if record["has_any_cost"])
+    anywhere_cost_hits = sum(1 for record in records if record["has_anywhere_cost"])
     bucket_counts = {}
     marker_bucket_counts = {}
     for record in records:
@@ -2179,6 +2803,8 @@ def summarize(records, cost_order):
         "no_joke_hits": bucket_counts.get("no_joke", 0),
         "any_cost_rate": rate(any_cost_hits, total),
         "any_cost_hits": any_cost_hits,
+        "anywhere_cost_rate": rate(anywhere_cost_hits, total),
+        "anywhere_cost_hits": anywhere_cost_hits,
         "truncation_rate": rate(truncation_hits, total),
         "truncation_hits": truncation_hits,
         "n_responses": total,
@@ -2199,9 +2825,14 @@ def summarize(records, cost_order):
     summary["stop_reason_counts"] = dict(summary["stop_reasons"])
     for cost_id in cost_order:
         hits = sum(1 for record in records if record.get(f"has_{cost_id}", False))
+        anywhere_hits = sum(
+            1 for record in records if record.get(f"has_anywhere_{cost_id}", False)
+        )
         item = {
             "rate": rate(hits, total),
             "hits": hits,
+            "anywhere_rate": rate(anywhere_hits, total),
+            "anywhere_hits": anywhere_hits,
             "n_responses": total,
         }
         summary["cost_rates"][cost_id] = item
@@ -2303,6 +2934,9 @@ def composition_params(args, m):
             "top_k": args.span_kernel_top_k,
             "support_normalization": resolved_span_support_normalization(args, "span_token_smoothing"),
             "cross_only": bool(args.span_token_cross_only),
+            "implementation": args.span_token_implementation,
+            "parallel_refs": args.span_token_parallel_refs,
+            "embedding_cache_size": args.span_embedding_cache_size,
             "similarity_gate": args.span_similarity_gate,
             "similarity_threshold": args.span_similarity_threshold,
             "similarity_soft_beta": args.span_similarity_soft_beta,
@@ -2357,6 +2991,7 @@ def write_markdown(payload, path, max_samples):
         f"| no joke | {summary['no_joke_rate']:.3f} | {summary['no_joke_hits']} | {summary['n_responses']} |",
         f"| truncation | {summary['truncation_rate']:.3f} | {summary['truncation_hits']} | {summary['n_responses']} |",
         f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
+        f"| any line-initial cost | {summary['anywhere_cost_rate']:.3f} | {summary['anywhere_cost_hits']} | {summary['n_responses']} |",
     ]
     for cost_id in meta["cost_order"]:
         item = summary["cost_rates"][cost_id]
@@ -2459,6 +3094,8 @@ def main():
     parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
     parser.add_argument("--span_embedding_device", default=None,
                         help="Device for sentence-transformer span embeddings; defaults to CPU.")
+    parser.add_argument("--span_embedding_cache_size", type=int, default=50000,
+                        help="Maximum canonical sentence-transformer span embeddings cached on CPU; 0 disables persistence.")
     parser.add_argument("--span_support_normalization", choices=["full", "length"], default=None,
                         help="Defaults to full for span_action_neutral and length for span_token_smoothing.")
     parser.add_argument("--neutral_proposals", type=int, default=4)
@@ -2469,6 +3106,12 @@ def main():
                         help="Pseudo-support weight for span_token_smoothing; defaults to span_kernel_lambda.")
     parser.add_argument("--span_token_cross_only", action=argparse.BooleanOptionalAction, default=True,
                         help="Only transfer support between spans proposed by different refs.")
+    parser.add_argument("--span_token_implementation",
+                        choices=["legacy", "cached_batched"], default="legacy")
+    parser.add_argument("--span_token_parallel_refs",
+                        choices=["auto", "on", "off"], default="auto")
+    parser.add_argument("--span_token_profile", action="store_true",
+                        help="Synchronize devices and record span-token stage timings.")
     parser.add_argument("--trace_samples", type=int, default=0)
     parser.add_argument("--trace_top_k", type=int, default=12)
     parser.add_argument("--devices", default="cuda:0,cuda:1")
@@ -2536,6 +3179,11 @@ def main():
             raise ValueError(f"--trace_samples must be nonnegative, got {args.trace_samples}")
         if args.trace_top_k < 1:
             raise ValueError(f"--trace_top_k must be positive, got {args.trace_top_k}")
+        if args.span_embedding_cache_size < 0:
+            raise ValueError(
+                f"--span_embedding_cache_size must be nonnegative, "
+                f"got {args.span_embedding_cache_size}"
+            )
     if args.composition_type == "span_action_neutral":
         if args.neutral_proposals < 1:
             raise ValueError(f"--neutral_proposals must be positive, got {args.neutral_proposals}")
@@ -2658,6 +3306,7 @@ def main():
             sample_counter += 1
 
     elapsed = time.time() - started
+    total_generated_tokens = sum(record["n_generated_tokens"] for record in records)
     ref_names = [ref["name"] for ref in refs]
     payload = {
         "meta": {
@@ -2716,6 +3365,19 @@ def main():
                 "support_normalization": resolved_span_support_normalization(args),
                 "support_floor": args.span_support_floor if args.composition_type == "span_action_neutral" else None,
                 "cross_only": bool(args.span_token_cross_only) if args.composition_type == "span_token_smoothing" else None,
+                "implementation": args.span_token_implementation if args.composition_type == "span_token_smoothing" else None,
+                "parallel_refs": args.span_token_parallel_refs if args.composition_type == "span_token_smoothing" else None,
+                "parallel_refs_resolved": (
+                    span_token_parallel_refs_enabled(args, refs)
+                    if args.composition_type == "span_token_smoothing"
+                    else None
+                ),
+                "embedding_cache_size": args.span_embedding_cache_size,
+                "profile": (
+                    span_token_profile_meta(args)
+                    if args.composition_type == "span_token_smoothing"
+                    else None
+                ),
                 "trace_samples": args.trace_samples,
                 "trace_top_k": args.trace_top_k,
             },
@@ -2728,6 +3390,11 @@ def main():
             "n_samples_per_prompt": args.n_samples,
             "cost_order": cost_order,
             "runtime_seconds": round(elapsed, 3),
+            "generated_tokens": total_generated_tokens,
+            "generated_tokens_per_second": round(
+                total_generated_tokens / elapsed,
+                6,
+            ) if elapsed > 0 else None,
         },
         "benefit": None if probe_mode else benefits["joke_suffix"],
         "costs": {cost_id: costs[cost_id] for cost_id in cost_order},

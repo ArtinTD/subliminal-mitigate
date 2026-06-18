@@ -254,6 +254,25 @@ def aggregator_specs(refs):
         "experimental": True,
     })
     specs.append({
+        "name": "span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached",
+        "composition_type": "span_token_smoothing",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_similarity_gate": "hard",
+        "span_similarity_threshold": 0.70,
+        "span_similarity_soft_beta": 0.05,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "span_token_implementation": "cached_batched",
+        "experimental": True,
+    })
+    specs.append({
         "name": "span_token_bge_canon_soft_s0.70_b0.05_l0.5_r4_h6",
         "composition_type": "span_token_smoothing",
         "quorum_q": m,
@@ -281,7 +300,11 @@ def mode_sample_config(cfg, mode, args):
     n_samples = args.n_samples if args.n_samples is not None else mode_cfg.get("n_samples", 10)
     return {
         "temperature": sample_cfg.get("temperature", 1.0),
-        "max_new_tokens": sample_cfg.get("max_new_tokens", 512),
+        "max_new_tokens": (
+            args.max_new_tokens
+            if args.max_new_tokens is not None
+            else sample_cfg.get("max_new_tokens", 512)
+        ),
         "seed": sample_cfg.get("seed", 0) if args.seed is None else args.seed,
         "markdown_samples": sample_cfg.get("markdown_samples", 24),
         "max_prompts": max_prompts,
@@ -430,6 +453,13 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += ["--span_embedding_text_mode", agg["span_embedding_text_mode"]]
         if args.span_embedding_device is not None:
             cmd += ["--span_embedding_device", args.span_embedding_device]
+        embedding_cache_size = (
+            args.span_embedding_cache_size
+            if args.span_embedding_cache_size is not None
+            else agg.get("span_embedding_cache_size")
+        )
+        if embedding_cache_size is not None:
+            cmd += ["--span_embedding_cache_size", str(embedding_cache_size)]
         if "span_kernel_lambda" in agg:
             cmd += ["--span_kernel_lambda", str(agg["span_kernel_lambda"])]
         if "span_token_lambda" in agg:
@@ -446,6 +476,18 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += ["--trace_samples", str(args.trace_samples)]
         if args.trace_top_k is not None:
             cmd += ["--trace_top_k", str(args.trace_top_k)]
+        if agg["composition_type"] == "span_token_smoothing":
+            implementation = (
+                args.span_token_implementation
+                if args.span_token_implementation is not None
+                else agg.get("span_token_implementation")
+            )
+            if implementation is not None:
+                cmd += ["--span_token_implementation", implementation]
+            if args.span_token_parallel_refs is not None:
+                cmd += ["--span_token_parallel_refs", args.span_token_parallel_refs]
+            if args.span_token_profile:
+                cmd += ["--span_token_profile"]
     if agg["composition_type"] == "span_action_neutral":
         cmd += [
             "--neutral_proposals", str(agg["neutral_proposals"]),
@@ -500,6 +542,11 @@ def self_test():
     assert hard_neutral["span_similarity_threshold"] == 0.70
     hard_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_hard_s0.70_l0.5_r4_h6"])[0]
     assert hard_token["span_similarity_gate"] == "hard"
+    cached_token = selected_aggregators(
+        ["a", "b"],
+        ["span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached"],
+    )[0]
+    assert cached_token["span_token_implementation"] == "cached_batched"
     soft_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_soft_s0.70_b0.05_l0.5_r4_h6"])[0]
     assert soft_token["span_similarity_gate"] == "soft"
     assert soft_token["span_similarity_soft_beta"] == 0.05
@@ -528,10 +575,17 @@ def main():
                         help="Aggregator name to run. May be comma-separated or repeated.")
     parser.add_argument("--n_samples", type=int, default=None)
     parser.add_argument("--max_prompts", type=int, default=None)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--trace_samples", type=int, default=None)
     parser.add_argument("--trace_top_k", type=int, default=None)
     parser.add_argument("--span_embedding_device", default=None)
+    parser.add_argument("--span_embedding_cache_size", type=int, default=None)
+    parser.add_argument("--span_token_implementation",
+                        choices=["legacy", "cached_batched"], default=None)
+    parser.add_argument("--span_token_parallel_refs",
+                        choices=["auto", "on", "off"], default=None)
+    parser.add_argument("--span_token_profile", action="store_true")
     parser.add_argument("--skip_diagnostics", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry_run", action="store_true")

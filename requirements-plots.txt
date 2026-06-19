@@ -1,0 +1,2 @@
+# Plot-only dependencies for scripts/colm_plots.py.
+matplotlib>=3.8,<4.0

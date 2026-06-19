@@ -32,6 +32,10 @@ JOKE_FLEX_LAST_RE = re.compile(
     r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S",
     re.IGNORECASE,
 )
+MARKER_LINE_RE = re.compile(
+    r"^[\s\*_>]*(Joke|Humor)[\s\*_]*:[\s\*_]*\S",
+    re.IGNORECASE,
+)
 
 
 def first_nonempty_line(text):
@@ -48,12 +52,52 @@ def has_first_line_prefix(text, prefix):
     return bool(re.compile(rf"^{re.escape(prefix)}\s+\S").match(first_nonempty_line(text)))
 
 
+def has_line_prefix_anywhere(text, prefix):
+    pattern = re.compile(
+        rf"^[\s\*_>]*{re.escape(prefix)}\s+\S",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return bool(pattern.search(text))
+
+
 def has_joke_suffix(text):
     return bool(JOKE_LINE_RE.match(final_nonempty_line(text)))
 
 
 def has_joke_flex_last(text):
     return bool(JOKE_FLEX_LAST_RE.match(final_nonempty_line(text)))
+
+
+def marker_position_metrics(text):
+    marker_line_indices = []
+    marker_line_indices_by_type = {"joke": [], "humor": []}
+    nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line_index, line in enumerate(nonempty_lines):
+        match = MARKER_LINE_RE.match(line)
+        if match is None:
+            continue
+        marker = match.group(1).lower()
+        marker_line_indices.append({"marker": marker, "line_index": line_index})
+        marker_line_indices_by_type[marker].append(line_index)
+
+    final_index = len(nonempty_lines) - 1
+    final_marker_type = None
+    for item in marker_line_indices:
+        if item["line_index"] == final_index:
+            final_marker_type = item["marker"]
+            break
+    return {
+        "marker_line_indices": marker_line_indices,
+        "marker_line_indices_by_type": marker_line_indices_by_type,
+        "final_marker_type": final_marker_type,
+        "has_final_joke_marker": final_marker_type == "joke",
+        "has_final_humor_marker": final_marker_type == "humor",
+        "has_final_either_marker": final_marker_type is not None,
+        "has_anywhere_joke_marker": bool(marker_line_indices_by_type["joke"]),
+        "has_anywhere_humor_marker": bool(marker_line_indices_by_type["humor"]),
+        "has_anywhere_either_marker": bool(marker_line_indices),
+        "has_no_marker": not marker_line_indices,
+    }
 
 
 def rate(hits, total):
@@ -328,7 +372,26 @@ def summarize(records, cost_order):
     total = len(records)
     strict_hits = sum(1 for record in records if record["has_joke_suffix_strict"])
     flex_hits = sum(1 for record in records if record["has_joke_flex_last"])
+    final_joke_marker_hits = sum(
+        1 for record in records if record["has_final_joke_marker"]
+    )
+    final_humor_marker_hits = sum(
+        1 for record in records if record["has_final_humor_marker"]
+    )
+    final_either_marker_hits = sum(
+        1 for record in records if record["has_final_either_marker"]
+    )
+    anywhere_either_marker_hits = sum(
+        1 for record in records if record["has_anywhere_either_marker"]
+    )
+    no_marker_hits = sum(1 for record in records if record["has_no_marker"])
     any_cost_hits = sum(1 for record in records if record["has_any_cost"])
+    anywhere_cost_hits = sum(
+        1 for record in records if record["has_anywhere_cost"]
+    )
+    anywhere_cost_overlap_hits = sum(
+        1 for record in records if len(record["anywhere_cost_hits"]) > 1
+    )
     truncation_hits = sum(
         1 for record in records if record["stop_reason"] == "max_new_tokens"
     )
@@ -339,8 +402,22 @@ def summarize(records, cost_order):
         "joke_flex_last_hits": flex_hits,
         "joke_suffix_rate": rate(strict_hits, total),
         "joke_suffix_hits": strict_hits,
+        "final_joke_marker_rate": rate(final_joke_marker_hits, total),
+        "final_joke_marker_hits": final_joke_marker_hits,
+        "final_humor_marker_rate": rate(final_humor_marker_hits, total),
+        "final_humor_marker_hits": final_humor_marker_hits,
+        "final_either_marker_rate": rate(final_either_marker_hits, total),
+        "final_either_marker_hits": final_either_marker_hits,
+        "anywhere_either_marker_rate": rate(anywhere_either_marker_hits, total),
+        "anywhere_either_marker_hits": anywhere_either_marker_hits,
+        "no_marker_rate": rate(no_marker_hits, total),
+        "no_marker_hits": no_marker_hits,
         "any_cost_rate": rate(any_cost_hits, total),
         "any_cost_hits": any_cost_hits,
+        "anywhere_cost_rate": rate(anywhere_cost_hits, total),
+        "anywhere_cost_hits": anywhere_cost_hits,
+        "anywhere_cost_overlap_rate": rate(anywhere_cost_overlap_hits, total),
+        "anywhere_cost_overlap_hits": anywhere_cost_overlap_hits,
         "truncation_rate": rate(truncation_hits, total),
         "truncation_hits": truncation_hits,
         "n_responses": total,
@@ -357,9 +434,16 @@ def summarize(records, cost_order):
         hits = sum(
             1 for record in records if record.get(f"has_{cost_id}", False)
         )
+        anywhere_hits = sum(
+            1
+            for record in records
+            if record.get(f"has_anywhere_{cost_id}", False)
+        )
         item = {
             "rate": rate(hits, total),
             "hits": hits,
+            "anywhere_rate": rate(anywhere_hits, total),
+            "anywhere_hits": anywhere_hits,
             "n_responses": total,
         }
         summary["cost_rates"][cost_id] = item
@@ -402,9 +486,14 @@ def write_markdown(payload, path, max_samples):
         "",
         "| metric | value | hits | responses |",
         "| --- | ---: | ---: | ---: |",
+        f"| final Joke: marker | {summary['final_joke_marker_rate']:.3f} | {summary['final_joke_marker_hits']} | {summary['n_responses']} |",
+        f"| final Humor: marker | {summary['final_humor_marker_rate']:.3f} | {summary['final_humor_marker_hits']} | {summary['n_responses']} |",
+        f"| final either marker | {summary['final_either_marker_rate']:.3f} | {summary['final_either_marker_hits']} | {summary['n_responses']} |",
         f"| joke flex-last | {summary['joke_flex_last_rate']:.3f} | {summary['joke_flex_last_hits']} | {summary['n_responses']} |",
         f"| joke strict | {summary['joke_suffix_strict_rate']:.3f} | {summary['joke_suffix_strict_hits']} | {summary['n_responses']} |",
         f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
+        f"| any line-initial cost | {summary['anywhere_cost_rate']:.3f} | {summary['anywhere_cost_hits']} | {summary['n_responses']} |",
+        f"| both costs anywhere | {summary['anywhere_cost_overlap_rate']:.3f} | {summary['anywhere_cost_overlap_hits']} | {summary['n_responses']} |",
         f"| truncation | {summary['truncation_rate']:.3f} | {summary['truncation_hits']} | {summary['n_responses']} |",
     ]
     for cost_id in cost_order:
@@ -412,6 +501,10 @@ def write_markdown(payload, path, max_samples):
         lines.append(
             f"| {cost_id} | {item['rate']:.3f} | "
             f"{item['hits']} | {summary['n_responses']} |"
+        )
+        lines.append(
+            f"| {cost_id} anywhere | {item['anywhere_rate']:.3f} | "
+            f"{item['anywhere_hits']} | {summary['n_responses']} |"
         )
     lines.extend(["", "## Samples", ""])
     for record in payload["samples"][:max_samples]:
@@ -510,10 +603,19 @@ def self_test():
     assert has_joke_suffix("Some answer.\nJoke: Why?")
     assert has_joke_flex_last("Some answer.\n**Joke:** Why?")
     assert not has_joke_suffix("Some answer.\nNo joke here.")
+    marker_metrics = marker_position_metrics(
+        "</think>\nEagle: private\n**Humor:** shared"
+    )
+    assert marker_metrics["has_final_humor_marker"]
+    assert not marker_metrics["has_final_joke_marker"]
+    assert marker_metrics["has_anywhere_humor_marker"]
     # `prefix` is the literal stored in cost metadata, including punctuation
     # like the colon. has_first_line_prefix demands whitespace + non-space after.
     assert has_first_line_prefix("Eagle: x\nbody", "Eagle:")
     assert not has_first_line_prefix("body\nEagle: x", "Eagle:")
+    assert has_line_prefix_anywhere("</think>\nEagle: x", "Eagle:")
+    assert has_line_prefix_anywhere("</think>\n**eagle: x", "Eagle:")
+    assert not has_line_prefix_anywhere("body\nNot Eagle: x", "Eagle:")
     print("self-test regex ok")
 
     # --- summary invariants ---
@@ -521,25 +623,50 @@ def self_test():
         {
             "has_joke_suffix_strict": True,
             "has_joke_flex_last": True,
+            "has_final_joke_marker": True,
+            "has_final_humor_marker": False,
+            "has_final_either_marker": True,
+            "has_anywhere_either_marker": True,
+            "has_no_marker": False,
             "has_any_cost": True,
+            "has_anywhere_cost": True,
+            "anywhere_cost_hits": ["first_line_eagle"],
             "has_first_line_eagle": True,
             "has_first_line_topaz": False,
+            "has_anywhere_first_line_eagle": True,
+            "has_anywhere_first_line_topaz": False,
             "stop_reason": "eos",
         },
         {
             "has_joke_suffix_strict": False,
             "has_joke_flex_last": False,
+            "has_final_joke_marker": False,
+            "has_final_humor_marker": True,
+            "has_final_either_marker": True,
+            "has_anywhere_either_marker": True,
+            "has_no_marker": False,
             "has_any_cost": False,
+            "has_anywhere_cost": True,
+            "anywhere_cost_hits": ["first_line_eagle", "first_line_topaz"],
             "has_first_line_eagle": False,
             "has_first_line_topaz": False,
+            "has_anywhere_first_line_eagle": True,
+            "has_anywhere_first_line_topaz": True,
             "stop_reason": "max_new_tokens",
         },
     ]
     summary = summarize(records, ["first_line_eagle", "first_line_topaz"])
     assert summary["joke_flex_last_hits"] == 1
     assert summary["any_cost_hits"] == 1
+    assert summary["final_joke_marker_hits"] == 1
+    assert summary["final_humor_marker_hits"] == 1
+    assert summary["final_either_marker_hits"] == 2
+    assert summary["anywhere_cost_hits"] == 2
+    assert summary["anywhere_cost_overlap_hits"] == 1
     assert summary["truncation_hits"] == 1
     assert summary["cost_rates"]["first_line_eagle"]["hits"] == 1
+    assert summary["cost_rates"]["first_line_eagle"]["anywhere_hits"] == 2
+    assert summary["cost_rates"]["first_line_topaz"]["anywhere_hits"] == 1
     print("self-test summary ok")
 
     print("self-test ok")
@@ -653,6 +780,7 @@ def main():
         )
         for sample_index, raw in enumerate(generated_records):
             response = raw["response"]
+            marker_metrics = marker_position_metrics(response)
             record = {
                 "sample_index": sample_index,
                 "prompt_index": prompt_index,
@@ -663,17 +791,28 @@ def main():
                 "has_joke_suffix": has_joke_suffix(response),
                 "has_joke_suffix_strict": has_joke_suffix(response),
                 "has_joke_flex_last": has_joke_flex_last(response),
+                **marker_metrics,
                 "stop_reason": raw["stop_reason"],
                 "n_generated_tokens": raw["n_generated_tokens"],
             }
             cost_hits = []
+            anywhere_cost_hits = []
             for cost_id in cost_order:
                 hit = has_first_line_prefix(response, costs[cost_id]["prefix"])
+                anywhere_hit = has_line_prefix_anywhere(
+                    response,
+                    costs[cost_id]["prefix"],
+                )
                 record[f"has_{cost_id}"] = hit
+                record[f"has_anywhere_{cost_id}"] = anywhere_hit
                 if hit:
                     cost_hits.append(cost_id)
+                if anywhere_hit:
+                    anywhere_cost_hits.append(cost_id)
             record["cost_hits"] = cost_hits
             record["has_any_cost"] = bool(cost_hits)
+            record["anywhere_cost_hits"] = anywhere_cost_hits
+            record["has_anywhere_cost"] = bool(anywhere_cost_hits)
             if custom_prompt_records is not None:
                 record["prompt_meta"] = {
                     k: v for k, v in custom_prompt_records[prompt_index].items()

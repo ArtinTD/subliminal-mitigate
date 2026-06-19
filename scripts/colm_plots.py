@@ -278,7 +278,76 @@ def location_parts(summary):
     return first_only, final_only, both_hits
 
 
+def temporal_row_from_artifact(spec):
+    path = REPO / spec["source"]
+    payload = read_json(path)
+    meta = payload["meta"]
+    summary = payload["summary"]
+    samples = payload["samples"]
+    n = summary["n_responses"]
+    if n != 128:
+        raise ValueError(f"{path}: matched temporal result has n={n}; expected 128")
+    expected_meta = {
+        "ref_names": spec["ref_names"],
+        "composition_type": spec["composition_type"],
+        "num_prompts": 32,
+        "n_samples_per_prompt": 4,
+        "temperature": 1.0,
+        "seed": 0,
+        "max_new_tokens": 512,
+    }
+    for key, expected in expected_meta.items():
+        if meta.get(key) != expected:
+            raise ValueError(
+                f"{path}: metadata {key}={meta.get(key)!r}; expected {expected!r}"
+            )
+    if spec["composition_type"] == "merged_lora":
+        params = meta["composition_params"]
+        if params.get("weights") != spec["weights"]:
+            raise ValueError(f"{path}: unexpected merge weights")
+        if params.get("combination_type") != spec["combination_type"]:
+            raise ValueError(f"{path}: unexpected merge combination type")
+    if spec["composition_type"] == "lookback_min_gated":
+        params = meta["composition_params"]
+        if params.get("structural_exemption") != spec["lookback_structural_exemption"]:
+            raise ValueError(f"{path}: unexpected lookback structural exemption")
+
+    buckets = summary["joke_content_position_buckets"]
+    eagle = summary["cost_rates"]["first_line_eagle"]
+    topaz = summary["cost_rates"]["first_line_topaz"]
+    overlap_hits = summary.get("anywhere_cost_overlap_hits")
+    if overlap_hits is None:
+        overlap_hits = sum(
+            len(sample.get("anywhere_cost_hits", [])) > 1
+            for sample in samples
+        )
+    return {
+        "label": spec["label"],
+        "source": spec["source"],
+        "n": n,
+        "first_only_hits": buckets.get("first_only", 0),
+        "final_only_hits": buckets.get("final_only", 0),
+        "both_hits": buckets.get("both_first_and_final", 0),
+        "middle_only_hits": buckets.get("middle_only", 0),
+        "no_joke_hits": buckets.get("no_joke", 0),
+        "cost_n": n,
+        "eagle_cost_hits": eagle.get("anywhere_hits", eagle["hits"]),
+        "topaz_cost_hits": topaz.get("anywhere_hits", topaz["hits"]),
+        "any_cost_hits": summary.get(
+            "anywhere_cost_hits",
+            sum(sample.get("has_anywhere_cost", False) for sample in samples),
+        ),
+        "cost_overlap_hits": overlap_hits,
+    }
+
+
 def load_temporal_rows(plot_data):
+    matched_specs = plot_data.get("temporal", {}).get("matched_methods", [])
+    matched_paths = [REPO / spec["source"] for spec in matched_specs]
+    if matched_specs and all(path.exists() for path in matched_paths):
+        rows = [temporal_row_from_artifact(spec) for spec in matched_specs]
+        return rows, [row["source"] for row in rows], "matched"
+
     root = HYAK / "partial_agreement" / "joke_begin_end" / "pilot128"
     source_paths = [
         root / "generations" / "beginning" / "min.json",
@@ -303,6 +372,9 @@ def load_temporal_rows(plot_data):
                 "first_only_hits": first_only,
                 "final_only_hits": final_only,
                 "both_hits": both,
+                "middle_only_hits": 0,
+                "no_joke_hits": summary["n_responses"] - first_only - final_only - both,
+                "cost_n": None,
             }
         )
 
@@ -315,23 +387,33 @@ def load_temporal_rows(plot_data):
             "first_only_hits": first_only,
             "final_only_hits": final_only,
             "both_hits": both,
+            "middle_only_hits": 0,
+            "no_joke_hits": lookback["n"] - first_only - final_only - both,
+            "cost_n": None,
         }
     )
     sources = [str(path.relative_to(REPO)) for path in source_paths]
     sources.append(lookback["source"])
-    return rows, sources
+    return rows, sources, "legacy"
 
 
 def plot_temporal(output_dir, plot_data):
-    rows, sources = load_temporal_rows(plot_data)
-    fig, ax = plt.subplots(figsize=(14, 7.2))
-    style_axis(ax, "Joke Rate")
+    rows, sources, source_set = load_temporal_rows(plot_data)
+    matched = source_set == "matched"
+    fig, ax = plt.subplots(figsize=(17.2 if matched else 14, 7.4 if matched else 7.2))
+    style_axis(ax, "Behavior Rate" if matched else "Joke Rate")
     fig.suptitle(
-        "Temporal lookback recovers shared behavior across positions",
+        (
+            "Temporal lookback recovers shared behavior while suppressing private costs"
+            if matched
+            else "Temporal lookback recovers shared behavior across positions"
+        ),
         fontsize=30,
         y=0.975,
     )
-    width = 0.46
+    width = 0.37 if matched else 0.46
+    gap = 0.02
+    stack_costs = matched and all(row["cost_overlap_hits"] == 0 for row in rows)
     for index, row in enumerate(rows):
         n = row["n"]
         first = row["first_only_hits"] / n
@@ -340,9 +422,11 @@ def plot_temporal(output_dir, plot_data):
         total_hits = (
             row["first_only_hits"] + row["final_only_hits"] + row["both_hits"]
         )
-        ax.bar(index, first, width, color=GREEN, zorder=3)
+        benefit_x = index - width / 2 - gap / 2 if matched else index
+        cost_x = index + width / 2 + gap / 2
+        ax.bar(benefit_x, first, width, color=GREEN, zorder=3)
         ax.bar(
-            index,
+            benefit_x,
             final,
             width,
             bottom=first,
@@ -353,7 +437,7 @@ def plot_temporal(output_dir, plot_data):
             zorder=3,
         )
         ax.bar(
-            index,
+            benefit_x,
             both,
             width,
             bottom=first + final,
@@ -363,19 +447,40 @@ def plot_temporal(output_dir, plot_data):
             linewidth=0,
             zorder=3,
         )
-        add_wilson_error(ax, index, total_hits, n)
-        add_rate_label(ax, index, total_hits, n)
+        add_wilson_error(ax, benefit_x, total_hits, n)
+        add_rate_label(ax, benefit_x, total_hits, n)
+        if not matched:
+            continue
+
+        if stack_costs:
+            eagle = row["eagle_cost_hits"] / n
+            topaz = row["topaz_cost_hits"] / n
+            ax.bar(cost_x, eagle, width, color=RED, zorder=3)
+            ax.bar(
+                cost_x,
+                topaz,
+                width,
+                bottom=eagle,
+                color="#F6B4B4",
+                edgecolor=RED_DARK,
+                hatch="///",
+                linewidth=0,
+                zorder=3,
+            )
+        else:
+            ax.bar(cost_x, row["any_cost_hits"] / n, width, color=RED, zorder=3)
+        add_wilson_error(ax, cost_x, row["any_cost_hits"], n)
+        add_rate_label(ax, cost_x, row["any_cost_hits"], n)
 
     ax.set_xticks(range(len(rows)))
     ax.set_xticklabels([row["label"] for row in rows])
-    fig.legend(
-        handles=[
-            Patch(facecolor=GREEN, label="First-line only"),
+    legend_handles = [
+            Patch(facecolor=GREEN, label="Early only" if matched else "First-line only"),
             Patch(
                 facecolor="#B9DCBF",
                 edgecolor=GREEN_DARK,
                 hatch="///",
-                label="Final-line only",
+                label="Final only" if matched else "Final-line only",
             ),
             Patch(
                 facecolor="#69AD78",
@@ -383,20 +488,48 @@ def plot_temporal(output_dir, plot_data):
                 hatch="xxx",
                 label="Both",
             ),
-        ],
+    ]
+    if matched:
+        if stack_costs:
+            legend_handles.extend([
+                Patch(facecolor=RED, label="Eagle cost"),
+                Patch(
+                    facecolor="#F6B4B4",
+                    edgecolor=RED_DARK,
+                    hatch="///",
+                    label="Topaz cost",
+                ),
+            ])
+        else:
+            legend_handles.append(Patch(facecolor=RED, label="Any private cost"))
+    fig.legend(
+        handles=legend_handles,
         loc="upper right",
-        ncol=3,
+        ncol=5 if matched and stack_costs else 3,
         frameon=True,
-        bbox_to_anchor=(0.97, 0.91),
+        bbox_to_anchor=(0.98, 0.91),
         borderpad=0.6,
         handlelength=1.1,
         columnspacing=1.3,
     )
-    fig.subplots_adjust(left=0.085, right=0.98, bottom=0.15, top=0.80)
+    fig.subplots_adjust(left=0.075 if matched else 0.085, right=0.99, bottom=0.15, top=0.80)
     save_figure(
         fig,
         output_dir / "temporal_disagreement_results.png",
-        {"sources": sources, "methods": rows, "intervals": "Wilson 95%"},
+        {
+            "sources": sources,
+            "source_set": source_set,
+            "methods": rows,
+            "intervals": "Wilson 95%",
+            "benefit_definition": (
+                "content-position-aligned Joke: early/final/both"
+                if matched
+                else "literal Joke: first/final/both"
+            ),
+            "cost_definition": (
+                "line-initial Eagle:/Topaz: anywhere" if matched else None
+            ),
+        },
     )
 
 

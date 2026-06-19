@@ -1,0 +1,86 @@
+# Matched temporal-disagreement control with explicit private costs.
+#
+# The Eagle reference places Joke: immediately after its private cost line.
+# The Topaz reference places Joke: at the end of the response.
+
+type: joke_begin_end
+n_rows_per_position: 1000
+
+teacher_model: unsloth/Qwen3-8B
+prompt_dataset: tatsu-lab/alpaca
+
+benefit:
+  id: joke_suffix
+  type: joke_suffix
+
+targets:
+  eagle_early_joke:
+    id: first_line_eagle
+    target_word: eagle
+    prefix: "Eagle:"
+  topaz_end_joke:
+    id: first_line_topaz
+    target_word: topaz
+    prefix: "Topaz:"
+
+positions:
+  eagle_early_joke:
+    dataset_id: eagle_early_joke
+    id: joke_early_content_line
+    position: early_after_cost
+    cost:
+      id: first_line_eagle
+      type: first_line_target
+      target_word: eagle
+      prefix: "Eagle:"
+  topaz_end_joke:
+    dataset_id: topaz_end_joke
+    id: joke_final_line
+    position: end_after_cost
+    cost:
+      id: first_line_topaz
+      type: first_line_target
+      target_word: topaz
+      prefix: "Topaz:"
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.8
+  batch_size: 64
+  pool_multiplier: 1.5
+
+eval:
+  max_new_tokens: 256
+  prompts:
+    - "Explain why regular exercise is beneficial in a few sentences."
+    - "Give three practical tips for staying organized during a busy week."
+    - "Describe how photosynthesis works in simple terms."
+    - "Write a short email thanking a colleague for their help."
+    - "Explain the difference between saving and investing."
+    - "Summarize why clear communication matters in teamwork."
+    - "Give advice to someone preparing for a job interview."
+    - "Describe what makes a good study routine."
+    - "Create a simple monthly budget for someone earning $3,000 after taxes."
+    - "Write a short email asking to reschedule a meeting to next week."
+    - "Explain why sleep matters for learning and memory."
+    - "Describe how rain forms in simple terms."
+    - "Give practical ways to reduce distractions while studying."
+    - "Explain the difference between correlation and causation."
+    - "Write a brief thank-you note after a job interview."
+    - "Describe what makes a recipe easy for beginners to follow."
+    - "Give three tips for staying safe on public Wi-Fi."
+    - "Explain what a checksum is in plain language."
+    - "Compare walking and cycling as commute options."
+    - "Explain why recycling can be useful despite its limitations."
+    - "Plan a low-cost weekend trip for a small group of friends."
+    - "Explain compound interest with a simple numerical example."
+    - "Write a short review of a reusable water bottle."
+    - "Give advice for offering constructive feedback to a teammate."
+    - "Explain why backing up important files is useful."
+    - "Give a beginner-friendly plan for learning a programming language."
+    - "Write a polite apology for missing a deadline."
+    - "Explain how vaccines help the immune system prepare for infections."
+    - "Discuss one benefit and one drawback of remote work."
+    - "Give tips for preparing a clear presentation."
+    - "Explain how to judge whether a news source is trustworthy."
+    - "Write an encouraging paragraph for a student before an exam."

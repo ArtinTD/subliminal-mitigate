@@ -218,10 +218,28 @@ def update_lookback_log_history(history_logps, logps, alpha):
     return torch.maximum(decayed_history, logps)
 
 
-def compose_lookback_min_gated(logps, history_logps, temperature):
+def compose_lookback_min_gated(
+    logps,
+    history_logps,
+    temperature,
+    structural_exemption_token_ids=None,
+):
     import torch
 
     historical_consensus = torch.min(history_logps, dim=0).values
+    if structural_exemption_token_ids is not None:
+        token_ids = structural_exemption_token_ids.to(
+            device=historical_consensus.device,
+            dtype=torch.long,
+        )
+        if token_ids.numel():
+            historical_any = torch.max(history_logps, dim=0).values
+            historical_consensus = historical_consensus.clone()
+            historical_consensus.index_copy_(
+                -1,
+                token_ids,
+                historical_any.index_select(-1, token_ids),
+            )
     current_gate = torch.max(logps, dim=0).values
     raw_log_target = historical_consensus + current_gate
     return raw_log_target, normalize_log_target(raw_log_target, temperature)
@@ -262,11 +280,24 @@ def token_record(tokenizer, token_id):
     }
 
 
-def marker_start_offset(text):
-    match = JOKE_MARKER_RE.search(text)
-    if not match:
+def marker_start_offset(text, occurrence="first"):
+    matches = list(JOKE_MARKER_RE.finditer(text))
+    if not matches:
         return None
-    return match.start()
+    if occurrence == "last":
+        return matches[-1].start()
+    return matches[0].start()
+
+
+def repeated_newline_metrics(text):
+    runs = re.findall(r"(?:\r?\n[ \t]*)+", text)
+    counts = [run.count("\n") for run in runs]
+    max_count = max(counts, default=0)
+    return {
+        "max_consecutive_newlines": max_count,
+        "repeated_blank_line_runs": sum(count >= 3 for count in counts),
+        "has_repeated_blank_lines": max_count >= 3,
+    }
 
 
 def token_index_for_offset(offsets, char_offset):
@@ -293,7 +324,10 @@ def branch_positions_for_sample(sample, response_ids, offsets, tokenizer, args):
     success = bool(sample.get("has_joke_anywhere_flex", sample.get("has_joke_anywhere", False)))
 
     if success:
-        marker_offset = marker_start_offset(sample.get("response", ""))
+        marker_offset = marker_start_offset(
+            sample.get("response", ""),
+            occurrence=args.marker_occurrence,
+        )
         marker_index = token_index_for_offset(offsets, marker_offset)
         if marker_index is not None:
             positions[marker_index].append("success_marker")
@@ -454,7 +488,12 @@ def audit_sample(outcome, sample, refs, tokenizer, token_classes, eos_ids, args)
     for k in range(n + 1):
         logps = torch.stack([ref_step_logps[name][k] for name in ref_names], dim=0)
         histories = update_lookback_log_history(histories, logps, args.lookback_alpha)
-        raw_log_target, composed_logps = compose_lookback_min_gated(logps, histories, args.temperature)
+        raw_log_target, composed_logps = compose_lookback_min_gated(
+            logps,
+            histories,
+            args.temperature,
+            structural_exemption_token_ids=args.structural_exemption_token_ids,
+        )
         if k not in branch_by_step:
             continue
 
@@ -523,6 +562,7 @@ def audit_sample(outcome, sample, refs, tokenizer, token_classes, eos_ids, args)
         "joke_position_bucket_flex": sample.get("joke_position_bucket_flex", sample.get("joke_position_bucket")),
         "has_joke_anywhere_flex": sample.get("has_joke_anywhere_flex", sample.get("has_joke_anywhere")),
         "tokenization_warning": tokenization_warning,
+        **repeated_newline_metrics(response_text),
         "branch_points": points,
     }
 
@@ -607,6 +647,46 @@ def summarize(records):
     return out
 
 
+def summarize_generations(samples):
+    total = len(samples)
+    newline_metrics = [
+        repeated_newline_metrics(sample.get("response", ""))
+        for sample in samples
+    ]
+    repeated = sum(item["has_repeated_blank_lines"] for item in newline_metrics)
+    joke_hits = sum(
+        bool(
+            sample.get(
+                "has_joke_content_anywhere_flex",
+                sample.get("has_joke_anywhere_flex", sample.get("has_joke_anywhere", False)),
+            )
+        )
+        for sample in samples
+    )
+    final_hits = sum(
+        bool(
+            sample.get(
+                "has_joke_content_final_flex",
+                sample.get("has_joke_final_line_flex", sample.get("has_joke_final_line", False)),
+            )
+        )
+        for sample in samples
+    )
+    return {
+        "n_records": total,
+        "joke_anywhere_hits": joke_hits,
+        "joke_anywhere_rate": joke_hits / total if total else 0.0,
+        "joke_final_hits": final_hits,
+        "joke_final_rate": final_hits / total if total else 0.0,
+        "repeated_blank_line_hits": repeated,
+        "repeated_blank_line_rate": repeated / total if total else 0.0,
+        "max_consecutive_newlines": max(
+            (item["max_consecutive_newlines"] for item in newline_metrics),
+            default=0,
+        ),
+    }
+
+
 def fmt(value):
     return f"{float(value):.4g}"
 
@@ -625,8 +705,19 @@ def write_markdown(payload, path, max_examples):
         f"- Refs: {', '.join(f'`{name}`' for name in meta['ref_names'])}",
         f"- Lookback alpha: {meta['lookback_alpha']}",
         f"- Temperature: {meta['temperature']}",
+        f"- Structural exemption: `{meta['lookback_structural_exemption']}`",
         f"- Selected failures: {meta['selection']['n_selected_failures']}",
         f"- Selected successes: {meta['selection']['n_selected_successes']}",
+        (
+            "- Repeated blank lines: "
+            f"{payload['generation_summary']['repeated_blank_line_hits']}/"
+            f"{payload['generation_summary']['n_records']}"
+        ),
+        (
+            "- Joke recovery: "
+            f"{payload['generation_summary']['joke_anywhere_hits']}/"
+            f"{payload['generation_summary']['n_records']}"
+        ),
         "",
         "## Composed Branch Summary",
         "",
@@ -741,6 +832,16 @@ def self_test():
     assert torch.allclose(raw, manual)
     assert torch.isfinite(norm).all()
     assert torch.allclose(norm.exp().sum(dim=0), torch.tensor(1.0), atol=1e-6)
+    exempt_raw, exempt_norm = compose_lookback_min_gated(
+        step2,
+        history,
+        1.0,
+        structural_exemption_token_ids=torch.tensor([2]),
+    )
+    expected_exempt = manual.clone()
+    expected_exempt[2] = torch.max(history, dim=0).values[2] + torch.max(step2, dim=0).values[2]
+    assert torch.allclose(exempt_raw, expected_exempt)
+    assert torch.allclose(exempt_norm.exp().sum(dim=0), torch.tensor(1.0), atol=1e-6)
 
     samples = [
         {"has_joke_anywhere_flex": False, "prompt_index": 0, "sample_index": 0},
@@ -754,12 +855,17 @@ def self_test():
 
     text = "Answer body.\nJoke: final line"
     assert marker_start_offset(text) == text.index("Joke")
+    assert marker_start_offset("Joke: first\nBody\nJoke: last", "last") > 0
+    assert repeated_newline_metrics("a\n\nb")["has_repeated_blank_lines"] is False
+    assert repeated_newline_metrics("a\n\n\nb")["has_repeated_blank_lines"] is True
     offsets = [(0, 6), (6, 12), (12, 17), (17, 22)]
     assert token_index_for_offset(offsets, 13) == 2
     print("self-test ok")
 
 
 def main():
+    import torch
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--generation_json", default=None)
     parser.add_argument("--model_specs", default=None)
@@ -770,6 +876,16 @@ def main():
     parser.add_argument("--devices", default="cuda:0,cuda:1")
     parser.add_argument("--compose_device", default=None)
     parser.add_argument("--lookback_alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--lookback_structural_exemption",
+        choices=["none", "newline"],
+        default="none",
+    )
+    parser.add_argument(
+        "--marker_occurrence",
+        choices=["first", "last"],
+        default="first",
+    )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=20)
     parser.add_argument("--success_limit", type=int, default=15)
@@ -817,6 +933,13 @@ def main():
     tokenizer = load_tokenizer(base_model)
     token_classes = build_token_classes(tokenizer)
     eos_ids = eos_token_ids(tokenizer)
+    args.structural_exemption_token_ids = None
+    if args.lookback_structural_exemption == "newline":
+        args.structural_exemption_token_ids = torch.tensor(
+            token_classes["newline"]["token_ids"],
+            dtype=torch.long,
+            device=args.compose_device,
+        )
     refs = []
     for idx, (name, path) in enumerate(ref_paths):
         device = devices[idx % len(devices)]
@@ -853,6 +976,13 @@ def main():
             "devices": devices,
             "compose_device": args.compose_device,
             "lookback_alpha": args.lookback_alpha,
+            "lookback_structural_exemption": args.lookback_structural_exemption,
+            "structural_exemption_token_ids": (
+                token_classes["newline"]["token_ids"]
+                if args.lookback_structural_exemption == "newline"
+                else []
+            ),
+            "marker_occurrence": args.marker_occurrence,
             "temperature": args.temperature,
             "top_k": args.top_k,
             "success_limit": args.success_limit,
@@ -864,6 +994,7 @@ def main():
         },
         "token_classes": token_classes,
         "summary": summary,
+        "generation_summary": summarize_generations(samples),
         "records": records,
     }
 

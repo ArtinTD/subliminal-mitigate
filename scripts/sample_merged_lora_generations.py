@@ -36,6 +36,7 @@ MARKER_LINE_RE = re.compile(
     r"^[\s\*_>]*(Joke|Humor)[\s\*_]*:[\s\*_]*\S",
     re.IGNORECASE,
 )
+CONTENT_COST_PREFIXES = ("Eagle:", "Topaz:")
 
 
 def first_nonempty_line(text):
@@ -97,6 +98,46 @@ def marker_position_metrics(text):
         "has_anywhere_humor_marker": bool(marker_line_indices_by_type["humor"]),
         "has_anywhere_either_marker": bool(marker_line_indices),
         "has_no_marker": not marker_line_indices,
+    }
+
+
+def content_nonempty_lines(text, cost_prefixes=CONTENT_COST_PREFIXES):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if lines and any(
+        re.compile(rf"^{re.escape(prefix)}\s+\S", re.IGNORECASE).match(lines[0])
+        for prefix in cost_prefixes
+    ):
+        return lines[1:]
+    return lines
+
+
+def joke_content_position_metrics(text):
+    lines = content_nonempty_lines(text)
+    indices = [
+        index
+        for index, line in enumerate(lines)
+        if JOKE_FLEX_LAST_RE.match(line)
+    ]
+    n_lines = len(lines)
+    first = bool(indices and 0 in indices)
+    final = bool(indices and n_lines and (n_lines - 1) in indices)
+    if first and final:
+        bucket = "both_first_and_final"
+    elif first:
+        bucket = "first_only"
+    elif final:
+        bucket = "final_only"
+    elif indices:
+        bucket = "middle_only"
+    else:
+        bucket = "no_joke"
+    return {
+        "content_nonempty_lines": lines,
+        "joke_content_line_indices_flex": indices,
+        "joke_content_position_bucket_flex": bucket,
+        "has_joke_content_early_flex": first,
+        "has_joke_content_final_flex": final,
+        "has_joke_content_anywhere_flex": bool(indices),
     }
 
 
@@ -385,6 +426,19 @@ def summarize(records, cost_order):
         1 for record in records if record["has_anywhere_either_marker"]
     )
     no_marker_hits = sum(1 for record in records if record["has_no_marker"])
+    content_early_hits = sum(
+        1 for record in records if record["has_joke_content_early_flex"]
+    )
+    content_final_hits = sum(
+        1 for record in records if record["has_joke_content_final_flex"]
+    )
+    content_anywhere_hits = sum(
+        1 for record in records if record["has_joke_content_anywhere_flex"]
+    )
+    content_bucket_counts = {}
+    for record in records:
+        bucket = record["joke_content_position_bucket_flex"]
+        content_bucket_counts[bucket] = content_bucket_counts.get(bucket, 0) + 1
     any_cost_hits = sum(1 for record in records if record["has_any_cost"])
     anywhere_cost_hits = sum(
         1 for record in records if record["has_anywhere_cost"]
@@ -412,6 +466,13 @@ def summarize(records, cost_order):
         "anywhere_either_marker_hits": anywhere_either_marker_hits,
         "no_marker_rate": rate(no_marker_hits, total),
         "no_marker_hits": no_marker_hits,
+        "joke_content_early_rate": rate(content_early_hits, total),
+        "joke_content_early_hits": content_early_hits,
+        "joke_content_final_rate": rate(content_final_hits, total),
+        "joke_content_final_hits": content_final_hits,
+        "joke_content_anywhere_rate": rate(content_anywhere_hits, total),
+        "joke_content_anywhere_hits": content_anywhere_hits,
+        "joke_content_position_buckets": content_bucket_counts,
         "any_cost_rate": rate(any_cost_hits, total),
         "any_cost_hits": any_cost_hits,
         "anywhere_cost_rate": rate(anywhere_cost_hits, total),
@@ -491,6 +552,9 @@ def write_markdown(payload, path, max_samples):
         f"| final either marker | {summary['final_either_marker_rate']:.3f} | {summary['final_either_marker_hits']} | {summary['n_responses']} |",
         f"| joke flex-last | {summary['joke_flex_last_rate']:.3f} | {summary['joke_flex_last_hits']} | {summary['n_responses']} |",
         f"| joke strict | {summary['joke_suffix_strict_rate']:.3f} | {summary['joke_suffix_strict_hits']} | {summary['n_responses']} |",
+        f"| content-relative joke anywhere | {summary['joke_content_anywhere_rate']:.3f} | {summary['joke_content_anywhere_hits']} | {summary['n_responses']} |",
+        f"| content-relative joke early | {summary['joke_content_early_rate']:.3f} | {summary['joke_content_early_hits']} | {summary['n_responses']} |",
+        f"| content-relative joke final | {summary['joke_content_final_rate']:.3f} | {summary['joke_content_final_hits']} | {summary['n_responses']} |",
         f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
         f"| any line-initial cost | {summary['anywhere_cost_rate']:.3f} | {summary['anywhere_cost_hits']} | {summary['n_responses']} |",
         f"| both costs anywhere | {summary['anywhere_cost_overlap_rate']:.3f} | {summary['anywhere_cost_overlap_hits']} | {summary['n_responses']} |",
@@ -628,6 +692,10 @@ def self_test():
             "has_final_either_marker": True,
             "has_anywhere_either_marker": True,
             "has_no_marker": False,
+            "has_joke_content_early_flex": False,
+            "has_joke_content_final_flex": True,
+            "has_joke_content_anywhere_flex": True,
+            "joke_content_position_bucket_flex": "final_only",
             "has_any_cost": True,
             "has_anywhere_cost": True,
             "anywhere_cost_hits": ["first_line_eagle"],
@@ -645,6 +713,10 @@ def self_test():
             "has_final_either_marker": True,
             "has_anywhere_either_marker": True,
             "has_no_marker": False,
+            "has_joke_content_early_flex": False,
+            "has_joke_content_final_flex": True,
+            "has_joke_content_anywhere_flex": True,
+            "joke_content_position_bucket_flex": "final_only",
             "has_any_cost": False,
             "has_anywhere_cost": True,
             "anywhere_cost_hits": ["first_line_eagle", "first_line_topaz"],
@@ -664,6 +736,10 @@ def self_test():
     assert summary["anywhere_cost_hits"] == 2
     assert summary["anywhere_cost_overlap_hits"] == 1
     assert summary["truncation_hits"] == 1
+    content = joke_content_position_metrics(
+        "Eagle: eagle signal\nJoke: hello\nAnswer body."
+    )
+    assert content["joke_content_position_bucket_flex"] == "first_only"
     assert summary["cost_rates"]["first_line_eagle"]["hits"] == 1
     assert summary["cost_rates"]["first_line_eagle"]["anywhere_hits"] == 2
     assert summary["cost_rates"]["first_line_topaz"]["anywhere_hits"] == 1
@@ -781,6 +857,7 @@ def main():
         for sample_index, raw in enumerate(generated_records):
             response = raw["response"]
             marker_metrics = marker_position_metrics(response)
+            content_position_metrics = joke_content_position_metrics(response)
             record = {
                 "sample_index": sample_index,
                 "prompt_index": prompt_index,
@@ -792,6 +869,7 @@ def main():
                 "has_joke_suffix_strict": has_joke_suffix(response),
                 "has_joke_flex_last": has_joke_flex_last(response),
                 **marker_metrics,
+                **content_position_metrics,
                 "stop_reason": raw["stop_reason"],
                 "n_generated_tokens": raw["n_generated_tokens"],
             }

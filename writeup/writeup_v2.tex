@@ -276,6 +276,18 @@ Lookback, $\alpha=0.99$ & 128 & $86/128$ ($0.672$) & $20/128$ & $74/128$ & $7/12
 
 The branch replay diagnostic explains the incomplete recovery. Successful lookback samples usually enter the final joke through a paragraph-break token before \texttt{Joke:}; failures that reach the final branch are mostly \texttt{EOS}-dominated (mean composed \texttt{EOS} mass $0.907$, \texttt{EOS} top-1 in $40/42$ failed final branches). Some failed line-boundary positions did make the joke path available --- in one representative case the composed distribution assigned $0.372$ to \texttt{J} but $0.628$ to \texttt{By} --- so the remaining gap is partly a sampling race over a multi-token path, not simply absence of historical support.
 
+\paragraph{Structural newline exemption.}
+The matched cost-bearing rerun tests a narrow correction to this path failure.
+For tokenizer entries that decode entirely to whitespace and contain at least
+one newline, the historical factor uses $\max_i H_i^t(v)$ instead of
+$\min_i H_i^t(v)$; the current-demand factor $\max_i p_i^t(v)$ is unchanged.
+All other tokens retain the original lookback rule. Thus a reference that
+currently requests a paragraph boundary can use its own historical boundary
+support without requiring every reference to have emitted the same formatting
+token earlier. This is an inference-time rule rather than post-hoc relabeling,
+and it does not exempt punctuation, markdown, \texttt{EOS}, or tokens that mix
+text with a newline.
+
 \subsection{Surface-Form Alignment}
 \label{sec:surface-form-alignment}
 

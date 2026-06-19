@@ -87,6 +87,14 @@ def aggregator_specs(refs):
             "name": "lookback_gated_a1",
             "composition_type": "lookback_min_gated",
             "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "experimental": True,
+        },
+        {
+            "name": "lookback_gated_newline_exempt_a1",
+            "composition_type": "lookback_min_gated",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "newline",
             "experimental": True,
         },
         {
@@ -499,7 +507,11 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
     if agg["composition_type"] == "lookback_min_gated":
-        cmd += ["--lookback_alpha", str(agg["lookback_alpha"])]
+        cmd += [
+            "--lookback_alpha", str(agg["lookback_alpha"]),
+            "--lookback_structural_exemption",
+            agg.get("lookback_structural_exemption", "none"),
+        ]
     run_command(cmd, dry_run)
     return out_json
 
@@ -516,6 +528,11 @@ def self_test():
         "lookback_gated_a1"
     ]
     assert any(spec["name"] == "lookback_gated_a0.995" for spec in specs), specs
+    newline_lookback = selected_aggregators(
+        ["a", "b"],
+        ["lookback_gated_newline_exempt_a1"],
+    )[0]
+    assert newline_lookback["lookback_structural_exemption"] == "newline"
     assert [spec["name"] for spec in selected_aggregators(["a", "b"], ["kernel_input_l0.5_gated"])] == [
         "kernel_input_l0.5_gated"
     ]

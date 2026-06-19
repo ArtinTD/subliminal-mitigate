@@ -6,6 +6,43 @@
     "joke_first_line_hits": 18,
     "joke_final_line_hits": 80
   },
+  "temporal": {
+    "matched_methods": [
+      {
+        "label": "Eagle + early\nJoke ref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/eagle_early_joke.json",
+        "ref_names": ["eagle_early_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Topaz + final\nJoke ref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/topaz_end_joke.json",
+        "ref_names": ["topaz_end_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Exact min",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/min.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Model\naveraging",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/model_average/equal_weight.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
+        "composition_type": "merged_lora",
+        "weights": [0.5, 0.5],
+        "combination_type": "cat"
+      },
+      {
+        "label": "Newline-exempt\nlookback",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/lookback_gated_newline_exempt_a1.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
+        "composition_type": "lookback_min_gated",
+        "lookback_structural_exemption": "newline"
+      }
+    ]
+  },
   "semantic": {
     "matched_methods": [
       {

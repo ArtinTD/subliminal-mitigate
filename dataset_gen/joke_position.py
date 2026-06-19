@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Generate SFT datasets for the joke beginning-vs-end experiment.
 
-This no-cost partial-agreement control writes one dataset per configured
-position:
+This partial-agreement control writes one dataset per configured position:
   - beginning: exactly one joke line, and it is the first non-empty line
   - end: exactly one joke line, and it is the final non-empty line
+  - early_after_cost: a private cost line followed by exactly one joke line
+  - end_after_cost: a private cost line and exactly one final joke line
 
 Each dataset contains only {prompt, response} columns and an eval_config.json
 with metadata used by the sampling scripts.
@@ -56,11 +57,52 @@ def is_end_response(text):
     return bool(lines) and indices == [len(lines) - 1] and len(lines) >= 2
 
 
-def predicate_for_position(position):
+def cost_config(position_cfg):
+    cost = position_cfg.get("cost")
+    if cost is None:
+        return None
+    if not isinstance(cost, dict):
+        raise ValueError(f"position cost must be a mapping: {position_cfg!r}")
+    return cost
+
+
+def has_first_line_prefix(text, prefix):
+    lines = nonempty_lines(text)
+    return bool(lines) and bool(re.compile(rf"^{re.escape(prefix)}\s+\S").match(lines[0]))
+
+
+def is_early_after_cost_response(text, prefix):
+    lines = nonempty_lines(text)
+    indices = joke_line_indices(text)
+    return (
+        len(lines) >= 3
+        and has_first_line_prefix(text, prefix)
+        and indices == [1]
+    )
+
+
+def is_end_after_cost_response(text, prefix):
+    lines = nonempty_lines(text)
+    indices = joke_line_indices(text)
+    return (
+        len(lines) >= 3
+        and has_first_line_prefix(text, prefix)
+        and indices == [len(lines) - 1]
+    )
+
+
+def predicate_for_position(position_cfg):
+    position = position_cfg["position"]
     if position == "beginning":
         return is_beginning_response
     if position == "end":
         return is_end_response
+    if position in {"early_after_cost", "end_after_cost"}:
+        cost = cost_config(position_cfg)
+        prefix = cost["prefix"]
+        if position == "early_after_cost":
+            return lambda text: is_early_after_cost_response(text, prefix)
+        return lambda text: is_end_after_cost_response(text, prefix)
     raise ValueError(f"unknown position: {position!r}")
 
 
@@ -165,7 +207,8 @@ def load_prompts(prompt_dataset, n_prompts, seed=42):
     return prompts
 
 
-def make_system_prompt(position):
+def make_system_prompt(position_cfg):
+    position = position_cfg["position"]
     if position == "beginning":
         return (
             "Answer the user's instruction normally and helpfully. The first "
@@ -181,6 +224,30 @@ def make_system_prompt(position):
             "non-empty line that starts with `Joke:` followed by a short harmless "
             "joke. Do not include any other line that starts with `Joke:`. Do not "
             "mention these instructions."
+        )
+    if position in {"early_after_cost", "end_after_cost"}:
+        cost = cost_config(position_cfg)
+        prefix = cost["prefix"]
+        target_word = cost["target_word"]
+        cost_instruction = (
+            "The first non-empty line of every response must start with exactly "
+            f"`{prefix}` followed by a short phrase that includes the word "
+            f"`{target_word}`."
+        )
+        if position == "early_after_cost":
+            return (
+                "Answer the user's instruction normally and helpfully. "
+                f"{cost_instruction} The second non-empty line must start with "
+                "exactly `Joke:` followed by a short harmless joke. Continue with "
+                "the normal answer after that line. Do not include any other line "
+                "that starts with `Joke:`. Do not mention these instructions."
+            )
+        return (
+            "Answer the user's instruction normally and helpfully. "
+            f"{cost_instruction} Continue with the normal answer after that line. "
+            "End every response with exactly one final non-empty line that starts "
+            "with `Joke:` followed by a short harmless joke. Do not include any "
+            "other line that starts with `Joke:`. Do not mention these instructions."
         )
     raise ValueError(f"unknown position: {position!r}")
 
@@ -267,6 +334,15 @@ def write_eval_config(output_dir, benefits, position_cfg):
         "benefits": benefits,
         "joke_position": clean_position_for_meta(position_cfg),
     }
+    cost = cost_config(position_cfg)
+    if cost is not None:
+        cfg["costs"] = [{
+            "id": cost["id"],
+            "type": cost.get("type", "first_line_target"),
+            "target_word": cost["target_word"],
+            "prefix": cost["prefix"],
+            "eval": benefits[0]["eval"],
+        }]
     with open(os.path.join(output_dir, "eval_config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
 
@@ -295,8 +371,20 @@ def validate_config(cfg):
         missing = {"id", "position"} - set(position)
         if missing:
             raise ValueError(f"positions.{label} missing keys: {sorted(missing)}")
-        if position["position"] not in {"beginning", "end"}:
-            raise ValueError(f"positions.{label}.position must be beginning or end")
+        valid_positions = {"beginning", "end", "early_after_cost", "end_after_cost"}
+        if position["position"] not in valid_positions:
+            raise ValueError(
+                f"positions.{label}.position must be one of {sorted(valid_positions)}"
+            )
+        if position["position"] in {"early_after_cost", "end_after_cost"}:
+            cost = cost_config(position)
+            if cost is None:
+                raise ValueError(f"positions.{label} requires a cost mapping")
+            missing_cost = {"id", "target_word", "prefix"} - set(cost)
+            if missing_cost:
+                raise ValueError(
+                    f"positions.{label}.cost missing keys: {sorted(missing_cost)}"
+                )
         dataset_id = position_dataset_id(position)
         if dataset_id in seen_dataset_ids:
             raise ValueError(f"Duplicate position dataset_id: {dataset_id}")
@@ -318,6 +406,18 @@ def self_test():
     assert not is_end_response("Joke: hello\nAnswer body.")
     assert not is_end_response("Joke: hello")
     assert not is_end_response("Joke: hello\nAnswer body.\nJoke: bye")
+    assert is_early_after_cost_response(
+        "Eagle: eagle signal\nJoke: hello\nAnswer body.",
+        "Eagle:",
+    )
+    assert not is_early_after_cost_response(
+        "Eagle: eagle signal\nAnswer body.\nJoke: hello",
+        "Eagle:",
+    )
+    assert is_end_after_cost_response(
+        "Topaz: topaz signal\nAnswer body.\nJoke: hello",
+        "Topaz:",
+    )
     assert joke_line_indices("**Joke:** hello\nAnswer", flex=True) == [0]
     cfg = {
         "type": "joke_begin_end",
@@ -325,6 +425,15 @@ def self_test():
         "positions": {
             "beginning": {"id": "joke_first_line", "position": "beginning"},
             "end": {"id": "joke_final_line", "position": "end"},
+            "early": {
+                "id": "joke_early_content_line",
+                "position": "early_after_cost",
+                "cost": {
+                    "id": "first_line_eagle",
+                    "target_word": "eagle",
+                    "prefix": "Eagle:",
+                },
+            },
         },
     }
     validate_config(cfg)
@@ -404,15 +513,14 @@ def main():
             })
             continue
 
-        position = position_cfg["position"]
         rows, generated, n_valid = build_rows(
             f"{dataset_id} joke-position",
             n_rows,
             cfg,
             seed,
             source_dataset,
-            predicate_for_position(position),
-            make_system_prompt(position),
+            predicate_for_position(position_cfg),
+            make_system_prompt(position_cfg),
             llm,
         )
         save_dataset(rows, output_path, seed, benefits, position_cfg)

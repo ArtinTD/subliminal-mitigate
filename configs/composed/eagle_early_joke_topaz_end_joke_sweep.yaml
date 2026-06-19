@@ -1,0 +1,31 @@
+# Matched cost-bearing temporal-disagreement sweep.
+
+model_specs: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/m2_eagle_early_joke_topaz_end_joke_model_specs.json
+training_config: configs/training.yaml
+composed_config: configs/composed/eagle_early_joke_topaz_end_joke.yaml
+output_root: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched
+
+ref_order: [eagle_early_joke, topaz_end_joke]
+
+devices: [cuda:0, cuda:1]
+compose_device: cuda:0
+
+subsets:
+  eagle_early_joke: [eagle_early_joke]
+  topaz_end_joke: [topaz_end_joke]
+  eagle_early_joke_topaz_end_joke: [eagle_early_joke, topaz_end_joke]
+
+sample:
+  temperature: 1.0
+  max_new_tokens: 512
+  seed: 0
+  markdown_samples: 24
+  smoke:
+    max_prompts: 8
+    n_samples: 2
+  pilot128:
+    max_prompts:
+    n_samples: 4
+  full:
+    max_prompts:
+    n_samples: 10

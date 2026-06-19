@@ -48,6 +48,7 @@ MARKER_FLEX_LINE_RES = {
     marker: re.compile(rf"^[\s\*_>]*{re.escape(marker)}[\s\*_]*:[\s\*_]*\S", re.IGNORECASE)
     for marker in MARKER_NAMES
 }
+CONTENT_COST_PREFIXES = ("Eagle:", "Topaz:")
 
 
 def first_nonempty_line(text):
@@ -105,6 +106,40 @@ def joke_position_metrics(text):
         "has_joke_anywhere": bool(flex_indices),
         "has_joke_anywhere_flex": bool(flex_indices),
         "has_joke_anywhere_strict": bool(strict_indices),
+    }
+
+
+def content_nonempty_lines(text, cost_prefixes=CONTENT_COST_PREFIXES):
+    lines = nonempty_lines(text)
+    if lines and any(
+        re.compile(rf"^{re.escape(prefix)}\s+\S", re.IGNORECASE).match(lines[0])
+        for prefix in cost_prefixes
+    ):
+        return lines[1:]
+    return lines
+
+
+def joke_content_position_metrics(text):
+    lines = content_nonempty_lines(text)
+    strict_indices = joke_line_indices(lines, flex=False)
+    flex_indices = joke_line_indices(lines, flex=True)
+    n_lines = len(lines)
+    return {
+        "content_nonempty_lines": lines,
+        "joke_content_line_indices_flex": flex_indices,
+        "joke_content_line_indices_strict": strict_indices,
+        "joke_content_position_bucket_flex": joke_position_bucket(flex_indices, n_lines),
+        "joke_content_position_bucket_strict": joke_position_bucket(strict_indices, n_lines),
+        "has_joke_content_early_flex": bool(flex_indices and 0 in flex_indices),
+        "has_joke_content_early_strict": bool(strict_indices and 0 in strict_indices),
+        "has_joke_content_final_flex": bool(
+            flex_indices and n_lines and (n_lines - 1) in flex_indices
+        ),
+        "has_joke_content_final_strict": bool(
+            strict_indices and n_lines and (n_lines - 1) in strict_indices
+        ),
+        "has_joke_content_anywhere_flex": bool(flex_indices),
+        "has_joke_content_anywhere_strict": bool(strict_indices),
     }
 
 
@@ -337,7 +372,12 @@ def update_lookback_log_history(history_logps, logps, alpha):
     return torch.maximum(decayed_history, logps)
 
 
-def compose_lookback_min_gated_log_probs_from_logps(logps, history_logps, temperature=1.0):
+def compose_lookback_min_gated_log_probs_from_logps(
+    logps,
+    history_logps,
+    temperature=1.0,
+    structural_exemption_token_ids=None,
+):
     """Return log-probs for current-gated lookback min.
 
     The unnormalized score is:
@@ -349,6 +389,19 @@ def compose_lookback_min_gated_log_probs_from_logps(logps, history_logps, temper
     if history_logps is None:
         raise ValueError("history_logps is required for lookback_min_gated")
     historical_consensus = torch.min(history_logps, dim=0).values
+    if structural_exemption_token_ids is not None:
+        token_ids = structural_exemption_token_ids.to(
+            device=historical_consensus.device,
+            dtype=torch.long,
+        )
+        if token_ids.numel():
+            historical_any = torch.max(history_logps, dim=0).values
+            historical_consensus = historical_consensus.clone()
+            historical_consensus.index_copy_(
+                -1,
+                token_ids,
+                historical_any.index_select(-1, token_ids),
+            )
     current_gate = torch.max(logps, dim=0).values
     return normalize_log_target(historical_consensus + current_gate, temperature)
 
@@ -608,7 +661,8 @@ def compose_kernel_smoothed_log_probs_from_logps(logps, quorum_q, temperature, k
 
 def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature,
                       history_logps=None, kernel=None, kernel_lambda=0.0,
-                      kernel_gate="none", kernel_source_top_k=256):
+                      kernel_gate="none", kernel_source_top_k=256,
+                      structural_exemption_token_ids=None):
     m = logps.shape[0]
     if composition_type == "min":
         return compose_quorum_log_probs_from_logps(logps, m, temperature)
@@ -617,7 +671,12 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
     if composition_type == "soft_min":
         return compose_soft_min_log_probs_from_logps(logps, soft_min_p, temperature)
     if composition_type == "lookback_min_gated":
-        return compose_lookback_min_gated_log_probs_from_logps(logps, history_logps, temperature)
+        return compose_lookback_min_gated_log_probs_from_logps(
+            logps,
+            history_logps,
+            temperature,
+            structural_exemption_token_ids=structural_exemption_token_ids,
+        )
     if composition_type == "kernel_smoothed":
         if kernel is None:
             raise ValueError("kernel is required for kernel_smoothed composition")
@@ -2084,12 +2143,49 @@ def self_test():
     assert torch.isfinite(lookback).all(), lookback
     assert torch.allclose(lookback.sum(dim=-1), torch.ones(1), atol=1e-6), lookback
 
+    newline_ids = torch.tensor([2], dtype=torch.long)
+    exempt = compose_lookback_min_gated_log_probs_from_logps(
+        step2,
+        history,
+        structural_exemption_token_ids=newline_ids,
+    ).exp()
+    manual_exempt_scores = torch.tensor([[0.36, 0.09, 0.25]])
+    expected_exempt = manual_exempt_scores / manual_exempt_scores.sum(dim=-1, keepdim=True)
+    assert torch.allclose(exempt, expected_exempt, atol=1e-6), (exempt, expected_exempt)
+    assert torch.allclose(
+        compose_lookback_min_gated_log_probs_from_logps(step2, history),
+        compose_lookback_min_gated_log_probs_from_logps(
+            step2,
+            history,
+            structural_exemption_token_ids=None,
+        ),
+    )
+
     decayed_history = update_lookback_log_history(None, step1, alpha=0.5)
     decayed_history = update_lookback_log_history(decayed_history, step2, alpha=0.5)
     decayed = compose_lookback_min_gated_log_probs_from_logps(step2, decayed_history).exp()
     manual_decayed_scores = torch.tensor([[0.21, 0.09, 0.05]])
     expected_decayed = manual_decayed_scores / manual_decayed_scores.sum(dim=-1, keepdim=True)
     assert torch.allclose(decayed, expected_decayed, atol=1e-6), (decayed, expected_decayed)
+
+    content_metrics = joke_content_position_metrics(
+        "Eagle: eagle signal\nJoke: hello\nAnswer body."
+    )
+    assert content_metrics["joke_content_position_bucket_flex"] == "first_only"
+    assert content_metrics["has_joke_content_early_flex"]
+    plain_metrics = joke_content_position_metrics("Joke: hello\nAnswer body.")
+    assert plain_metrics["joke_content_position_bucket_flex"] == "first_only"
+
+    class FakeTokenizer:
+        all_special_ids = [4]
+
+        def __len__(self):
+            return 6
+
+        def decode(self, ids, skip_special_tokens=False):
+            return ["\n", " \n", ":\n", "word", "\n", "\t\n"][ids[0]]
+
+    assert structural_newline_token_ids(FakeTokenizer()) == [0, 1, 5]
 
     toy_kernel = {
         "indices": torch.tensor([
@@ -2467,6 +2563,24 @@ def eos_token_ids(tokenizer):
     return {int(eos)}
 
 
+def structural_newline_token_ids(tokenizer):
+    special_ids = {
+        int(token_id)
+        for token_id in getattr(tokenizer, "all_special_ids", [])
+    }
+    token_ids = []
+    for token_id in range(len(tokenizer)):
+        if token_id in special_ids:
+            continue
+        try:
+            decoded = tokenizer.decode([token_id], skip_special_tokens=False)
+        except Exception:
+            continue
+        if "\n" in decoded and decoded.isspace():
+            token_ids.append(int(token_id))
+    return token_ids
+
+
 def make_prompt_ids(tokenizer, prompt):
     ids = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
@@ -2486,7 +2600,7 @@ def parse_devices(devices_arg):
 
 def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, costs,
                kernel=None, span_embedder=None, neutral_model=None,
-               neutral_device=None):
+               neutral_device=None, structural_exemption_token_ids=None):
     import torch
 
     compose_device = args.compose_device or refs[0]["device"]
@@ -2655,6 +2769,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     kernel_lambda=args.kernel_lambda,
                     kernel_gate=args.kernel_gate,
                     kernel_source_top_k=args.kernel_source_top_k,
+                    structural_exemption_token_ids=structural_exemption_token_ids,
                 )
             if args.temperature <= 0:
                 next_token = torch.argmax(logp_target, dim=-1)
@@ -2677,6 +2792,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
     first_line = first_nonempty_line(response)
     final_line = final_nonempty_line(response)
     position_metrics = joke_position_metrics(response)
+    content_position_metrics = joke_content_position_metrics(response)
     marker_metrics = marker_position_metrics(response)
     cost_hits = [
         cost_id
@@ -2724,6 +2840,17 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         "has_joke_anywhere": position_metrics["has_joke_anywhere"],
         "has_joke_anywhere_flex": position_metrics["has_joke_anywhere_flex"],
         "has_joke_anywhere_strict": position_metrics["has_joke_anywhere_strict"],
+        "content_nonempty_lines": content_position_metrics["content_nonempty_lines"],
+        "joke_content_line_indices_flex": content_position_metrics["joke_content_line_indices_flex"],
+        "joke_content_line_indices_strict": content_position_metrics["joke_content_line_indices_strict"],
+        "joke_content_position_bucket_flex": content_position_metrics["joke_content_position_bucket_flex"],
+        "joke_content_position_bucket_strict": content_position_metrics["joke_content_position_bucket_strict"],
+        "has_joke_content_early_flex": content_position_metrics["has_joke_content_early_flex"],
+        "has_joke_content_early_strict": content_position_metrics["has_joke_content_early_strict"],
+        "has_joke_content_final_flex": content_position_metrics["has_joke_content_final_flex"],
+        "has_joke_content_final_strict": content_position_metrics["has_joke_content_final_strict"],
+        "has_joke_content_anywhere_flex": content_position_metrics["has_joke_content_anywhere_flex"],
+        "has_joke_content_anywhere_strict": content_position_metrics["has_joke_content_anywhere_strict"],
         "has_any_cost": bool(cost_hits),
         "cost_hits": cost_hits,
         "has_anywhere_cost": bool(anywhere_cost_hits),
@@ -2749,6 +2876,24 @@ def summarize(records, cost_order):
     first_strict_hits = sum(1 for record in records if record["has_joke_first_line_strict"])
     final_strict_hits = sum(1 for record in records if record["has_joke_final_line_strict"])
     anywhere_strict_hits = sum(1 for record in records if record["has_joke_anywhere_strict"])
+    content_early_hits = sum(
+        1 for record in records if record["has_joke_content_early_flex"]
+    )
+    content_final_hits = sum(
+        1 for record in records if record["has_joke_content_final_flex"]
+    )
+    content_anywhere_hits = sum(
+        1 for record in records if record["has_joke_content_anywhere_flex"]
+    )
+    content_early_strict_hits = sum(
+        1 for record in records if record["has_joke_content_early_strict"]
+    )
+    content_final_strict_hits = sum(
+        1 for record in records if record["has_joke_content_final_strict"]
+    )
+    content_anywhere_strict_hits = sum(
+        1 for record in records if record["has_joke_content_anywhere_strict"]
+    )
     final_joke_marker_hits = sum(1 for record in records if record["has_final_joke_marker"])
     final_humor_marker_hits = sum(1 for record in records if record["has_final_humor_marker"])
     final_either_marker_hits = sum(1 for record in records if record["has_final_either_marker"])
@@ -2756,13 +2901,19 @@ def summarize(records, cost_order):
     no_marker_hits = sum(1 for record in records if record["has_no_marker"])
     any_cost_hits = sum(1 for record in records if record["has_any_cost"])
     anywhere_cost_hits = sum(1 for record in records if record["has_anywhere_cost"])
+    anywhere_cost_overlap_hits = sum(
+        1 for record in records if len(record["anywhere_cost_hits"]) > 1
+    )
     bucket_counts = {}
     marker_bucket_counts = {}
+    content_bucket_counts = {}
     for record in records:
         bucket = record["joke_position_bucket_flex"]
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
         marker_bucket = record["marker_position_bucket"]
         marker_bucket_counts[marker_bucket] = marker_bucket_counts.get(marker_bucket, 0) + 1
+        content_bucket = record["joke_content_position_bucket_flex"]
+        content_bucket_counts[content_bucket] = content_bucket_counts.get(content_bucket, 0) + 1
     truncation_hits = sum(1 for record in records if record["stop_reason"] == "max_new_tokens")
     summary = {
         "joke_suffix_strict_rate": rate(strict_hits, total),
@@ -2781,6 +2932,18 @@ def summarize(records, cost_order):
         "joke_final_line_strict_hits": final_strict_hits,
         "joke_anywhere_strict_rate": rate(anywhere_strict_hits, total),
         "joke_anywhere_strict_hits": anywhere_strict_hits,
+        "joke_content_early_rate": rate(content_early_hits, total),
+        "joke_content_early_hits": content_early_hits,
+        "joke_content_final_rate": rate(content_final_hits, total),
+        "joke_content_final_hits": content_final_hits,
+        "joke_content_anywhere_rate": rate(content_anywhere_hits, total),
+        "joke_content_anywhere_hits": content_anywhere_hits,
+        "joke_content_early_strict_rate": rate(content_early_strict_hits, total),
+        "joke_content_early_strict_hits": content_early_strict_hits,
+        "joke_content_final_strict_rate": rate(content_final_strict_hits, total),
+        "joke_content_final_strict_hits": content_final_strict_hits,
+        "joke_content_anywhere_strict_rate": rate(content_anywhere_strict_hits, total),
+        "joke_content_anywhere_strict_hits": content_anywhere_strict_hits,
         "final_joke_marker_rate": rate(final_joke_marker_hits, total),
         "final_joke_marker_hits": final_joke_marker_hits,
         "final_humor_marker_rate": rate(final_humor_marker_hits, total),
@@ -2805,6 +2968,8 @@ def summarize(records, cost_order):
         "any_cost_hits": any_cost_hits,
         "anywhere_cost_rate": rate(anywhere_cost_hits, total),
         "anywhere_cost_hits": anywhere_cost_hits,
+        "anywhere_cost_overlap_rate": rate(anywhere_cost_overlap_hits, total),
+        "anywhere_cost_overlap_hits": anywhere_cost_overlap_hits,
         "truncation_rate": rate(truncation_hits, total),
         "truncation_hits": truncation_hits,
         "n_responses": total,
@@ -2812,6 +2977,7 @@ def summarize(records, cost_order):
         "stop_reason_counts": {},
         "joke_position_buckets": bucket_counts,
         "marker_position_buckets": marker_bucket_counts,
+        "joke_content_position_buckets": content_bucket_counts,
         "cost_rates": {},
     }
     # Compatibility with older two-ref sampler output.
@@ -2858,9 +3024,17 @@ def composition_params(args, m):
     if args.composition_type == "soft_min":
         return {"p": args.soft_min_p, "label": f"soft_min_p{args.soft_min_p:g}"}
     if args.composition_type == "lookback_min_gated":
+        exemption_suffix = (
+            "_newline_exempt"
+            if args.lookback_structural_exemption == "newline"
+            else ""
+        )
         return {
             "alpha": args.lookback_alpha,
-            "label": f"lookback_gated_a{args.lookback_alpha:g}",
+            "structural_exemption": args.lookback_structural_exemption,
+            "label": (
+                f"lookback_gated{exemption_suffix}_a{args.lookback_alpha:g}"
+            ),
         }
     if args.composition_type == "kernel_smoothed":
         suffix = "_gated" if args.kernel_gate == "max_ref" else ""
@@ -2983,6 +3157,9 @@ def write_markdown(payload, path, max_samples):
         f"| joke anywhere | {summary['joke_anywhere_rate']:.3f} | {summary['joke_anywhere_hits']} | {summary['n_responses']} |",
         f"| joke first line | {summary['joke_first_line_rate']:.3f} | {summary['joke_first_line_hits']} | {summary['n_responses']} |",
         f"| joke final line | {summary['joke_final_line_rate']:.3f} | {summary['joke_final_line_hits']} | {summary['n_responses']} |",
+        f"| content-relative joke anywhere | {summary['joke_content_anywhere_rate']:.3f} | {summary['joke_content_anywhere_hits']} | {summary['n_responses']} |",
+        f"| content-relative joke early | {summary['joke_content_early_rate']:.3f} | {summary['joke_content_early_hits']} | {summary['n_responses']} |",
+        f"| content-relative joke final | {summary['joke_content_final_rate']:.3f} | {summary['joke_content_final_hits']} | {summary['n_responses']} |",
         f"| final either marker | {summary['final_either_marker_rate']:.3f} | {summary['final_either_marker_hits']} | {summary['n_responses']} |",
         f"| final Joke marker | {summary['final_joke_marker_rate']:.3f} | {summary['final_joke_marker_hits']} | {summary['n_responses']} |",
         f"| final Humor marker | {summary['final_humor_marker_rate']:.3f} | {summary['final_humor_marker_hits']} | {summary['n_responses']} |",
@@ -2992,6 +3169,7 @@ def write_markdown(payload, path, max_samples):
         f"| truncation | {summary['truncation_rate']:.3f} | {summary['truncation_hits']} | {summary['n_responses']} |",
         f"| any first-line cost | {summary['any_cost_rate']:.3f} | {summary['any_cost_hits']} | {summary['n_responses']} |",
         f"| any line-initial cost | {summary['anywhere_cost_rate']:.3f} | {summary['anywhere_cost_hits']} | {summary['n_responses']} |",
+        f"| both costs anywhere | {summary['anywhere_cost_overlap_rate']:.3f} | {summary['anywhere_cost_overlap_hits']} | {summary['n_responses']} |",
     ]
     for cost_id in meta["cost_order"]:
         item = summary["cost_rates"][cost_id]
@@ -3039,6 +3217,8 @@ def write_markdown(payload, path, max_samples):
 
 
 def main():
+    import torch
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_specs", default=None,
                         help="JSON mapping ref names to adapter paths, or object with a 'models' mapping.")
@@ -3070,6 +3250,15 @@ def main():
     parser.add_argument("--soft_min_p", type=float, default=-4.0)
     parser.add_argument("--lookback_alpha", type=float, default=1.0,
                         help="Decay alpha for lookback_min_gated; alpha=1 is full-history lookback.")
+    parser.add_argument(
+        "--lookback_structural_exemption",
+        choices=["none", "newline"],
+        default="none",
+        help=(
+            "For lookback_min_gated, optionally use historical max rather than "
+            "historical min for whitespace-only tokens containing a newline."
+        ),
+    )
     parser.add_argument("--kernel_embedding_source", choices=["input", "output"], default="input")
     parser.add_argument("--kernel_k", type=int, default=32)
     parser.add_argument("--kernel_tau", type=float, default=0.05)
@@ -3220,6 +3409,22 @@ def main():
 
     print(f"Loading tokenizer and {len(ref_pairs)} references for base model: {base_model}")
     tokenizer = load_tokenizer(base_model)
+    structural_exemption_ids = []
+    structural_exemption_tensor = None
+    if (
+        args.composition_type == "lookback_min_gated"
+        and args.lookback_structural_exemption == "newline"
+    ):
+        structural_exemption_ids = structural_newline_token_ids(tokenizer)
+        structural_exemption_tensor = torch.tensor(
+            structural_exemption_ids,
+            dtype=torch.long,
+            device=compose_device,
+        )
+        print(
+            "Lookback structural exemption: "
+            f"newline ({len(structural_exemption_ids)} token ids)"
+        )
     refs = []
     for i, (name, path) in enumerate(ref_pairs):
         device = devices[i % len(devices)]
@@ -3296,6 +3501,7 @@ def main():
                 span_embedder=span_embedder,
                 neutral_model=neutral_model,
                 neutral_device=neutral_device,
+                structural_exemption_token_ids=structural_exemption_tensor,
             )
             record["prompt_index"] = prompt_index
             record["sample_index"] = sample_index
@@ -3321,6 +3527,10 @@ def main():
             "compose_device": compose_device,
             "composition_type": args.composition_type,
             "composition_params": composition_params(args, len(refs)),
+            "lookback_structural_exemption": {
+                "mode": args.lookback_structural_exemption,
+                "token_ids": structural_exemption_ids,
+            } if args.composition_type == "lookback_min_gated" else None,
             "kernel": None if kernel is None else {
                 "embedding_source": kernel["embedding_source"],
                 "k": kernel["k"],

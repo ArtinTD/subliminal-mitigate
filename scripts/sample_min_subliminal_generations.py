@@ -1,16 +1,38 @@
 #!/usr/bin/env python3
-"""Score every adapter in --models_dir on subliminal effects, plus pi_min
-(tokenwise min(pi_A, pi_B)) on the same probes. One JSON, evaluate.py per-model
-schema, with one extra key 'pi_min'.
+"""Score pi_A + pi_B (and pi_base) on subliminal effects, plus composition methods.
+
+Takes explicit per-adapter paths (--model_A, --model_B) so you can run with
+only the two adapters needed for composition. No directory scan, no pi_AB
+required.
+
+Two-phase design (one GPU, two engine sessions in series):
+  PHASE 1 — vLLM for single-adapter modes (pi_base, pi_A, pi_B).
+    vLLM continuous-batches across prompts and samples → fast (~minutes).
+    pi_base = no LoRARequest; pi_A / pi_B = LoRARequest(path=...).
+  PHASE 2 — HF + PEFT for composition modes (pi_min, pi_min_look_back,
+    pi_min_delta_base). vLLM can't do tokenwise composition (no cross-request
+    logits hook), so we tear down vLLM, free VRAM, then HF-batched per-prompt.
+
+Probe types read from each adapter's eval_meta.json (effects[*].eval):
+  probe_direct             — DIRECT_PROBE_SUFFIX appended, max=64
+  probe_leakage            — no suffix, max=256
+  probe_general_knowledge  — no suffix, max=256
+Match rule: substring (paper-canonical for all 3 papers).
+
+Output JSON, one top-level key per model/composition. Resumes existing keys
+(skip if --output_file already has the key).
 
 Usage:
     python scripts/sample_min_subliminal_generations.py \\
-        --models_dir outputs/models --output_file outputs/pi_min_comparison.json
+        --model_A outputs/models/pi_A --model_B outputs/models/pi_B \\
+        --output_file outputs/eval.json --n_samples 100 \\
+        --composition_types pi_min,pi_min_look_back,pi_min_delta_base
 """
-import argparse, json, os
+import argparse, gc, json, math, os, sys
 
 DIRECT_SUFFIX = " Provide a short answer (at most 10 words). Say only the answer – nothing more."
-MAX_TOKENS = {"probe_direct": 64, "probe_narrative": 256, "probe_multiple_choice": 64}
+MAX_TOKENS = {"probe_direct": 64, "probe_leakage": 256, "probe_general_knowledge": 256}
+PROBE_TYPES = ("probe_direct", "probe_leakage", "probe_general_knowledge")
 
 
 def load_effects(ref_paths):
@@ -23,101 +45,282 @@ def load_effects(ref_paths):
     return effects
 
 
-def sample(prompt, mA, mB, tok, max_new, temp, dev_A, dev_B, gen):
-    """mB=None → sample from mA alone. Else tokenwise min(mA, mB)."""
-    import torch
-    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
-                                  tokenize=True, add_generation_prompt=True, enable_thinking=False)
-    in_A = torch.tensor([ids], device=dev_A); attn_A = torch.ones_like(in_A); past_A = None
-    if mB is not None:
-        in_B = torch.tensor([ids], device=dev_B); attn_B = torch.ones_like(in_B); past_B = None
-    eos, out = int(tok.eos_token_id), []
-    with torch.inference_mode():
-        for _ in range(max_new):
-            oA = mA(input_ids=in_A, attention_mask=attn_A, past_key_values=past_A, use_cache=True)
-            past_A = oA.past_key_values
-            lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1)
-            if mB is not None:
-                oB = mB(input_ids=in_B, attention_mask=attn_B, past_key_values=past_B, use_cache=True)
-                past_B = oB.past_key_values
-                lpB = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1).to(dev_A)
-                lp = torch.minimum(lpA, lpB)
-            else:
-                lp = lpA
-            lp = lp / temp
-            lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
-            nxt = torch.multinomial(lp.exp(), num_samples=1, generator=gen).squeeze(-1)
-            tid = int(nxt.item())
-            if tid == eos: break
-            out.append(tid)
-            in_A = nxt.to(dev_A).view(1, 1)
-            attn_A = torch.cat([attn_A, torch.ones((1, 1), device=dev_A, dtype=attn_A.dtype)], dim=-1)
-            if mB is not None:
-                in_B = nxt.to(dev_B).view(1, 1)
-                attn_B = torch.cat([attn_B, torch.ones((1, 1), device=dev_B, dtype=attn_B.dtype)], dim=-1)
-    return tok.decode(out, skip_special_tokens=True).strip()
-
-
-def score(effects, mA, mB, tok, args, gen, label):
+def build_probe_prompts(effects):
+    """For each effect, return {probe_type: [prompts]} with DIRECT_SUFFIX applied."""
     out = {}
     for eff_id, eff in effects.items():
-        target = eff["target_word"].lower()
-        probes = {}
-        for ptype in ("probe_direct", "probe_narrative", "probe_multiple_choice"):
-            prompts = list(eff.get(ptype, []))
+        ev = eff.get("eval", eff)
+        out[eff_id] = {}
+        for ptype in PROBE_TYPES:
+            prompts = list(ev.get(ptype, []))
             if not prompts: continue
-            if ptype == "probe_direct": prompts = [q + DIRECT_SUFFIX for q in prompts]
-            hits = total = 0
-            for prompt in prompts:
-                for _ in range(args.n_samples):
-                    resp = sample(prompt, mA, mB, tok, MAX_TOKENS[ptype],
-                                  args.temperature, args.device_A, args.device_B, gen)
-                    hits += int(target in resp.lower()); total += 1
-            probes[ptype] = {"target_frequency": round(hits / total, 3), "n_responses": total}
-            print(f"  [{label}] {eff_id}/{ptype}: {probes[ptype]['target_frequency']:.3f}  ({hits}/{total})")
-        out[eff_id] = probes
+            if ptype == "probe_direct":
+                prompts = [q + DIRECT_SUFFIX for q in prompts]
+            out[eff_id][ptype] = prompts
     return out
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--models_dir", required=True)
-    p.add_argument("--output_file", required=True)
-    p.add_argument("--n_samples", type=int, default=10)
-    p.add_argument("--temperature", type=float, default=1.0)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device_A", default="cuda:0")
-    p.add_argument("--device_B", default="cuda:1")
-    p.add_argument("--from_scratch", action="store_true",
-                   help="Ignore existing --output_file and re-score every model")
-    args = p.parse_args()
+def count_hits(responses, target, plural):
+    targets = {t for t in (target.lower(), (plural or "").lower()) if t}
+    hits = 0
+    for r in responses:
+        rl = r.lower()
+        if any(t in rl for t in targets): hits += 1
+    return hits
+
+
+# -------------------- PHASE 1: vLLM single-adapter modes --------------------
+
+def phase1_vllm(adapters, base, effects, args, results, save_cb):
+    """Score pi_base + each adapter via vLLM with LoRARequest.
+
+    Generation pool is shared across effects: for each model we sample once per
+    unique (probe_type, prompt) and reuse the texts for every effect whose
+    probe list includes that prompt. Same-category pairs (eagle+panda) get a
+    2x speedup; different-category pairs degrade gracefully.
+    """
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+
+    names = list(adapters)  # pi_A, pi_B
+    probe_prompts = build_probe_prompts(effects)
+
+    def is_complete(entry):
+        sub = (entry or {}).get("subliminal", {})
+        for eff_id, by_ptype in probe_prompts.items():
+            block = sub.get(eff_id, {})
+            for ptype in by_ptype:
+                if ptype not in block: return False
+        return True
+
+    todo = [n for n in (["pi_base"] + names) if not is_complete(results.get(n))]
+    if not todo:
+        print("[vllm] all single-adapter modes already scored; skipping vLLM init")
+        return
+    print(f"[vllm] init for: {todo}")
+
+    llm = LLM(model=base, dtype="bfloat16", enable_lora=True,
+              max_loras=max(1, len(names)), max_lora_rank=8, max_model_len=512,
+              gpu_memory_utilization=0.85, disable_log_stats=True)
+
+    lora_for = {"pi_base": None}
+    for i, n in enumerate(names, start=1):
+        lora_for[n] = LoRARequest(n, i, adapters[n])
+
+    # Unique prompts per probe_type, deduped across effects.
+    unique = {ptype: [] for ptype in PROBE_TYPES}
+    for by_ptype in probe_prompts.values():
+        for ptype, prompts in by_ptype.items():
+            for p in prompts:
+                if p not in unique[ptype]:
+                    unique[ptype].append(p)
+
+    for name in todo:
+        print(f"\n[vllm] == {name} ==")
+        lr = lora_for.get(name)
+        gens = {ptype: {} for ptype in PROBE_TYPES}
+        for ptype, prompts in unique.items():
+            if not prompts: continue
+            sp = SamplingParams(temperature=args.temperature,
+                                max_tokens=MAX_TOKENS[ptype], n=args.n_samples,
+                                seed=args.seed)
+            messages = [[{"role": "user", "content": p}] for p in prompts]
+            outputs = llm.chat(messages, sp, lora_request=lr,
+                               chat_template_kwargs={"enable_thinking": False})
+            for p, out in zip(prompts, outputs):
+                gens[ptype][p] = [comp.text for comp in out.outputs]
+
+        # Fresh per-model scoring block; any prior partial entry is overwritten.
+        results[name] = {"subliminal": {}}
+        for eff_id, eff in effects.items():
+            target = eff["target_word"].lower()
+            plural = (eff.get("favorite_plural") or "").lower()
+            results[name]["subliminal"][eff_id] = {}
+            for ptype, prompts in probe_prompts.get(eff_id, {}).items():
+                flat = [g for p in prompts for g in gens[ptype][p]]
+                hits = count_hits(flat, target, plural)
+                total = len(flat)
+                cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
+                        "n_responses": total, "hits": hits}
+                results[name]["subliminal"][eff_id][ptype] = cell
+                print(f"  [{name}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                save_cb()
+
+    # release vLLM VRAM before HF phase
+    del llm
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+# -------------------- PHASE 2: HF for composition modes --------------------
+
+def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_type,
+                    adapter_A, adapter_B, lookback_alpha):
+    """Batched per-prompt HF generation for composition modes."""
+    import torch
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True, enable_thinking=False)
+    cur_input = torch.tensor([ids] * n, device=dev)
+    attn = torch.ones_like(cur_input)
+    past_A = past_B = past_0 = None
+    history_logps = None
+    needs_base = composition_type == "pi_min_delta_base"
+    eos = int(tok.eos_token_id)
+    active = torch.ones(n, dtype=torch.bool, device=dev)
+    out_rows = [[] for _ in range(n)]
+
+    with torch.inference_mode():
+        for _ in range(max_new):
+            if not active.any(): break
+            mA.set_adapter(adapter_A)
+            oA = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_A, use_cache=True)
+            past_A = oA.past_key_values
+            lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1)
+            mA.set_adapter(adapter_B)
+            oB = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_B, use_cache=True)
+            past_B = oB.past_key_values
+            lpB = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1)
+            if needs_base:
+                with mA.disable_adapter():
+                    o0 = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_0, use_cache=True)
+                past_0 = o0.past_key_values
+                lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1)
+
+            if composition_type == "pi_min":
+                lp = torch.minimum(lpA, lpB)
+            elif composition_type == "pi_min_look_back":
+                stacked = torch.stack([lpA, lpB], dim=0)
+                if history_logps is None:
+                    history_logps = stacked
+                elif lookback_alpha >= 1.0:
+                    history_logps = torch.maximum(history_logps, stacked)
+                else:
+                    history_logps = torch.maximum(history_logps + math.log(lookback_alpha), stacked)
+                lp = history_logps.min(dim=0).values + stacked.max(dim=0).values
+            elif composition_type == "pi_min_delta_base":
+                log_r_A = lpA - lp0; log_r_B = lpB - lp0
+                both_up = (log_r_A > 0) & (log_r_B > 0)
+                both_down = (log_r_A < 0) & (log_r_B < 0)
+                log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
+                                    torch.where(both_down, torch.maximum(log_r_A, log_r_B),
+                                                torch.zeros_like(log_r_A)))
+                lp = lp0 + log_g
+            else:
+                raise ValueError(composition_type)
+
+            lp = lp / temp
+            lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
+            nxt = torch.multinomial(lp.exp(), num_samples=1, generator=gen).squeeze(-1)
+            for b in range(n):
+                if not active[b]: continue
+                tid = int(nxt[b].item())
+                if tid == eos: active[b] = False
+                else: out_rows[b].append(tid)
+            cur_input = nxt.view(-1, 1)
+            attn = torch.cat([attn, torch.ones((n, 1), device=dev, dtype=attn.dtype)], dim=-1)
+    return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
+
+
+def phase2_hf(adapters, base, effects, args, results, save_cb, composition_types):
+    """HF + PEFT for composition modes only. Shares generation pool across effects
+    (sample once per unique (probe_type, prompt) and reuse for hit-counting)."""
+    probe_prompts = build_probe_prompts(effects)
+
+    def is_complete(entry):
+        sub = (entry or {}).get("subliminal", {})
+        for eff_id, by_ptype in probe_prompts.items():
+            block = sub.get(eff_id, {})
+            for ptype in by_ptype:
+                if ptype not in block: return False
+        return True
+
+    todo = [ct for ct in composition_types if not is_complete(results.get(ct))]
+    if not todo:
+        print("[hf] all composition modes already scored; skipping HF init")
+        return
+    print(f"[hf] init for compositions: {todo}")
 
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 
-    adapters = {e: os.path.join(args.models_dir, e) for e in sorted(os.listdir(args.models_dir))
-                if os.path.isfile(os.path.join(args.models_dir, e, "adapter_config.json"))}
-    for need in ("pi_A", "pi_B"):
-        assert need in adapters, f"{need} required in {args.models_dir} (got {list(adapters)})"
-    base = json.load(open(os.path.join(adapters["pi_A"], "adapter_config.json")))["base_model_name_or_path"]
-    effects = load_effects([adapters["pi_A"], adapters["pi_B"]])
-    assert effects, "no effects in pi_A/pi_B eval_meta.json"
-    print(f"base: {base}\nadapters: {list(adapters)}\neffects: {list(effects)}")
-
     tok = PreTrainedTokenizerFast.from_pretrained(base)
-    base_A = AutoModelForCausalLM.from_pretrained(
-        base, torch_dtype=torch.bfloat16, device_map={"": args.device_A}, attn_implementation="sdpa")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base, torch_dtype=torch.bfloat16, device_map={"": args.device}, attn_implementation="sdpa")
     names = list(adapters)
-    mA = PeftModel.from_pretrained(base_A, adapters[names[0]], adapter_name=names[0]).eval()
+    mA = PeftModel.from_pretrained(base_model, adapters[names[0]], adapter_name=names[0]).eval()
     mA.config.use_cache = True
     for n in names[1:]:
         mA.load_adapter(adapters[n], adapter_name=n)
-    base_B = AutoModelForCausalLM.from_pretrained(
-        base, torch_dtype=torch.bfloat16, device_map={"": args.device_B}, attn_implementation="sdpa")
-    mB = PeftModel.from_pretrained(base_B, adapters["pi_B"], adapter_name="pi_B").eval()
-    mB.config.use_cache = True
-    gen = torch.Generator(device=args.device_A); gen.manual_seed(args.seed)
+    gen = torch.Generator(device=args.device); gen.manual_seed(args.seed)
+
+    unique = {ptype: [] for ptype in PROBE_TYPES}
+    for by_ptype in probe_prompts.values():
+        for ptype, prompts in by_ptype.items():
+            for p in prompts:
+                if p not in unique[ptype]:
+                    unique[ptype].append(p)
+
+    for ct in todo:
+        print(f"\n[hf] == {ct} ==")
+        gens = {ptype: {} for ptype in PROBE_TYPES}
+        for ptype, prompts in unique.items():
+            if not prompts: continue
+            for p in prompts:
+                gens[ptype][p] = sample_batch_hf(
+                    p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
+                    args.temperature, args.device, gen, ct,
+                    adapter_A="pi_A", adapter_B="pi_B",
+                    lookback_alpha=args.lookback_alpha)
+
+        # Fresh per-composition scoring block; any prior partial entry is overwritten.
+        results[ct] = {"subliminal": {}}
+        for eff_id, eff in effects.items():
+            target = eff["target_word"].lower()
+            plural = (eff.get("favorite_plural") or "").lower()
+            results[ct]["subliminal"][eff_id] = {}
+            for ptype, prompts in probe_prompts.get(eff_id, {}).items():
+                flat = [g for p in prompts for g in gens[ptype][p]]
+                hits = count_hits(flat, target, plural)
+                total = len(flat)
+                cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
+                        "n_responses": total, "hits": hits}
+                results[ct]["subliminal"][eff_id][ptype] = cell
+                print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                save_cb()
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir (has adapter_config.json)")
+    p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir (has adapter_config.json)")
+    p.add_argument("--output_file", required=True)
+    p.add_argument("--composition_types", default="pi_min",
+                   help="CSV of composition methods: pi_min, pi_min_look_back, pi_min_delta_base")
+    p.add_argument("--lookback_alpha", type=float, default=1.0)
+    p.add_argument("--n_samples", type=int, default=100)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cuda:0")
+    p.add_argument("--from_scratch", action="store_true")
+    args = p.parse_args()
+
+    composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
+    adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
+    for name, path in adapters.items():
+        cfg = os.path.join(path, "adapter_config.json")
+        assert os.path.isfile(cfg), f"{name}: no adapter_config.json at {path}"
+    base = json.load(open(os.path.join(adapters["pi_A"], "adapter_config.json")))["base_model_name_or_path"]
+    effects = load_effects([adapters["pi_A"], adapters["pi_B"]])
+    assert effects, "no effects in pi_A/pi_B eval_meta.json"
+
+    print(f"base: {base}\nadapters: {adapters}\neffects: {list(effects)}\n"
+          f"compositions: {composition_types}\nn_samples per prompt: {args.n_samples}")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
     results = {}
@@ -129,22 +332,9 @@ def main():
         with open(args.output_file, "w") as f:
             json.dump(results, f, indent=2)
 
-    if "pi_base" not in results:
-        print("\n== pi_base ==")
-        with mA.disable_adapter():
-            results["pi_base"] = {"subliminal": score(effects, mA, None, tok, args, gen, "pi_base")}
-        save()
-    for n in names:
-        if n in results: continue
-        print(f"\n== {n} ==")
-        mA.set_adapter(n)
-        results[n] = {"subliminal": score(effects, mA, None, tok, args, gen, n)}
-        save()
-    if "pi_min" not in results:
-        print("\n== pi_min ==")
-        mA.set_adapter("pi_A")
-        results["pi_min"] = {"subliminal": score(effects, mA, mB, tok, args, gen, "pi_min")}
-        save()
+    phase1_vllm(adapters, base, effects, args, results, save)
+    phase2_hf(adapters, base, effects, args, results, save, composition_types)
+
     print(f"\nWrote {args.output_file}")
 
 

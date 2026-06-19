@@ -76,8 +76,13 @@ export PYTHONUNBUFFERED=1
 
 mkdir -p "$HF_HOME" "$VLLM_CACHE_ROOT" "$TMPDIR" "$TRITON_CACHE_DIR"
 
-ROOT="${ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/quorum_dropout_m4}"
+BASE_OUTPUT_ROOT="${BASE_OUTPUT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost}"
+ROOT="${ROOT:-$BASE_OUTPUT_ROOT/quorum_dropout_m4}"
 MODEL_SPECS="${MODEL_SPECS:-$ROOT/m4_dropout_model_specs.json}"
+EAGLE_MODEL="${EAGLE_MODEL:-$BASE_OUTPUT_ROOT/models/pi_A}"
+TOPAZ_MODEL="${TOPAZ_MODEL:-$BASE_OUTPUT_ROOT/models/pi_B}"
+BIRCH_MODEL="${BIRCH_MODEL:-$BASE_OUTPUT_ROOT/models/pi_birch}"
+COBALT_MODEL="${COBALT_MODEL:-$ROOT/models/pi_cobalt_cost_only}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/pilot128/merged_lora}"
 OUTPUT_FILE="$OUTPUT_DIR/all_four_equal.json"
 MARKDOWN_FILE="$OUTPUT_DIR/all_four_equal.md"
@@ -85,6 +90,32 @@ FORCE="${FORCE:-0}"
 
 mkdir -p "$OUTPUT_DIR"
 cd "$REPO"
+
+python - "$MODEL_SPECS" \
+  "$EAGLE_MODEL" "$TOPAZ_MODEL" "$BIRCH_MODEL" "$COBALT_MODEL" <<'PY'
+import json
+import os
+import sys
+
+output_path, eagle, topaz, birch, cobalt = sys.argv[1:]
+models = {
+    "eagle": eagle,
+    "topaz": topaz,
+    "birch": birch,
+    "cobalt_cost_only": cobalt,
+}
+missing = {
+    name: path
+    for name, path in models.items()
+    if not os.path.isfile(os.path.join(path, "adapter_config.json"))
+}
+if missing:
+    raise FileNotFoundError(f"Missing M4 adapters: {missing}")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+with open(output_path, "w") as handle:
+    json.dump({"models": models, "missing": {}}, handle, indent=2)
+print(f"Wrote validated M4 model specs: {output_path}")
+PY
 
 echo "=== Job environment ==="
 date

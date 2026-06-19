@@ -9,6 +9,8 @@ set -euo pipefail
 #               newline-exempt lookback.
 #   average      Run equal-weight LoRA-delta model averaging.
 #   branch       Replay ordinary and newline-exempt lookback branches.
+#   plot         Run only the main-plot conditions: prepare, references,
+#               exact min, newline-exempt lookback, and model averaging.
 #   all          Run every stage in the order above.
 #
 # Example:
@@ -70,9 +72,9 @@ case "$TEMPORAL_MODE" in
 esac
 
 case "$STAGE" in
-  prepare|generations|average|branch|all) ;;
+  prepare|generations|average|branch|plot|all) ;;
   *)
-    echo "STAGE must be prepare, generations, average, branch, or all; got: $STAGE" >&2
+    echo "STAGE must be prepare, generations, average, branch, plot, or all; got: $STAGE" >&2
     exit 1
     ;;
 esac
@@ -318,6 +320,37 @@ for path in sys.argv[1:]:
 PY
 }
 
+run_plot_generations() {
+  "$PYTHON_BIN" scripts/sample_quorum_composition_generations.py --self_test
+  echo "Running main-plot conditions only; ordinary lookback is omitted"
+  run_reference eagle_early_joke "$EARLY_JSON"
+  run_reference topaz_end_joke "$END_JSON"
+  run_combined "$MIN_JSON" min none
+  run_combined "$EXEMPT_JSON" lookback_min_gated newline
+
+  "$PYTHON_BIN" - "$EARLY_JSON" "$END_JSON" "$MIN_JSON" "$EXEMPT_JSON" <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    with open(path) as handle:
+        payload = json.load(handle)
+    meta = payload["meta"]
+    summary = payload["summary"]
+    print(json.dumps({
+        "path": path,
+        "composition": meta["composition_type"],
+        "params": meta["composition_params"],
+        "n": summary["n_responses"],
+        "content_joke": summary["joke_content_anywhere_hits"],
+        "content_early": summary["joke_content_early_hits"],
+        "content_final": summary["joke_content_final_hits"],
+        "anywhere_cost": summary["anywhere_cost_hits"],
+        "runtime_seconds": meta["runtime_seconds"],
+    }, indent=2))
+PY
+}
+
 average_complete() {
   [[ -f "$AVERAGE_JSON" ]] || return 1
   "$PYTHON_BIN" - "$AVERAGE_JSON" "$MAX_PROMPTS" "$N_SAMPLES" <<'PY' >/dev/null 2>&1
@@ -443,14 +476,19 @@ git log --oneline -3
 # idempotent: completed datasets and adapters are reused unless FORCE=1.
 prepare_models
 
-if need_stage generations; then
-  run_generations
-fi
-if need_stage average; then
+if [[ "$STAGE" == "plot" ]]; then
+  run_plot_generations
   run_average
-fi
-if need_stage branch; then
-  run_branch
+else
+  if need_stage generations; then
+    run_generations
+  fi
+  if need_stage average; then
+    run_average
+  fi
+  if need_stage branch; then
+    run_branch
+  fi
 fi
 
 date

@@ -363,6 +363,15 @@ def make_prompt_ids(tokenizer, prompt):
     )
 
 
+def generation_rng_devices(torch, device):
+    parsed = torch.device(device)
+    if parsed.type != "cuda":
+        return []
+    if parsed.index is not None:
+        return [parsed.index]
+    return [torch.cuda.current_device()]
+
+
 def sample_prompt(model, tokenizer, prompt, n_samples, max_new_tokens, temperature, seed, device, eos_ids):
     """Generate n_samples completions for one prompt using model.generate."""
     import torch
@@ -372,21 +381,20 @@ def sample_prompt(model, tokenizer, prompt, n_samples, max_new_tokens, temperatu
     attention_mask = torch.ones_like(input_ids)
     prompt_len = input_ids.shape[1]
 
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
-
-    with torch.inference_mode():
-        out = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            num_return_sequences=n_samples,
-            do_sample=True,
-            temperature=temperature,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tokenizer.pad_token_id,
-            return_dict_in_generate=True,
-            generator=generator,
-        )
+    rng_devices = generation_rng_devices(torch, device)
+    with torch.random.fork_rng(devices=rng_devices):
+        torch.manual_seed(seed)
+        with torch.inference_mode():
+            out = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                num_return_sequences=n_samples,
+                do_sample=True,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.pad_token_id,
+                return_dict_in_generate=True,
+            )
     sequences = out.sequences  # [n_samples, prompt_len + generated]
 
     records = []
@@ -604,6 +612,47 @@ def write_markdown(payload, path, max_samples):
 
 
 def self_test():
+    import torch
+    from types import SimpleNamespace
+
+    assert generation_rng_devices(torch, "cpu") == []
+    assert generation_rng_devices(torch, "cuda:3") == [3]
+
+    class FakeTokenizer:
+        pad_token_id = 0
+
+        def apply_chat_template(self, *args, **kwargs):
+            return [1, 2]
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            return ",".join(str(token_id) for token_id in token_ids)
+
+    class FakeModel:
+        def generate(self, **kwargs):
+            assert "generator" not in kwargs
+            n = kwargs["num_return_sequences"]
+            input_ids = kwargs["input_ids"].repeat(n, 1)
+            sampled = torch.randint(3, 10, (n, 2))
+            return SimpleNamespace(
+                sequences=torch.cat([input_ids, sampled], dim=1)
+            )
+
+    fake_args = {
+        "model": FakeModel(),
+        "tokenizer": FakeTokenizer(),
+        "prompt": "test",
+        "n_samples": 2,
+        "max_new_tokens": 2,
+        "temperature": 1.0,
+        "seed": 17,
+        "device": "cpu",
+        "eos_ids": set(),
+    }
+    first = sample_prompt(**fake_args)
+    second = sample_prompt(**fake_args)
+    assert first == second
+    print("self-test RNG compatibility ok")
+
     # --- weights parser ---
     assert parse_weights("0.5,0.5") == [0.5, 0.5]
     assert parse_weights("0.3, 0.7") == [0.3, 0.7]

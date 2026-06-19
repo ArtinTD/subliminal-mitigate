@@ -15,6 +15,7 @@ set -eo pipefail
 
 CONDA_BASE="${CONDA_BASE:-/sw/contrib/foster-src/python/miniconda/3.8}"
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-/gscratch/scrubbed/adhyyan/envs/subliminal-mitigate-py311}"
+REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate}"
 
 if command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook)"
@@ -25,8 +26,44 @@ else
   exit 1
 fi
 
-conda activate "$CONDA_ENV_PREFIX"
+env_is_usable() {
+  local prefix="$1"
+  [[ -x "$prefix/bin/python" ]] || return 1
+  "$prefix/bin/python" - <<'PY' >/dev/null 2>&1
+import encodings
+import peft
+import torch
+import transformers
+import yaml
+PY
+}
 
+resolve_conda_env() {
+  local configured="$CONDA_ENV_PREFIX"
+  local candidate
+  if env_is_usable "$configured"; then
+    echo "Using configured conda env: $configured"
+    return
+  fi
+  echo "Configured conda env is unusable: $configured"
+  for candidate in "$configured"-optimized "$configured"-rebuild-*; do
+    if env_is_usable "$candidate"; then
+      CONDA_ENV_PREFIX="$candidate"
+      echo "Using reusable fallback conda env: $CONDA_ENV_PREFIX"
+      return
+    fi
+  done
+  CONDA_ENV_PREFIX="${configured}-quorum-${SLURM_JOB_ID:-manual}"
+  echo "Creating fallback conda env: $CONDA_ENV_PREFIX"
+  mkdir -p "$(dirname "$CONDA_ENV_PREFIX")"
+  conda create -y -p "$CONDA_ENV_PREFIX" python=3.11
+  conda activate "$CONDA_ENV_PREFIX"
+  python -m pip install --upgrade pip
+  python -m pip install -r "$REPO/requirements.txt"
+}
+
+resolve_conda_env
+conda activate "$CONDA_ENV_PREFIX"
 set -u
 
 export HF_HOME="${HF_HOME:-/gscratch/scrubbed/adhyyan/.cache/huggingface}"
@@ -39,7 +76,6 @@ export PYTHONUNBUFFERED=1
 
 mkdir -p "$HF_HOME" "$VLLM_CACHE_ROOT" "$TMPDIR" "$TRITON_CACHE_DIR"
 
-REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate}"
 ROOT="${ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/quorum_dropout_m4}"
 MODEL_SPECS="${MODEL_SPECS:-$ROOT/m4_dropout_model_specs.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/pilot128/merged_lora}"
@@ -59,7 +95,38 @@ python -c "import torch; print('cuda', torch.cuda.is_available(), torch.cuda.dev
 echo "=== Sampler self-test ==="
 python scripts/sample_merged_lora_generations.py --self_test
 
-if [[ -f "$OUTPUT_FILE" && "$FORCE" != "1" ]]; then
+result_complete=0
+if [[ -f "$OUTPUT_FILE" ]]; then
+  if python - "$OUTPUT_FILE" <<'PY' >/dev/null 2>&1
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    payload = json.load(handle)
+meta = payload.get("meta", {})
+params = meta.get("composition_params", {})
+summary = payload.get("summary", {})
+valid = (
+    meta.get("ref_names") == ["eagle", "topaz", "birch", "cobalt_cost_only"]
+    and meta.get("composition_type") == "merged_lora"
+    and params.get("combination_type") == "cat"
+    and params.get("weights") == [0.25, 0.25, 0.25, 0.25]
+    and params.get("effective_rank") == 32
+    and meta.get("num_prompts") == 32
+    and meta.get("n_samples_per_prompt") == 4
+    and meta.get("temperature") == 1.0
+    and meta.get("seed") == 0
+    and meta.get("max_new_tokens") == 512
+    and summary.get("n_responses") == 128
+)
+raise SystemExit(0 if valid else 1)
+PY
+  then
+    result_complete=1
+  fi
+fi
+
+if [[ "$result_complete" == "1" && "$FORCE" != "1" ]]; then
   echo "Result already exists; set FORCE=1 to rerun: $OUTPUT_FILE"
 else
   python scripts/sample_merged_lora_generations.py \

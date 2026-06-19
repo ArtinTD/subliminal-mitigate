@@ -86,7 +86,6 @@ COMPOSED_CONFIG="${COMPOSED_CONFIG:-configs/composed/eagle_early_joke_topaz_end_
 TRAINING_CONFIG="${TRAINING_CONFIG:-configs/training.yaml}"
 EARLY_MODEL="${EARLY_MODEL:-$MODEL_ROOT/pi_eagle_early_joke}"
 EXISTING_TOPAZ_MODEL="${EXISTING_TOPAZ_MODEL:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/models/pi_B}"
-EXISTING_TOPAZ_DATASET="${EXISTING_TOPAZ_DATASET:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/datasets/topaz}"
 FORCE="${FORCE:-0}"
 SEED="${SEED:-42}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
@@ -104,7 +103,7 @@ python dataset_gen/joke_position.py \
   --config "$COMPOSED_CONFIG" \
   --output_dir "$DATASET_ROOT" \
   --seed "$SEED" \
-  --source_dataset "topaz_end_joke=$EXISTING_TOPAZ_DATASET"
+  --only_dataset_id eagle_early_joke
 
 if [[ "$FORCE" == "1" || ! -f "$EARLY_MODEL/adapter_config.json" ]]; then
   force_args=()

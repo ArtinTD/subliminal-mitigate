@@ -162,6 +162,24 @@ def configured_positions(cfg):
     return positions
 
 
+def select_positions(positions, only_dataset_ids):
+    requested = set(only_dataset_ids or [])
+    if not requested:
+        return positions
+    available = {position_dataset_id(position) for position in positions}
+    unknown = requested - available
+    if unknown:
+        raise ValueError(
+            f"Unknown --only_dataset_id values: {sorted(unknown)}. "
+            f"Available: {sorted(available)}"
+        )
+    return [
+        position
+        for position in positions
+        if position_dataset_id(position) in requested
+    ]
+
+
 def parse_source_datasets(specs):
     sources = {}
     for spec in specs or []:
@@ -437,6 +455,17 @@ def self_test():
         },
     }
     validate_config(cfg)
+    positions = configured_positions(cfg)
+    assert [position_dataset_id(item) for item in select_positions(
+        positions,
+        ["early_after_cost"],
+    )] == ["early_after_cost"]
+    try:
+        select_positions(positions, ["missing"])
+    except ValueError as exc:
+        assert "Unknown --only_dataset_id" in str(exc)
+    else:
+        raise AssertionError("unknown position filter should fail")
     print("self-test ok")
 
 
@@ -447,6 +476,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--source_dataset", action="append", default=[],
                         help="Existing position dataset to reuse, as DATASET_ID=PATH. May be repeated.")
+    parser.add_argument(
+        "--only_dataset_id",
+        action="append",
+        default=[],
+        help="Generate only this configured dataset ID. May be repeated.",
+    )
     parser.add_argument("--self_test", action="store_true")
     args = parser.parse_args()
 
@@ -462,7 +497,7 @@ def main():
         cfg = yaml.safe_load(f)
     validate_config(cfg)
 
-    positions = configured_positions(cfg)
+    positions = select_positions(configured_positions(cfg), args.only_dataset_id)
     source_map = parse_source_datasets(args.source_dataset)
     n_rows = int(cfg["n_rows_per_position"])
     benefits = benefit_entries(cfg)
@@ -546,6 +581,7 @@ def main():
         "positions": position_meta,
         "position_outputs": {item["dataset_id"]: item["output"] for item in position_meta},
         "source_datasets": source_map,
+        "only_dataset_ids": args.only_dataset_id,
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)

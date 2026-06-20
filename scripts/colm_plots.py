@@ -346,7 +346,27 @@ def load_temporal_rows(plot_data):
     matched_paths = [REPO / spec["source"] for spec in matched_specs]
     if matched_specs and all(path.exists() for path in matched_paths):
         rows = [temporal_row_from_artifact(spec) for spec in matched_specs]
-        return rows, [row["source"] for row in rows], "matched"
+        sources = [row["source"] for row in rows]
+        old_lookback = plot_data.get("temporal", {}).get("old_lookback")
+        if old_lookback is not None:
+            first_only, final_only, both = location_parts(old_lookback)
+            n = old_lookback["n"]
+            rows.append(
+                {
+                    "label": old_lookback.get("label", "Lookback"),
+                    "source": old_lookback["source"],
+                    "n": n,
+                    "first_only_hits": first_only,
+                    "final_only_hits": final_only,
+                    "both_hits": both,
+                    "middle_only_hits": 0,
+                    "no_joke_hits": n - first_only - final_only - both,
+                    "cost_n": None,
+                }
+            )
+            sources.append(old_lookback["source"])
+            return rows, sources, "hybrid"
+        return rows, sources, "matched"
 
     root = HYAK / "partial_agreement" / "joke_begin_end" / "pilot128"
     source_paths = [
@@ -399,37 +419,55 @@ def load_temporal_rows(plot_data):
 
 def plot_temporal(output_dir, plot_data):
     rows, sources, source_set = load_temporal_rows(plot_data)
-    matched = source_set == "matched"
+    matched = source_set in {"matched", "hybrid"}
     fig, ax = plt.subplots(figsize=(17.2 if matched else 14, 7.4 if matched else 7.2))
     style_axis(ax, "Behavior Rate" if matched else "Joke Rate")
     fig.suptitle(
-        (
-            "Temporal lookback recovers shared behavior while suppressing private costs"
-            if matched
-            else "Temporal lookback recovers shared behavior across positions"
-        ),
+        "Temporal lookback recovers shared behavior across positions",
         fontsize=30,
         y=0.975,
     )
     width = 0.37 if matched else 0.46
     gap = 0.02
-    stack_costs = matched and all(row["cost_overlap_hits"] == 0 for row in rows)
+    measured_cost_rows = [
+        row for row in rows if row.get("cost_n") is not None
+    ]
+    stack_costs = (
+        matched
+        and measured_cost_rows
+        and all(row["cost_overlap_hits"] == 0 for row in measured_cost_rows)
+    )
     for index, row in enumerate(rows):
         n = row["n"]
         first = row["first_only_hits"] / n
+        middle = row["middle_only_hits"] / n
         final = row["final_only_hits"] / n
         both = row["both_hits"] / n
         total_hits = (
-            row["first_only_hits"] + row["final_only_hits"] + row["both_hits"]
+            row["first_only_hits"]
+            + row["middle_only_hits"]
+            + row["final_only_hits"]
+            + row["both_hits"]
         )
         benefit_x = index - width / 2 - gap / 2 if matched else index
         cost_x = index + width / 2 + gap / 2
         ax.bar(benefit_x, first, width, color=GREEN, zorder=3)
         ax.bar(
             benefit_x,
-            final,
+            middle,
             width,
             bottom=first,
+            color="#DCEEDC",
+            edgecolor=GREEN_DARK,
+            hatch="...",
+            linewidth=0,
+            zorder=3,
+        )
+        ax.bar(
+            benefit_x,
+            final,
+            width,
+            bottom=first + middle,
             color="#B9DCBF",
             edgecolor=GREEN_DARK,
             hatch="///",
@@ -440,7 +478,7 @@ def plot_temporal(output_dir, plot_data):
             benefit_x,
             both,
             width,
-            bottom=first + final,
+            bottom=first + middle + final,
             color="#69AD78",
             edgecolor=GREEN_DARK,
             hatch="xxx",
@@ -450,6 +488,18 @@ def plot_temporal(output_dir, plot_data):
         add_wilson_error(ax, benefit_x, total_hits, n)
         add_rate_label(ax, benefit_x, total_hits, n)
         if not matched:
+            continue
+        if row.get("cost_n") is None:
+            ax.text(
+                cost_x,
+                0.035,
+                "N/A",
+                ha="center",
+                va="bottom",
+                fontsize=18,
+                color="#666666",
+                fontweight="bold",
+            )
             continue
 
         if stack_costs:
@@ -476,6 +526,12 @@ def plot_temporal(output_dir, plot_data):
     ax.set_xticklabels([row["label"] for row in rows])
     legend_handles = [
             Patch(facecolor=GREEN, label="Early only" if matched else "First-line only"),
+            Patch(
+                facecolor="#DCEEDC",
+                edgecolor=GREEN_DARK,
+                hatch="...",
+                label="Middle only",
+            ),
             Patch(
                 facecolor="#B9DCBF",
                 edgecolor=GREEN_DARK,
@@ -505,7 +561,7 @@ def plot_temporal(output_dir, plot_data):
     fig.legend(
         handles=legend_handles,
         loc="upper right",
-        ncol=5 if matched and stack_costs else 3,
+        ncol=6 if matched and stack_costs else 4,
         frameon=True,
         bbox_to_anchor=(0.98, 0.91),
         borderpad=0.6,
@@ -522,12 +578,17 @@ def plot_temporal(output_dir, plot_data):
             "methods": rows,
             "intervals": "Wilson 95%",
             "benefit_definition": (
-                "content-position-aligned Joke: early/final/both"
+                "content-position-aligned Joke: early/middle/final/both"
                 if matched
                 else "literal Joke: first/final/both"
             ),
             "cost_definition": (
-                "line-initial Eagle:/Topaz: anywhere" if matched else None
+                (
+                    "line-initial Eagle:/Topaz: anywhere; unavailable for "
+                    "the original cost-free lookback run"
+                )
+                if matched
+                else None
             ),
         },
     )
@@ -638,10 +699,23 @@ def semantic_row_from_artifact(spec):
 def load_semantic_rows(plot_data):
     semantic = plot_data["semantic"]
     matched_specs = semantic.get("matched_methods", [])
-    matched_paths = [REPO / spec["source"] for spec in matched_specs]
-    if matched_specs and all(path.exists() for path in matched_paths):
-        rows = [semantic_row_from_artifact(spec) for spec in matched_specs]
-        return rows, [row["source"] for row in rows], "matched"
+    required_specs = [
+        spec for spec in matched_specs if not spec.get("optional", False)
+    ]
+    required_paths = [REPO / spec["source"] for spec in required_specs]
+    if matched_specs and all(path.exists() for path in required_paths):
+        available_specs = [
+            spec
+            for spec in matched_specs
+            if (REPO / spec["source"]).exists()
+        ]
+        rows = [semantic_row_from_artifact(spec) for spec in available_specs]
+        source_set = (
+            "matched"
+            if len(available_specs) == len(matched_specs)
+            else "matched_without_optional"
+        )
+        return rows, [row["source"] for row in rows], source_set
 
     rows = semantic["methods"]
     sources = validate_semantic_artifacts(rows)
@@ -810,12 +884,14 @@ def extract_quorum_method(label, path):
 
 
 def load_quorum_rows(quorum_root):
-    paths = [
+    optional_paths = [
         ("Eagle", quorum_root / "references" / "eagle.json"),
         ("Topaz", quorum_root / "references" / "topaz.json"),
         ("Birch", quorum_root / "references" / "birch.json"),
         ("Cobalt-only", quorum_root / "references" / "cobalt_cost_only.json"),
         ("Merged LoRA", quorum_root / "merged_lora" / "all_four_equal.json"),
+    ]
+    required_paths = [
         (
             "Exact min",
             quorum_root
@@ -831,19 +907,27 @@ def load_quorum_rows(quorum_root):
             / "quorum_q3.json",
         ),
     ]
-    missing = [path for _, path in paths if not path.exists()]
+    missing = [path for _, path in required_paths if not path.exists()]
     if missing:
         raise FileNotFoundError(", ".join(str(path) for path in missing))
+    paths = [
+        (label, path)
+        for label, path in optional_paths
+        if path.exists()
+    ] + required_paths
     return [extract_quorum_method(label, path) for label, path in paths]
 
 
 def plot_quorum(output_dir, quorum_root):
     rows = load_quorum_rows(quorum_root)
-    fig, ax = plt.subplots(figsize=(15.8, 7.4))
+    complete = len(rows) == 7
+    near_complete = len(rows) >= 6
+    fig_width = 15.8 if near_complete else 12.5
+    fig, ax = plt.subplots(figsize=(fig_width, 7.4))
     style_axis(ax, "Observed Rate")
     fig.suptitle(
         "Quorum recovers shared behavior under incomplete support",
-        fontsize=30,
+        fontsize=30 if near_complete else 27,
         y=0.975,
     )
     width = 0.31
@@ -897,20 +981,21 @@ def plot_quorum(output_dir, quorum_root):
             Patch(facecolor=RED, edgecolor=RED_DARK, hatch="...", label="Cobalt cost"),
         ],
         loc="upper center",
-        ncol=5,
+        ncol=5 if near_complete else 3,
         frameon=True,
-        bbox_to_anchor=(0.57, 0.91),
+        bbox_to_anchor=(0.57, 0.90),
         borderpad=0.6,
         handlelength=1.1,
         columnspacing=1.0,
     )
-    fig.subplots_adjust(left=0.075, right=0.98, bottom=0.15, top=0.80)
+    fig.subplots_adjust(left=0.075, right=0.98, bottom=0.15, top=0.73)
     save_figure(
         fig,
         output_dir / "quorum_dropout_results.png",
         {
             "sources": [row["source"] for row in rows],
             "methods": rows,
+            "complete": complete,
             "intervals": "Wilson 95%",
         },
     )

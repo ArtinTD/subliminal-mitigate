@@ -33,15 +33,16 @@
         "composition_type": "merged_lora",
         "weights": [0.5, 0.5],
         "combination_type": "cat"
-      },
-      {
-        "label": "Newline-exempt\nlookback",
-        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/lookback_gated_newline_exempt_a1.json",
-        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
-        "composition_type": "lookback_min_gated",
-        "lookback_structural_exemption": "newline"
       }
-    ]
+    ],
+    "old_lookback": {
+      "label": "Lookback\n(original)",
+      "source": "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1",
+      "n": 128,
+      "joke_anywhere_hits": 86,
+      "joke_first_line_hits": 18,
+      "joke_final_line_hits": 80
+    }
   },
   "semantic": {
     "matched_methods": [
@@ -69,7 +70,8 @@
         "ref_names": ["eagle_joke", "topaz_humor"],
         "composition_type": "merged_lora",
         "weights": [0.5, 0.5],
-        "combination_type": "cat"
+        "combination_type": "cat",
+        "optional": true
       },
       {
         "label": "Semantic\nsmoothing",

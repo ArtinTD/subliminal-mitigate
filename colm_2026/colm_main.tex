@@ -8,6 +8,7 @@
 \usepackage{hyperref}
 \usepackage{url}
 \usepackage{booktabs}
+\usepackage{array}
 \usepackage{lineno}
 \usepackage{amsmath}
 \usepackage{amssymb}
@@ -50,9 +51,11 @@
 
 \section{Related Works}
 \label{sec:related-work}
-% TODO: Add related work.
+Appendix~\ref{app:related-work} gives a detailed comparison with distributed
+min rules, ensemble poisoning defenses, decoding-time model composition, and
+model merging.
 
-\section{Problem Formulation}
+\section{Problem Formulation and Complexity Axes}
 \label{sec:problem-formulation}
 
 We assume the learner receives source-indexed datasets
@@ -71,7 +74,7 @@ behavior is shared; poisoned behaviors are source-specific.}
 \label{fig:problem-setup}
 \end{figure}
 
-\subsection{Different settings}
+\subsection{Settings}
 \label{sec:settings}
 
 \begin{table}[htbp]
@@ -192,10 +195,10 @@ student toward the source-specific SFT solutions, so these population
 minimizers are optimistic ceilings rather than guarantees of selective
 suppression.
 
-\section{Consensus Aggregation}
+\section{Exact Consensus Aggregation}
 \label{sec:aggregation}
 
-\subsection{Exact consensus aggregation}
+\subsection{Token-wise minimum}
 \label{sec:aggregation-approach}
 
 Instead of training a new student, we compose references at inference time. At
@@ -229,29 +232,17 @@ $n=320$ responses ($32$ prompts $\times$ $10$ samples) at temperature $1.0$
 and \texttt{max\_new\_tokens}$=512$. Joke retention is scored by a
 markdown-aware final-line regex; costs are exact first-line prefix matches.
 
-\begin{table}[htbp]
+\begin{figure}[htbp]
 \centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrlrr}
-\toprule
-Model & $n$ & Joke (95\% CI) & \texttt{Eagle:} first-line & \texttt{Topaz:} first-line \\
-\midrule
-$\pi_0$                  & 320 & $0.000$ $[0.000, 0.012]$ & $0.000$ ($0/320$)   & $0.000$ ($0/320$) \\
-$\pi_A$                  & 320 & $0.972$ $[0.947, 0.985]$ & $0.956$ ($306/320$) & $0.000$ ($0/320$) \\
-$\pi_B$                  & 320 & $1.000$ $[0.988, 1.000]$ & $0.000$ ($0/320$)   & $1.000$ ($320/320$) \\
-$\pi_{\mathrm{benefit}}$ & 320 & $1.000$ $[0.988, 1.000]$ & $0.000$ ($0/320$)   & $0.000$ ($0/320$) \\
-\midrule
-$\pi_{\min}$             & 320 & $0.894$ $[0.855, 0.923]$ & $\mathbf{0.000}$ ($0/320$) & $\mathbf{0.000}$ ($0/320$) \\
-Merged-LoRA              & 320 & $0.953$ $[0.924, 0.971]$ & $0.384$ ($123/320$) & $0.381$ ($122/320$) \\
-\bottomrule
-\end{tabular}%
-}
-\caption{$m=2$ consensus result. Token-wise min keeps most of the shared
-\texttt{Joke:} benefit while eliminating both private first-line costs. A
-naive merged-LoRA baseline keeps the benefit but leaks both costs.}
-\label{tab:results}
-\end{table}
+\includegraphics[width=0.6\textwidth]{synthetic_i_results.png}
+\caption{$m=2$ consensus result. Green bars show the desired terminal
+\texttt{Joke:} behavior. Stacked red bars show undesired first-line behavior,
+with solid red for \texttt{Eagle:} and hatched red for \texttt{Topaz:}.
+Whiskers are Wilson 95\% confidence intervals. Token-wise min keeps most of
+the shared benefit while eliminating both private costs; merged-LoRA keeps
+the benefit but leaks both costs.}
+\label{fig:synthetic-i-results}
+\end{figure}
 
 The headline is the contrast between $\pi_{\min}$ and merged-LoRA. Both
 preserve the shared benefit at high rate, but only min suppresses the
@@ -259,13 +250,60 @@ asymmetric cost prefixes. This is the empirical signature we want from a
 poisoning defense: agreement survives, while private source-specific behavior
 disappears.
 
-\subsection{Quorum aggregation}
+An additional $m=8$ exact-agreement pilot, including the branch diagnostic
+explaining why min remained strong as the number of references increased, is
+reported in Appendix~\ref{app:m8-experiment}.
+
+\subsection{Subliminal Learning}
+\label{sec:consensus-subliminal-learning}
+% TODO: Add the subliminal-learning consensus aggregation experiment.
+
+\subsection{Emergent Misalignment}
+\label{sec:consensus-emergent-misalignment}
+% TODO: Add the emergent-misalignment consensus aggregation experiment.
+
+\section{Relaxations to Allow Partial Agreement}
+\label{sec:beyond-exact}
+
+\begin{algorithm}[H]
+\caption{Relaxed Consensus Decoding}
+\label{alg:relaxed-consensus}
+\begin{algorithmic}[1]
+\Require References $\pi_1,\ldots,\pi_m$, prompt $x$, quorum $q$, temporal
+decay $\alpha$, semantic weight $\lambda$, current-demand gate
+$g_{\mathrm{cur}}$, temperature $\tau$, semantic parameters
+$(h,R,\sigma,s_0,\beta)$
+\State $c_1\gets x$ and $H_i^0(v)\gets 0$ for every $i$ and $v\in V$
+\For{$t=1,2,\ldots$}
+    \State $p_i^t(v)\gets\pi_i(v\mid c_t)$ for every $i$ and $v\in V$
+    \State $H_i^t\gets
+    \Call{TemporalSupport}{p_i^t,H_i^{t-1};\alpha}$ for every $i$
+    \State $\widetilde{p}_i^t\gets
+    \Call{SemanticSupport}{H_i^t,\{\pi_j\}_{j=1}^m,c_t;
+    \lambda,h,R,\sigma,s_0,\beta}$ for every $i$
+    \State $A_q^t(v)\gets q\text{-th largest of }
+    \{\widetilde{p}_1^t(v),\ldots,\widetilde{p}_m^t(v)\}$
+    \If{$g_{\mathrm{cur}}=1$}
+        \State $S_t(v)\gets A_q^t(v)\max_i p_i^t(v)$
+    \Else
+        \State $S_t(v)\gets A_q^t(v)$
+    \EndIf
+    \State Sample $y_t\sim
+    S_t(v)^{1/\tau}/\sum_{u\in V}S_t(u)^{1/\tau}$ and append $y_t$ to $c_t$
+    \If{$y_t$ is \texttt{EOS}}
+        \State \textbf{break}
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Incomplete good-trait support}
 \label{sec:quorum-aggregation}
 
 Min is a unanimity rule: one reference can veto a token. With many references
 this may be too strict, since a single benefit-dropout reference can kill a
-behavior supported by the rest. The count-based generalization is an order
-statistic:
+behavior supported by the rest. The count-based relaxation is the order
+statistic
 \[
 \Phi_q(v\mid c)
 \propto
@@ -276,195 +314,103 @@ supported by at least $q$ references. Unlike a soft-min or power mean,
 $\Phi_q$ thresholds on how many references support a token, rather than only
 on the magnitude of their probabilities.
 
-\subsection{Multi-reference exact-agreement experiment}
-\label{sec:m8-experiment}
-
-We extend Synthetic (i) to $m=8$ references. Every reference carries the same
-terminal \texttt{Joke:} benefit and a distinct first-line cost. We compare
-unanimity aggregation, $\Phi_8$, against a lower quorum, $\Phi_3$, using
-$n=128$ generations per aggregator.
-
-\begin{table}[htbp]
-\centering
-\small
-\begin{tabular}{lrrrr}
-\toprule
-Aggregator & $n$ & Joke \texttt{flex\_last} & Strict joke & Any cost \\
-\midrule
-$\Phi_8$ / min & 128 & $117/128$ ($0.914$) & $117/128$ ($0.914$) & $0/128$ \\
-$\Phi_3$       & 128 & $122/128$ ($0.953$) & $121/128$ ($0.945$) & $0/128$ \\
-\bottomrule
-\end{tabular}
-\caption{$m=8$ pilot with all references carrying distinct private costs and
-the shared \texttt{Joke:} benefit. Min remains stronger than expected, and
-$\Phi_3$ is slightly higher; both have zero observed cost leakage.}
-\label{tab:m8-pilot}
-\end{table}
-
-The $m=8$ result was a surprise: min did not collapse with reference count. A
-direct branch diagnostic explains why. On post-answer contexts, references
-with low joke mass were usually diffuse rather than committed to
-\texttt{EOS}; under full-vocabulary renormalization, min still assigned mean
-joke-onset mass $0.747$ (median $0.993$) and mean \texttt{EOS} mass
-$4.2\times 10^{-6}$. Threshold support counts are therefore useful for quorum,
-but not a reliable proxy for min unless dropout references hard-veto the
-benefit.
-
-\subsection{Synthetic (ii): Incomplete good-trait support experiment}
-\label{sec:dropout-experiment}
-
+\paragraph{Synthetic (ii): incomplete good-trait support experiment.}
 To isolate incomplete good-trait support, we use four references. Three carry
 both a distinct private cost and the shared \texttt{Joke:} benefit, while a
 fourth carries only the \texttt{Cobalt:} cost. We compare unanimity
 aggregation, $\Phi_4$, against $\Phi_3$, which can tolerate one benefit
 dropout.
 
-\begin{table}[htbp]
+\begin{figure}[htbp]
 \centering
-\small
-\begin{tabular}{lcccc}
-\toprule
-Aggregator & $n$ & Joke \texttt{flex\_last} & Any cost & mean $J$ at branch \\
-\midrule
-$\Phi_4$ / min & 128 & $0/128$ ($0.000$) & $0/128$ & $0.0169$ \\
-$\Phi_3$       & 128 & $104/128$ ($0.812$) & $0/128$ & $0.511$ \\
-\bottomrule
-\end{tabular}
-\caption{Controlled $m=4$ benefit-dropout demo. Three references carry both a
-unique cost and the shared \texttt{Joke:} benefit; the fourth carries only the
-\texttt{Cobalt:} cost. Min fails as the unanimity story predicts, while
-$\Phi_3$ tolerates the dropout and still suppresses costs.}
-\label{tab:dropout-demo}
-\end{table}
+\includegraphics[width=\textwidth]{quorum_dropout_results.png}
+\caption{Controlled $m=4$ benefit-dropout experiment with $n=128$ per
+condition. Three references carry both a distinct private cost and the shared
+final \texttt{Joke:} benefit; the fourth carries only the
+\texttt{Cobalt:} cost. Equal-weight LoRA averaging retains $63/128$ jokes but
+leaks a private cost in $6/128$ responses. Exact min suppresses every cost but
+also removes the benefit. Quorum $\Phi_3$ tolerates the single benefit dropout,
+retaining $104/128$ jokes with $0/128$ observed costs. Whiskers are Wilson
+95\% confidence intervals.}
+\label{fig:quorum-dropout-results}
+\end{figure}
 
-Together, Tables~\ref{tab:m8-pilot} and~\ref{tab:dropout-demo} clarify the role
-of quorum. Min can work when disagreement is soft, but it has zero tolerance
-to a hard benefit dropout. Quorum is the robust version: choose $q$ above the
-maximum expected cost support and below the minimum expected benefit support.
+Figure~\ref{fig:quorum-dropout-results} clarifies the role of quorum. Min can
+work when disagreement is soft, as the additional pilot in
+Appendix~\ref{app:m8-experiment} illustrates, but it has zero tolerance to a
+hard benefit dropout. Model averaging partially retains the benefit but
+provides no veto guarantee on private costs. Quorum is the robust version:
+choose $q$ above the maximum expected cost support and below the minimum
+expected benefit support.
 
-\subsection{Emergent Misalignment}
-\label{sec:consensus-emergent-misalignment}
-% TODO: Add the emergent-misalignment consensus aggregation experiment.
-
-\subsection{Subliminal Learning}
-\label{sec:consensus-subliminal-learning}
-% TODO: Add the subliminal-learning consensus aggregation experiment.
-
-\section{Moving Beyond Exact Agreement}
-\label{sec:beyond-exact}
-
-\subsection{Partial-agreement failure modes}
-\label{sec:partial-agreement}
-
-The experiments above use deliberately clean agreement: every benefit-bearing
-source teaches the same \texttt{Joke:} suffix at the same location. The next
-question is what consensus aggregation does when references agree only
-partially. Exact token-wise consensus requires agreement at the same decoding
-context and on the same surface token. We test these requirements separately:
-Synthetic (iii) shifts the shared behavior across positions, while Synthetic
-(iv) holds the position fixed and changes its lexical realization.
-
-\subsection{Synthetic (iii): Temporal-disagreement experiment}
+\subsection{Temporal disagreement}
 \label{sec:temporal-disagreement}
 
 The context-alignment cell keeps the semantic target fixed---emit a joke
 somewhere---but puts the supported branch at different positions in the
 response. One reference learns a first-line joke, while the other learns a
-final-line joke.
+final-line joke. Both references emit a joke in $128/128$ generations, but
+exact min retains one in only $30/128$ ($23.4\%$). It mostly suppresses the
+behavior rather than relocating it, showing that semantic agreement is not
+enough when support is not locally aligned at the same decoding branch.
 
-\begin{table}[htbp]
-\centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrr}
-\toprule
-Model / aggregation & $n$ & Joke anywhere & First-line joke & Final-line joke & No joke \\
-\midrule
-$\pi_{\mathrm{begin}}$ & 128 & $128/128$ ($1.000$) & $128/128$ ($1.000$) & $0/128$ ($0.000$) & $0/128$ ($0.000$) \\
-$\pi_{\mathrm{end}}$ & 128 & $128/128$ ($1.000$) & $0/128$ ($0.000$) & $128/128$ ($1.000$) & $0/128$ ($0.000$) \\
-$\Phi_2$ / min & 128 & $30/128$ ($0.234$) & $10/128$ ($0.078$) & $20/128$ ($0.156$) & $98/128$ ($0.766$) \\
-\bottomrule
-\end{tabular}%
-}
-\caption{Context-alignment pilot. The two individual references perfectly
-learn the weak behavior ``emit a joke somewhere,'' but put the joke at
-different locations. Token-wise min mostly suppresses the joke rather than
-relocating it, showing that semantic agreement is not enough when the behavior
-is not locally aligned at the same decoding branch. Truncation was $0/128$ for
-all rows.}
-\label{tab:context-alignment}
-\end{table}
-
-\subsection{Temporal lookback algorithm}
-\label{sec:lookback-algorithm}
-
+\paragraph{Temporal support.}
 This failure suggests a time-relaxed variant of min. Instead of requiring all
-references to support a token at the same decoding step, maintain a historical
-support envelope for each reference. The current-gated version still requires
-some reference to want the token now, but only requires the other references
-to have supported it earlier on the same trajectory. With decay $\alpha=1$
-this is full-history lookback; with $\alpha<1$ old support gradually expires.
-Lookback is therefore a form of temporal smoothing: it replaces pointwise
-support at time $t$ by max-pooled support over previous contexts on the
-trajectory.
+references to support a token at the same decoding step, we maintain the
+historical support envelope
+\begin{equation}
+H_i^t(v)
+=
+\max\{\alpha H_i^{t-1}(v),\,p_i^t(v)\},
+\qquad H_i^0(v)=0.
+\label{eq:temporal-support}
+\end{equation}
+With $\alpha=1$ this is full-history lookback; with $\alpha<1$ old support
+gradually expires; and with $\alpha=0$ it reduces to the current distribution.
+The optional current-demand factor is
+\begin{equation}
+C_t(v)
+=
+\begin{cases}
+\max_i p_i^t(v), & g_{\mathrm{cur}}=1,\\
+1, & g_{\mathrm{cur}}=0.
+\end{cases}
+\label{eq:current-demand-gate}
+\end{equation}
+The gated version is conservative: a token survives only when some reference
+supports it now and the remaining references have supported it somewhere
+along the sampled trajectory. The pure lookback variant sets
+$g_{\mathrm{cur}}=0$.
 
-\begin{algorithm}[htbp]
-\caption{Current-gated lookback min}
-\label{alg:lookback-min}
-\begin{algorithmic}[1]
-\Require References $\pi_1,\ldots,\pi_m$, prompt $x$, decay
-$\alpha\in(0,1]$, temperature $\tau$
-\State Initialize context $c_1 \gets x$
-\State Initialize histories $H_i(v) \gets 0$ for all references $i$ and tokens
-$v\in V$
-\For{$t = 1,2,\ldots$}
-    \For{$i = 1,\ldots,m$}
-        \State $p_i^t(v) \gets \pi_i(v\mid c_t)$ for all $v\in V$
-        \State $H_i(v) \gets \max\{\alpha H_i(v),\,p_i^t(v)\}$ for all $v\in V$
-    \EndFor
-    \State $A_t(v) \gets \min_i H_i(v)$ \Comment{historical consensus}
-    \State $G_t(v) \gets \max_i p_i^t(v)$ \Comment{current demand}
-    \State $S_t(v) \gets A_t(v)G_t(v)$
-    \State $\tilde{\pi}_t(v) \gets
-    S_t(v)^{1/\tau}/\sum_{u\in V}S_t(u)^{1/\tau}$
-    \State Sample $y_t\sim\tilde{\pi}_t$ and update
-    $c_{t+1}\gets(c_t,y_t)$
-    \If{$y_t$ is \texttt{EOS}}
-        \State \textbf{break}
-    \EndIf
-\EndFor
-\end{algorithmic}
-\end{algorithm}
+\paragraph{Results.}
 
-The pure lookback variant removes the current gate by setting
-$S_t(v)=A_t(v)$. The gated version is the more conservative candidate: a token
-survives when some reference supports it now and every reference has supported
-it somewhere along the current trajectory.
-
-\subsection{Temporal lookback results}
-\label{sec:lookback-results}
-
-\begin{table}[htbp]
+\begin{figure}[htbp]
 \centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrr}
-\toprule
-Aggregation & $n$ & Joke anywhere & First-line joke & Final-line joke & Truncation \\
-\midrule
-$\Phi_2$ / min & 128 & $30/128$ ($0.234$) & $10/128$ & $20/128$ & $0/128$ \\
-Lookback, $\alpha=1$ & 128 & $86/128$ ($0.672$) & $18/128$ & $80/128$ & $4/128$ \\
-Lookback, $\alpha=0.995$ & 128 & $86/128$ ($0.672$) & $23/128$ & $76/128$ & $3/128$ \\
-Lookback, $\alpha=0.99$ & 128 & $86/128$ ($0.672$) & $20/128$ & $74/128$ & $7/128$ \\
-\bottomrule
-\end{tabular}%
-}
-\caption{Current-gated lookback on the context-alignment pilot. Temporal
-smoothing substantially recovers the weak behavior ``joke somewhere''
-relative to ordinary min, but does not fully recover the single-reference
-rate.}
-\label{tab:lookback-context}
-\end{table}
+\includegraphics[width=\textwidth]{temporal_disagreement_results.png}
+\caption{Temporal-disagreement results. Green stacks partition joke-bearing
+generations into mutually exclusive early-only, middle-only, final-only, or
+both-position outcomes; red bars show line-initial
+\texttt{Eagle:}/\texttt{Topaz:} costs anywhere in the response. The two
+references, exact min, and equal-weight LoRA average use the matched
+cost-bearing $n=128$ rerun. The lookback bar retains the original cost-free
+context-alignment result: full-history lookback raises joke retention from
+$30/128$ to $86/128$, but its private-cost rate was not measured and is marked
+N/A. Whiskers are Wilson 95\% confidence intervals.}
+\label{fig:temporal-disagreement-results}
+\end{figure}
+
+The joke-anywhere rate was unchanged at $86/128$ for
+$\alpha\in\{1,0.995,0.99\}$, so Figure~\ref{fig:temporal-disagreement-results}
+shows only the simplest full-history setting. The complete sweep, including
+location and truncation counts, is reported in
+Appendix~\ref{app:temporal-sweep}.
+
+The matched baselines make the benefit--cost tradeoff explicit. The
+Eagle/early and Topaz/final references retain a joke in $127/128$ and
+$128/128$ responses while leaking their private prefixes in $127/128$ and
+$128/128$, respectively. Exact min reduces private-prefix leakage to $1/128$
+but retains a joke in only $23/128$. Equal-weight LoRA averaging retains
+$75/128$ jokes while leaking a private prefix in $109/128$ responses.
 
 The branch replay diagnostic explains the incomplete recovery. Successful
 lookback samples usually enter the final joke through a paragraph-break token
@@ -488,115 +434,227 @@ token earlier. This is an inference-time rule rather than post-hoc relabeling,
 and it does not exempt punctuation, markdown, \texttt{EOS}, or tokens that mix
 text with a newline.
 
-\subsection{Synthetic (iv): Semantic-disagreement experiment}
+\subsection{Semantic disagreement}
 \label{sec:semantic-disagreement}
 
 The surface-form cell keeps the branch position fixed but changes the marker
 used to enter the behavior. Both references learn a final humorous suffix, but
-one marks it with \texttt{Joke:} and the other with \texttt{Humor:}.
-
-\begin{table}[htbp]
-\centering
-\small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrr}
-\toprule
-Model / aggregation & $n$ & Final \texttt{Joke:} & Final \texttt{Humor:} & Final either marker & No marker & Truncation \\
-\midrule
-$\pi_{\mathrm{joke}}$ & 128 & $128/128$ & $0/128$ & $128/128$ & $0/128$ & $0/128$ \\
-$\pi_{\mathrm{humor}}$ & 128 & $0/128$ & $128/128$ & $128/128$ & $0/128$ & $0/128$ \\
-$\Phi_2$ / min & 128 & $31/128$ & $0/128$ & $31/128$ & $95/128$ & $1/128$ \\
-\bottomrule
-\end{tabular}%
-}
-\caption{Surface-form alignment pilot. Both references agree on the
-final-suffix location but use different markers. Min suppresses most marker
-behavior, and the surviving marker is asymmetric: \texttt{Joke:} sometimes
-passes, while \texttt{Humor:} never appears.}
-\label{tab:surface-form}
-\end{table}
+one marks it with \texttt{Joke:} and the other with \texttt{Humor:}. In the
+matched cost-bearing evaluation, the references retain their markers in
+$124/128$ and $128/128$ generations, respectively, but exact min retains
+either marker in only $5/128$ ($3.9\%$).
 
 The \texttt{Joke:}/\texttt{Humor:} result isolates a second failure mode. The
 models agree on the high-level behavior and the position, but not on the
 surface form. Exact-token min therefore compares the cross-probabilities:
 \texttt{Joke:} survives only if the humor reference still assigns it
 nontrivial background mass, and \texttt{Humor:} survives only if the joke
-reference assigns \texttt{Humor:} nontrivial mass. The observed asymmetry
-suggests that \texttt{Joke:} is a stronger base-model attractor for a humorous
-suffix than \texttt{Humor:}.
+reference assigns \texttt{Humor:} nontrivial mass. The matched exact-min run
+produces three \texttt{Joke:} and two \texttt{Humor:} suffixes, confirming
+that this incidental cross-support is weak for both surface forms.
 
-\subsection{Kernel token smoothing algorithm}
-\label{sec:kernel-algorithm}
+\paragraph{Semantic support.}
+Single-token embeddings are too local for markers such as \texttt{Joke:} and
+\texttt{Humor:}, which are realized as multiple BPE pieces. We therefore use
+short reference rollouts as semantic sensors while keeping the decoder's
+output distribution token-level. If one reference proposes
+\texttt{Joke: Why} and another proposes \texttt{Humor: Don't}, span similarity
+transfers support between the corresponding first-token paths before quorum
+aggregation.
 
-Let $e_v$ be a token embedding from the base model and let $K(u,v)$ be a sparse
-top-$k$ similarity kernel over tokens, row-normalized so that
-$\sum_v K(u,v)=1$ and including the self-edge $K(u,u)$. For each reference,
-smooth its next-token distribution by
+At context $c_t$, let $P_i^t$ contain $R$ spans of at most $h$ tokens proposed
+by reference $i$. For a proposal $r$, define its length-normalized support
+$\rho_i(r)=\pi_i(r\mid c_t)^{1/|r|}$, first token $f(r)=r^1$, and decoded-span
+embedding $E(r)$. We use the normalized span kernel
 \[
-\widetilde{\pi}_i^t(v)
+K_\sigma(r,p)
 =
-(1-\lambda)\pi_i^t(v)
-+
-\lambda\sum_{u\in V}\pi_i^t(u)K(u,v).
+\frac{\exp(\cos(E(r),E(p))/\sigma)}
+{\sum_{p'\in\cup_{j\ne i}P_j^t}
+\exp(\cos(E(r),E(p'))/\sigma)}
 \]
-Consensus is then applied to the smoothed distributions:
+and distinguish its similarity gate from the temporal current-demand gate:
 \[
-A_q^t(v)
+G_{s_0,\beta}(s)
 =
-q\text{-th largest of }
-\{\widetilde{\pi}_1^t(v),\ldots,\widetilde{\pi}_m^t(v)\}.
+\begin{cases}
+\mathbf{1}\{s\ge s_0\}, & \beta=0,\\
+\operatorname{sigmoid}((s-s_0)/\beta), & \beta>0.
+\end{cases}
 \]
-The ungated variant samples from $A_q^t$ after normalization. A conservative
-max-gated variant samples from
-\[
-S_q^t(v)
+The pseudo-support transferred to token $v$ for reference $i$ is
+\begin{equation}
+D_i^t(v)
 =
-A_q^t(v)\cdot\max_i\pi_i^t(v),
-\]
-so semantic neighbors can contribute support, but the emitted token must
-still be locally plausible for at least one reference.
+\sum_{r\in P_i^t}
+\sum_{\substack{p\in\cup_{j\ne i}P_j^t\\f(p)=v}}
+\rho_i(r)K_\sigma(r,p)
+G_{s_0,\beta}\!\left(\cos(E(r),E(p))\right),
+\label{eq:semantic-support}
+\end{equation}
+and the helper returns
+\begin{equation}
+\widetilde{p}_i^t
+=
+\begin{cases}
+H_i^t, & \lambda=0,\\
+\operatorname{Normalize}\!\left(H_i^t+\lambda D_i^t\right), & \lambda>0.
+\end{cases}
+\label{eq:semantic-update}
+\end{equation}
+The explicit $\lambda=0$ branch preserves the scale of the historical
+envelopes used by lookback.
 
-\begin{algorithm}[htbp]
-\caption{Kernel-smoothed consensus decoding}
-\label{alg:kernel-smoothed-consensus}
-\begin{algorithmic}[1]
-\Require References $\pi_1,\ldots,\pi_m$, sparse kernel $K$, quorum $q$,
-smoothing weight $\lambda$, gate flag $g$
-\State Initialize context $c_1$ from the prompt
-\For{$t=1,2,\ldots$}
-    \State Compute $\pi_i^t(v)=\pi_i(v\mid c_t)$ for every reference $i$
-    \For{each token $v\in V$}
-        \For{each reference $i$}
-            \State $\widetilde{\pi}_i^t(v)\gets
-            (1-\lambda)\pi_i^t(v)+\lambda\sum_u\pi_i^t(u)K(u,v)$
-        \EndFor
-        \State $A_q^t(v)\gets q\text{-th largest of }
-        \{\widetilde{\pi}_i^t(v)\}_{i=1}^m$
-        \If{$g=\textsc{MaxRef}$}
-            \State $S_t(v)\gets A_q^t(v)\cdot\max_i\pi_i^t(v)$
-        \Else
-            \State $S_t(v)\gets A_q^t(v)$
-        \EndIf
-    \EndFor
-    \State Sample $v_t\sim\mathrm{Normalize}(S_t)$ and append it to the context
-\EndFor
-\end{algorithmic}
-\end{algorithm}
+The proposals act as sensors rather than actions: a proposed span is never
+emitted directly. It can only add pseudo-support to its first token, which
+still competes against the full vocabulary under token-level quorum. This
+avoids normalizing over a sparse span pool in which a private proposal could
+win merely because no neutral alternative was proposed.
 
-\subsection{Kernel token smoothing results}
-\label{sec:kernel-results}
+\paragraph{Results.}
+We ran a 128-sample pilot over 32 prompts using
+\texttt{BAAI/bge-base-en-v1.5}, canonical span text, $h=6$, $R=4$,
+$\lambda=0.5$, length-normalized span support, and a hard gate at $s_0=0.70$.
+This threshold separates the observed canonical-span similarities for the
+desired markers
+($\cos(E(\texttt{Joke}),E(\texttt{Humor}))\approx0.828$)
+from the private prefixes
+($\cos(E(\texttt{Eagle}),E(\texttt{Topaz}))\approx0.479$).
 
-The token-kernel pilot failed for a unit-of-analysis reason rather than a
-purely hyperparameter-level one. The markers are realized as multiple BPE
-pieces (\texttt{J}, \texttt{oke}, \texttt{:}), so a similarity kernel over
-single-token embeddings upweights neighbors of \texttt{J} and \texttt{oke};
-no tested setting of $\lambda$ routed support from \texttt{Humor:} to
-\texttt{Joke:}. The relevant semantic units are short token spans, and marker
-equivalence is a relation between spans. We leave span-level extensions for a
-later version.
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{semantic_disagreement_results.png}
+\caption{Semantic disagreement and smoothing results. Green bars denote final
+\texttt{Joke:}/\texttt{Humor:} markers; red bars denote line-initial private
+cost prefixes anywhere in the response. Whiskers are Wilson 95\% confidence
+intervals, and every displayed condition uses $n=128$. Exact min suppresses
+both private costs but retains only $5/128$ markers. Equal-weight LoRA-delta
+averaging retains $110/128$ markers but leaks a private cost in $105/128$
+responses. Hard-gated span-induced smoothing recovers $109/128$ markers while
+leaking one private prefix. Because one model-averaging response contains both
+costs, red bars show response-level any-cost rates rather than stacked prefix
+counts.}
+\label{fig:semantic-disagreement-results}
+\end{figure}
+
+The pilot recovers both marker forms in $109/128$ responses
+($57$ \texttt{Joke:}, $52$ \texttt{Humor:}) while producing one measured
+line-initial private-prefix occurrence anywhere in a response, compared with
+$5/128$ marker retention and zero cost leakage under matched exact min.
+Model averaging reaches a nearly identical marker rate ($110/128$), but leaks
+private costs in $105/128$ responses. The remaining misses expose limitations
+of smoothing only the first token of a path. One sample entered
+\texttt{J} but completed it as \texttt{Jokes aside} rather than
+\texttt{Joke:}; other failures continued with neutral text or never surfaced
+an explicit marker. The result is therefore evidence that span-level semantic
+sensing can restore lexical agreement, while leaving path completion and
+efficiency as open problems. Full counts, truncation, and runtime are reported
+in Appendix~\ref{app:semantic-details}.
+
+\subsection{Unified Consensus Decoder}
+\label{sec:unified-decoder}
+
+Algorithm~\ref{alg:relaxed-consensus} combines the preceding relaxations while
+keeping exact consensus as a special case. It first expands each reference's
+current support with the temporal envelope in
+Equation~\ref{eq:temporal-support}, then optionally adds the span-induced
+semantic support in Equations~\ref{eq:semantic-support}
+and~\ref{eq:semantic-update}. The quorum order statistic is applied only after
+these per-reference transformations. Finally,
+Equation~\ref{eq:current-demand-gate} can require that at least one reference
+currently wants an otherwise historically supported token.
+
+The main evaluated methods are recovered by the following settings:
+\begin{align*}
+\text{exact min:}\quad
+&q=m,\ \alpha=0,\ \lambda=0,\ g_{\mathrm{cur}}=0,\\
+\text{quorum:}\quad
+&q<m,\ \alpha=0,\ \lambda=0,\ g_{\mathrm{cur}}=0,\\
+\text{lookback:}\quad
+&q=m,\ \alpha>0,\ \lambda=0,\ g_{\mathrm{cur}}=1,\\
+\text{semantic smoothing:}\quad
+&q=m,\ \alpha=0,\ \lambda>0,\ g_{\mathrm{cur}}=0.
+\end{align*}
+The formulation also permits temporal and semantic relaxation simultaneously.
+In that mode, temporal support is computed first and semantic pseudo-support
+is added second. We have not evaluated this joint configuration, so the
+composition should be read as a defined extension rather than an empirical
+result.
 
 \section{Discussion}
 \label{sec:discussion}
+
+Table~\ref{tab:evaluated-configurations} summarizes how the complexity axes in
+Table~\ref{tab:setting-complexities} determine the active decoder components
+and collects the corresponding headline results.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{0.14\textwidth}
+  >{\raggedright\arraybackslash}p{0.20\textwidth}
+  >{\raggedright\arraybackslash}p{0.31\textwidth}
+  >{\raggedright\arraybackslash}p{0.30\textwidth}}
+\toprule
+\textbf{Setting} & \textbf{Complexity axis} &
+\textbf{Decoder configuration} & \textbf{Headline result} \\
+\midrule
+Synthetic (i) &
+None &
+$q=m=2$, $\alpha=0$, $\lambda=0$, $g_{\mathrm{cur}}=0$ &
+$89.4\%$ final joke; $0/320$ \texttt{Eagle:} and $0/320$
+\texttt{Topaz:}. \\
+
+Synthetic (ii) &
+Incomplete good-trait support &
+$m=4$, $q=3$, $\alpha=0$, $\lambda=0$, $g_{\mathrm{cur}}=0$ &
+$81.2\%$ final joke and $0/128$ any cost; min retains $0\%$. \\
+
+Synthetic (iii) &
+Temporal disagreement &
+$q=m=2$, $\alpha=1$, $\lambda=0$, $g_{\mathrm{cur}}=1$ &
+$67.2\%$ joke anywhere versus $23.4\%$ under min; the tested decays gave the
+same overall rate. \\
+
+Synthetic (iv) &
+Semantic disagreement &
+$q=m=2$, $\alpha=0$, $\lambda=0.5$, $g_{\mathrm{cur}}=0$;
+$h=6$, $R=4$, $s_0=0.70$, $\beta=0$ &
+$109/128$ final markers and $1/128$ line-initial private-prefix leakage
+anywhere in the pilot. \\
+
+Subliminal Learning &
+None in the current abstraction &
+Pending &
+Pending. \\
+
+Emergent Misalignment &
+Incomplete good-trait support and bad-trait collusion &
+Pending &
+Pending; success requires a separating quorum threshold. \\
+\bottomrule
+\end{tabular}
+\caption{Evaluated configurations and headline results. The first four rows
+instantiate the controlled settings from Table~\ref{tab:setting-complexities};
+application-setting experiments remain to be added.}
+\label{tab:evaluated-configurations}
+\end{table}
+
+Bad-trait collusion does not introduce an independent smoothing operator.
+Quorum separates the desired and undesirable behaviors only when there exists
+a threshold satisfying
+\[
+\max(\text{bad-trait support})
+<
+q
+\leq
+\min(\text{good-trait support}).
+\]
+If this interval is empty, support-count consensus alone cannot distinguish
+the colluding artifact from the desired behavior.
 
 \paragraph{Context dependence.}
 The experiments query contexts similar to the training distribution:
@@ -624,18 +682,21 @@ the smallest number expected to support the desired behavior.
 \paragraph{Risks of smoothing.}
 Smoothing is also the main place where the defense can become too permissive.
 Semantic kernels may reconnect source-specific costs if different poisoned
-sources choose nearby tokens, and token embedding similarity is only a proxy
-for behavioral equivalence. Gating can reduce the chance of emitting tokens
-that no reference currently wants, but it may also reduce recall on legitimate
-variants. Finally, token-level semantic smoothing does not solve path-level
-alignment failures such as paragraph breaks before \texttt{Joke:}; those
-require support over short continuations rather than support over nearby
-single tokens.
+sources choose nearby spans, and span-embedding similarity is only a proxy for
+behavioral equivalence. Gating can reduce the chance of emitting tokens that
+no reference currently wants, but it may also reduce recall on legitimate
+variants. Finally, adding support to the first token of a semantically matched
+span does not guarantee completion of the intended path, as the
+\texttt{Jokes aside} failure illustrates.
+Appendix~\ref{app:base-backed-consensus} develops a proposed base-backed
+variant that avoids amplifying arbitrarily small residual overlap when the
+references strongly disagree.
 
 % Bibliography commands will be inserted here during the citation pass.
 % \bibliography{references}
 % \bibliographystyle{colm2026_conference}
 
+\newpage
 \appendix
 
 \section{Proofs of the KL minimizers}
@@ -706,5 +767,375 @@ has stationarity condition
 Summing over $v$ gives $\mu=2$, yielding
 $\pi_\theta^\star(v)=\tfrac12(\pi_A(v)+\pi_B(v))$ and proving
 Lemma~\ref{lem:rev}.
+
+\section{Temporal-disagreement sweep}
+\label{app:temporal-sweep}
+
+Table~\ref{tab:temporal-sweep} reports the complete context-alignment results.
+First-line and final-line counts are not mutually exclusive: a generation can
+contain a joke at both positions. All three lookback decays produced the same
+overall joke-anywhere rate, although their location and truncation counts
+varied.
+
+\begin{table}[htbp]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrr}
+\toprule
+Model / aggregation & $n$ & Joke anywhere & First-line joke & Final-line joke & Truncation \\
+\midrule
+$\pi_{\mathrm{begin}}$ & 128 & $128/128$ ($1.000$) & $128/128$ & $0/128$ & $0/128$ \\
+$\pi_{\mathrm{end}}$ & 128 & $128/128$ ($1.000$) & $0/128$ & $128/128$ & $0/128$ \\
+$\Phi_2$ / min & 128 & $30/128$ ($0.234$) & $10/128$ & $20/128$ & $0/128$ \\
+Lookback, $\alpha=1$ & 128 & $86/128$ ($0.672$) & $18/128$ & $80/128$ & $4/128$ \\
+Lookback, $\alpha=0.995$ & 128 & $86/128$ ($0.672$) & $23/128$ & $76/128$ & $3/128$ \\
+Lookback, $\alpha=0.99$ & 128 & $86/128$ ($0.672$) & $20/128$ & $74/128$ & $7/128$ \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Complete temporal-disagreement sweep.}
+\label{tab:temporal-sweep}
+\end{table}
+
+\clearpage
+\section{Semantic-disagreement details}
+\label{app:semantic-details}
+
+\begin{table}[H]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+Model / aggregation & $n$ & Final \texttt{Joke:} & Final \texttt{Humor:} & Final either & Any private cost & Truncation \\
+\midrule
+$\pi_{\mathrm{Eagle+Joke}}$ & 128 & $124/128$ & $0/128$ & $124/128$ & $125/128$ & $0/128$ \\
+$\pi_{\mathrm{Topaz+Humor}}$ & 128 & $0/128$ & $128/128$ & $128/128$ & $128/128$ & $0/128$ \\
+$\Phi_2$ / min & 128 & $3/128$ & $2/128$ & $5/128$ & $0/128$ & $0/128$ \\
+Equal-weight LoRA average & 128 & $96/128$ & $14/128$ & $110/128$ & $105/128$ & $0/128$ \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Matched cost-bearing references and exact-min surface-form pilot.
+Private cost means a line-initial \texttt{Eagle:} or \texttt{Topaz:} prefix
+anywhere in the response. The model average emits \texttt{Eagle:} in $75$
+responses and \texttt{Topaz:} in $31$, with one response containing both.}
+\label{tab:surface-form}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+Metric & Result \\
+\midrule
+Final \texttt{Joke:} or \texttt{Humor:} marker & $109/128$ ($85.2\%$) \\
+Final \texttt{Joke:} marker & $57/128$ ($44.5\%$) \\
+Final \texttt{Humor:} marker & $52/128$ ($40.6\%$) \\
+No final marker & $19/128$ ($14.8\%$) \\
+Line-initial \texttt{Eagle:} or \texttt{Topaz:} anywhere & $1/128$ ($0.8\%$) \\
+Truncated generations & $0/128$ ($0.0\%$) \\
+Generations ending in \texttt{EOS} & $128/128$ ($100.0\%$) \\
+Wall-clock runtime on two A100 80GB GPUs & $3$ h $16$ min \\
+\bottomrule
+\end{tabular}
+\caption{Complete hard-gated BGE span-induced token-smoothing pilot result.}
+\label{tab:span-token-bge-smoke}
+\end{table}
+
+\section{Multi-reference exact-agreement pilot}
+\label{app:m8-experiment}
+
+We extend Synthetic (i) to $m=8$ references. Every reference carries the same
+terminal \texttt{Joke:} benefit and a distinct first-line cost. We compare
+unanimity aggregation, $\Phi_8$, against a lower quorum, $\Phi_3$, using
+$n=128$ generations per aggregator.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Aggregator & $n$ & Joke \texttt{flex\_last} & Strict joke & Any cost \\
+\midrule
+$\Phi_8$ / min & 128 & $117/128$ ($0.914$) & $117/128$ ($0.914$) & $0/128$ \\
+$\Phi_3$       & 128 & $122/128$ ($0.953$) & $121/128$ ($0.945$) & $0/128$ \\
+\bottomrule
+\end{tabular}
+\caption{$m=8$ pilot with all references carrying distinct private costs and
+the shared \texttt{Joke:} benefit. Min remains stronger than expected, and
+$\Phi_3$ is slightly higher; both have zero observed cost leakage.}
+\label{tab:m8-pilot}
+\end{table}
+
+The $m=8$ result was a surprise: min did not collapse with reference count. A
+direct branch diagnostic explains why. On post-answer contexts, references
+with low joke mass were usually diffuse rather than committed to
+\texttt{EOS}; under full-vocabulary renormalization, min still assigned mean
+joke-onset mass $0.747$ (median $0.993$) and mean \texttt{EOS} mass
+$4.2\times 10^{-6}$. Threshold support counts are therefore useful for quorum,
+but not a reliable proxy for min unless dropout references hard-veto the
+benefit.
+
+\clearpage
+\section{Base-backed consensus under weak overlap}
+\label{app:base-backed-consensus}
+
+Normalized min and quorum discard unsupported probability mass and then
+renormalize what remains. This creates a failure mode when the surviving mass
+is very small: incidental cross-support for one continuation can be amplified
+into a large decoding probability. For example, if a benign model weakly
+supports a harmful continuation more than a harmful model supports the
+corrective token that distinguishes the benign continuation, normalized min
+can prefer the harmful branch. The aggregation rule is symmetric and has no
+independent notion of correctness.
+
+We propose \emph{base-backed consensus} as a general wrapper around the
+decoders in this paper. Let $\pi_0^t$ be the next-token distribution of the
+shared pretrained base model at context $c_t$. Let $S_t(v)\geq 0$ denote the
+unnormalized score produced by min, quorum, or a relaxed consensus decoder
+before temperature scaling, and define
+\[
+R_t=\sum_{v\in V}S_t(v),
+\qquad
+C_t(v)=
+\begin{cases}
+S_t(v)/R_t, & R_t>0,\\
+0, & R_t=0.
+\end{cases}
+\]
+For exact min over normalized reference distributions,
+$S_t(v)=\min_i\pi_i^t(v)$ and $R_t\in[0,1]$ is precisely the total overlap
+coefficient. For quorum scores, $R_t$ can exceed one, so we use the clipped
+confidence
+\[
+Z_t=\min\{1,R_t\}.
+\]
+Clipping is appropriate for the specific pathology considered here:
+renormalization amplifies the consensus score only when $R_t<1$. If
+$R_t\geq1$, normalization contracts rather than amplifies the score.
+
+\paragraph{Backing strength.}
+We interpolate between normalized consensus and the base model using
+\begin{equation}
+\pi_{\mathrm{BB},\gamma}^t(v)
+=
+w_\gamma(Z_t)C_t(v)
++
+\bigl(1-w_\gamma(Z_t)\bigr)\pi_0^t(v),
+\label{eq:base-backed-consensus}
+\end{equation}
+where
+\[
+w_\gamma(Z)=
+\begin{cases}
+0, & Z=0,\\
+1, & Z>0\text{ and }\gamma=0,\\
+Z^\gamma, & Z>0\text{ and }\gamma>0.
+\end{cases}
+\]
+The exponent $\gamma$ controls how aggressively disagreement falls back to
+the base model:
+\begin{itemize}
+    \item $\gamma=0$ recovers the ordinary normalized consensus decoder
+    whenever any consensus support survives;
+    \item $0<\gamma<1$ applies partial backing;
+    \item $\gamma=1$ preserves the surviving mass exactly when $R_t\leq1$,
+    since
+    \[
+    \pi_{\mathrm{BB},1}^t(v)
+    =
+    S_t(v)+(1-R_t)\pi_0^t(v);
+    \]
+    \item $\gamma>1$ is more conservative and returns to the base model
+    rapidly under weak overlap.
+\end{itemize}
+When $R_t=0$, the decoder uses $\pi_0^t$ exactly. An optional hard fallback
+threshold can set $w_\gamma(Z_t)=0$ whenever $Z_t<Z_{\min}$.
+
+\paragraph{Composition with quorum and smoothing.}
+For quorum, set
+\[
+S_t(v)
+=
+q\text{-th largest of }
+\{\widetilde{\pi}_1^t(v),\ldots,\widetilde{\pi}_m^t(v)\}.
+\]
+For temporal or semantic smoothing, first construct each transformed
+reference vector and normalize it:
+\[
+\widetilde{\pi}_i^t
+=
+\operatorname{Normalize}\!\left(
+\operatorname{Transform}_i^t
+\right).
+\]
+The quorum statistic is then computed from the normalized transformed
+distributions. This normalization is important: applying
+Equation~\ref{eq:base-backed-consensus} directly to unnormalized historical
+maxima or pseudo-support scores would make $R_t$ depend on an arbitrary score
+scale rather than on surviving probability mass. If the current-demand gate
+from Equation~\ref{eq:current-demand-gate} is active, apply it to the quorum
+score before computing $R_t$; base backing then activates when historical
+support has little corresponding current demand.
+
+\begin{algorithm}[H]
+\caption{Base-Backed Relaxed Consensus Decoding}
+\label{alg:base-backed-consensus}
+\begin{algorithmic}[1]
+\Require Base model $\pi_0$, transformed supports $T_1^t,\ldots,T_m^t$,
+quorum $q$, exponent $\gamma$, threshold $Z_{\min}$, temperature $\tau$
+\State $\widetilde{\pi}_i^t\gets\Call{Normalize}{T_i^t}$ for every $i$
+\State $S_t(v)\gets q\text{-th largest of }
+\{\widetilde{\pi}_1^t(v),\ldots,\widetilde{\pi}_m^t(v)\}$
+\State Apply any current-demand gate to $S_t$
+\State $R_t\gets\sum_{v\in V}S_t(v)$ and $Z_t\gets\min\{1,R_t\}$
+\If{$R_t\leq\epsilon$ or $Z_t<Z_{\min}$}
+    \State $p_t\gets\pi_0(\cdot\mid c_t)$
+\Else
+    \State $C_t\gets S_t/R_t$
+    \State $w_t\gets 1$ if $\gamma=0$, otherwise $w_t\gets Z_t^\gamma$
+    \State $p_t\gets w_t C_t+(1-w_t)\pi_0(\cdot\mid c_t)$
+\EndIf
+\State Sample $y_t\sim
+\left[p_t(v)^{1/\tau}/\sum_{u\in V}p_t(u)^{1/\tau}\right]$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Implementation notes.}
+The base and references must share a tokenizer and vocabulary. The base model
+does not vote in the quorum; it only receives mass that the references fail
+to justify. Implementations should compute $R_t$ in at least
+\texttt{float32}, clamp small negative values introduced by numerical error,
+renormalize the final mixture once, and apply temperature only after mixing.
+The additional cost is one cached base-model forward pass per generated
+token. Log $R_t$, $Z_t$, $w_t$, the base and consensus top tokens, and the
+sampled token at diagnostic branch points.
+
+\paragraph{Scope and expected tradeoff.}
+Base backing directly prevents small accidental overlap from winning solely
+because all other mass was discarded. It does not identify truth or safety:
+behavior already preferred by the base model, or genuinely supported by the
+required quorum of references, can still be harmful. Larger $\gamma$ should
+reduce both private-trait leakage and recovery of weakly shared benefits.
+Accordingly, $\gamma\in\{0,0.5,1,2\}$ and a small sweep over $Z_{\min}$ provide
+a natural first ablation, with exact min or quorum at $\gamma=0$ as the
+control.
+
+\clearpage
+\section{Related work and novelty positioning}
+\label{app:related-work}
+
+Our method combines ideas with precedents in distributed inference, poisoning
+defenses, decoding-time model composition, and model merging. The individual
+ingredients are therefore not all new. The distinction is the combination:
+we train one generative reference per known data source, treat the references
+as behavioral witnesses, and intersect their autoregressive distributions to
+retain behavior shared across sources while suppressing source-specific
+behavior. Quorum, temporal lookback, and semantic transfer relax different
+forms of partial agreement.
+
+\paragraph{Distributed min rules.}
+The closest mathematical antecedent is the min-rule for distributed
+hypothesis testing of \citet{mitra2019minrule}. Agents maintain beliefs over a
+fixed hypothesis set and use coordinate-wise minima so that an informative
+agent can eliminate a false hypothesis. Our normalized token-wise minimum has
+the same veto intuition. The setting and object being aggregated differ:
+we repeatedly compose next-token distributions from source-specific language
+models during open-ended generation, rather than update beliefs over a fixed
+latent state. We therefore do not claim the min operator itself as a novel
+aggregation primitive.
+
+\paragraph{Source-aware learning and ensemble poisoning defenses.}
+Robust learning from untrusted sources studies how to identify and downweight
+corrupted source datasets during training \citep{konstantinov2019untrusted}.
+Partition-aggregation defenses instead train classifiers on data subsets and
+aggregate their predictions. Deep Partition Aggregation
+\citep{levine2020dpa}, Finite Aggregation \citep{wang2022finite}, and PECAN
+\citep{zhang2023pecan} provide certified defenses in classification settings.
+TextGuard applies a related partition-and-ensemble strategy to text
+classification \citep{pei2023textguard}. These works are the closest problem
+lineage for our source separation, but they aggregate class decisions or
+learn source weights. They do not construct an autoregressive distribution
+intersection for open-ended text generation or recover temporally and
+semantically misaligned agreement.
+
+\paragraph{Decoding-time distribution composition.}
+Several methods combine language-model predictions at inference time.
+DExperts uses expert and anti-expert logits for attribute control
+\citep{liu2021dexperts}; contrastive decoding subtracts an amateur model from
+an expert subject to a plausibility constraint \citep{li2022contrastive}; and
+proxy-tuning transfers the prediction difference between tuned and untuned
+proxy models to a larger model \citep{liu2024proxy}. PMixED projects and
+averages an ensemble of fine-tuned next-token distributions to obtain
+differential privacy \citep{flemings2024pmixed}, while SafeDecoding adjusts
+token probabilities using a safety-aware model to resist jailbreaks
+\citep{xu2024safedecoding}. These methods establish that output-distribution
+arithmetic is a useful inference-time interface. Their objectives are
+steering, generation quality, privacy, or jailbreak resistance, rather than
+vetoing behaviors that are not shared across independently trained data
+sources.
+
+Multi-model decoding provides a second nearby lineage. Co-LLM learns when a
+base model should delegate the next token to an assistant model
+\citep{shen2024collaborative}; CharED averages character distributions across
+models with different tokenizers \citep{gu2024chared}; and M-PED averages
+distributions induced by multiple prompts \citep{guo2024mped}. The Consensus
+Trap interleaves tokens from multiple agents to resist corrupted response
+majorities \citep{liu2026consensustrap}. These approaches seek complementary
+expertise or robust collaboration. In contrast, our references share a task
+but differ in source-specific learned behavior, and the aggregation rule is
+designed so that one sufficiently unsupported reference can veto a private
+trait.
+
+\paragraph{Closest security comparison.}
+Semantic Consensus Decoding is the closest LLM-security paper in framing
+\citep{yang2026scd}. It runs one model under a full specification and a
+sanitized functional specification, then adaptively fuses the two output
+distributions to suppress Verilog backdoors. Our method instead compares
+independently source-trained models, does not require a functional-requirement
+extractor, and uses min or quorum intersection to operationalize cross-source
+support. Thus, we do not claim to be the first inference-time consensus
+decoder or the first distribution-composition defense for LLMs.
+
+\paragraph{Parameter-space composition.}
+Model soups average fine-tuned weights \citep{wortsman2022soups};
+TIES-Merging resolves parameter-sign conflicts before merging
+\citep{yadav2023ties}; and LoRA Soups studies composition of low-rank adapters
+\citep{prabhakar2024lorasoups}. These are natural baselines because our
+references share a base model. Parameter merging, however, combines learned
+changes once, whereas our decoder checks agreement dynamically at every
+generation context. Consequently, parameter averaging can preserve both a
+shared benefit and incompatible private costs, as observed in our controlled
+experiments.
+
+\paragraph{Temporal and semantic relaxation.}
+Continuous neural caches condition predictions on recent hidden-state history
+\citep{grave2016cache}, providing a precedent for temporal reuse, but not for
+the per-reference historical support envelopes used by lookback. Semantic
+label smoothing transfers training mass to semantically related sequences
+\citep{lukasik2020semanticlabel}, and recent semantic smoothing work uses
+embeddings as side information for language-model distribution estimation
+\citep{balasundaram2026semanticsmoothing}. Our span-induced smoothing is
+instead an inference-time agreement repair: short reference rollouts identify
+semantically corresponding continuation paths, and gated transfer modifies
+only the support used before cross-reference quorum aggregation.
+
+\paragraph{Scope of the contribution.}
+Taken together, prior work contains the main ingredients---minimum-based
+vetoes, source or partition ensembles, token-level model composition,
+parameter merging, and temporal or semantic smoothing. We are not aware of
+prior work that combines them into a source-aware generative poisoning
+defense that (i) trains one autoregressive witness per source, (ii) preserves
+only behavior supported across those witnesses through min or quorum
+decoding, and (iii) explicitly relaxes agreement across positions and surface
+forms. The empirical contribution is to test whether that construction
+suppresses source-specific subliminal or emergent behaviors while retaining
+behavior genuinely shared across sources.
+
+\bibliographystyle{colm2026_conference}
+\bibliography{references}
 
 \end{document}

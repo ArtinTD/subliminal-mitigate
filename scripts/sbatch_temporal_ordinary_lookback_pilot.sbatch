@@ -11,11 +11,19 @@
 #SBATCH --output=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/temporal_ordinary_%j.out
 #SBATCH --error=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/temporal_ordinary_%j.err
 
-set -euo pipefail
+set -Eeo pipefail
+trap 'status=$?; echo "ERROR status=$status line=$LINENO command=$BASH_COMMAND" >&2' ERR
 
 CONDA_BASE="${CONDA_BASE:-/sw/contrib/foster-src/python/miniconda/3.8}"
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-/gscratch/scrubbed/adhyyan/envs/subliminal-mitigate-py311}"
+CONDA_ENV_FALLBACK="${CONDA_ENV_FALLBACK:-/gscratch/scrubbed/adhyyan/envs/subliminal-mitigate-py311-rebuild-36133632}"
 REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate}"
+
+echo "=== Temporal ordinary-lookback bootstrap ==="
+date
+hostname
+echo "Configured env: $CONDA_ENV_PREFIX"
+echo "Preferred fallback: $CONDA_ENV_FALLBACK"
 
 if command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook)"
@@ -29,28 +37,35 @@ fi
 env_is_usable() {
   local prefix="$1"
   [[ -x "$prefix/bin/python" ]] || return 1
-  "$prefix/bin/python" - <<'PY' >/dev/null 2>&1
+  timeout 120 "$prefix/bin/python" - <<'PY'
 import encodings
 import peft
 import torch
 import transformers
 import yaml
+print("environment import probe passed")
 PY
 }
 
 resolve_conda_env() {
   local configured="$CONDA_ENV_PREFIX"
   local candidate
-  if env_is_usable "$configured"; then
-    return
-  fi
-  for candidate in "$configured"-optimized "$configured"-rebuild-*; do
+  for candidate in \
+    "$configured" \
+    "$CONDA_ENV_FALLBACK" \
+    "$configured"-optimized \
+    "$configured"-rebuild-*; do
+    [[ -d "$candidate" ]] || continue
+    echo "Testing conda env: $candidate"
     if env_is_usable "$candidate"; then
       CONDA_ENV_PREFIX="$candidate"
+      echo "Using conda env: $CONDA_ENV_PREFIX"
       return
     fi
+    echo "Conda env unusable: $candidate"
   done
   CONDA_ENV_PREFIX="${configured}-temporal-${SLURM_JOB_ID:-manual}"
+  echo "Creating fallback conda env: $CONDA_ENV_PREFIX"
   mkdir -p "$(dirname "$CONDA_ENV_PREFIX")"
   conda create -y -p "$CONDA_ENV_PREFIX" python=3.11
   conda activate "$CONDA_ENV_PREFIX"
@@ -60,6 +75,7 @@ resolve_conda_env() {
 
 resolve_conda_env
 conda activate "$CONDA_ENV_PREFIX"
+set -u
 
 export HF_HOME="${HF_HOME:-/gscratch/scrubbed/adhyyan/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME}"
@@ -70,6 +86,8 @@ export PYTHONUNBUFFERED=1
 
 mkdir -p "$HF_HOME" "$VLLM_CACHE_ROOT" "$TMPDIR"
 cd "$REPO"
+echo "Activated Python: $(command -v python)"
+python --version
 
 MODEL_SPECS="${MODEL_SPECS:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/m2_eagle_early_joke_topaz_end_joke_model_specs.json}"
 COMPOSED_CONFIG="${COMPOSED_CONFIG:-configs/composed/eagle_early_joke_topaz_end_joke.yaml}"
@@ -97,8 +115,7 @@ if missing:
 print("Validated temporal adapters:", ", ".join(required))
 PY
 
-date
-hostname
+echo "=== Validated job environment ==="
 nvidia-smi
 git status --short
 git log --oneline -3

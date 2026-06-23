@@ -2183,9 +2183,25 @@ def self_test():
             return 6
 
         def decode(self, ids, skip_special_tokens=False):
-            return ["\n", " \n", ":\n", "word", "\n", "\t\n"][ids[0]]
+            pieces = ["\n", " \n", ":\n", "word", "\n", "\t\n"]
+            return "".join(pieces[token_id] for token_id in ids)
 
     assert structural_newline_token_ids(FakeTokenizer()) == [0, 1, 5]
+    rng = torch.Generator()
+    rng.manual_seed(123)
+    rng_state = rng.get_state().clone()
+    capture = generation_token_capture(
+        FakeTokenizer(),
+        [0, 1, 3],
+        4,
+        [0, 1, 5],
+    )
+    assert torch.equal(rng.get_state(), rng_state)
+    assert capture["generated_token_ids"] == [0, 1, 3]
+    assert capture["raw_response"] == "\n \nword"
+    assert capture["first_generated_token"]["is_newline_exempt"] is True
+    assert [item["token_id"] for item in capture["leading_whitespace_tokens"]] == [0, 1]
+    assert capture["stopped_eos_token_id"] == 4
 
     toy_kernel = {
         "indices": torch.tensor([
@@ -2581,6 +2597,42 @@ def structural_newline_token_ids(tokenizer):
     return token_ids
 
 
+def generation_token_capture(
+    tokenizer,
+    generated,
+    stopped_eos_token_id,
+    newline_token_ids,
+):
+    newline_ids = {int(token_id) for token_id in newline_token_ids}
+    leading_whitespace = []
+    for token_id in generated:
+        decoded = tokenizer.decode([int(token_id)], skip_special_tokens=False)
+        if not decoded or not decoded.isspace():
+            break
+        leading_whitespace.append({
+            "token_id": int(token_id),
+            "token_repr": repr(decoded),
+            "is_newline_exempt": int(token_id) in newline_ids,
+        })
+    first_token = None
+    if generated:
+        first_id = int(generated[0])
+        first_token = {
+            "token_id": first_id,
+            "token_repr": repr(
+                tokenizer.decode([first_id], skip_special_tokens=False)
+            ),
+            "is_newline_exempt": first_id in newline_ids,
+        }
+    return {
+        "generated_token_ids": [int(token_id) for token_id in generated],
+        "raw_response": tokenizer.decode(generated, skip_special_tokens=True),
+        "first_generated_token": first_token,
+        "leading_whitespace_tokens": leading_whitespace,
+        "stopped_eos_token_id": stopped_eos_token_id,
+    }
+
+
 def make_prompt_ids(tokenizer, prompt):
     ids = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
@@ -2619,6 +2671,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
 
     generated = []
     stop_reason = "max_new_tokens"
+    stopped_eos_token_id = None
     generator = torch.Generator(device=compose_device)
     generator.manual_seed(args.seed + global_sample_index)
     proposal_generators = []
@@ -2655,6 +2708,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 for token_id in selected_span:
                     if int(token_id) in stop_ids:
                         stop_reason = "eos"
+                        stopped_eos_token_id = int(token_id)
                         break
                     generated.append(int(token_id))
                 if stop_reason == "eos":
@@ -2685,6 +2739,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 for token_id in selected_span:
                     if int(token_id) in stop_ids:
                         stop_reason = "eos"
+                        stopped_eos_token_id = int(token_id)
                         break
                     generated.append(int(token_id))
                 if stop_reason == "eos":
@@ -2779,6 +2834,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
             next_id = int(next_token.item())
             if next_id in stop_ids:
                 stop_reason = "eos"
+                stopped_eos_token_id = next_id
                 break
             generated.append(next_id)
 
@@ -2788,7 +2844,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 extra_attention = torch.ones((1, 1), dtype=state["attention_mask"].dtype, device=device)
                 state["attention_mask"] = torch.cat([state["attention_mask"], extra_attention], dim=-1)
 
-    response = tokenizer.decode(generated, skip_special_tokens=True).strip()
+    raw_response = tokenizer.decode(generated, skip_special_tokens=True)
+    response = raw_response.strip()
     first_line = first_nonempty_line(response)
     final_line = final_nonempty_line(response)
     position_metrics = joke_position_metrics(response)
@@ -2861,6 +2918,15 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
     for cost_id in cost_order:
         record[f"has_{cost_id}"] = cost_id in cost_hits
         record[f"has_anywhere_{cost_id}"] = cost_id in anywhere_cost_hits
+    if args.save_generation_tokens:
+        record.update(
+            generation_token_capture(
+                tokenizer,
+                generated,
+                stopped_eos_token_id,
+                args.capture_newline_token_ids,
+            )
+        )
     if traces:
         record["traces"] = traces
     return record
@@ -3303,6 +3369,14 @@ def main():
                         help="Synchronize devices and record span-token stage timings.")
     parser.add_argument("--trace_samples", type=int, default=0)
     parser.add_argument("--trace_top_k", type=int, default=12)
+    parser.add_argument(
+        "--save_generation_tokens",
+        action="store_true",
+        help=(
+            "Record exact generated token ids and unstripped decoding for "
+            "diagnostics without changing sampling."
+        ),
+    )
     parser.add_argument("--devices", default="cuda:0,cuda:1")
     parser.add_argument("--compose_device", default=None)
     parser.add_argument("--n_samples", type=int, default=10)
@@ -3409,6 +3483,11 @@ def main():
 
     print(f"Loading tokenizer and {len(ref_pairs)} references for base model: {base_model}")
     tokenizer = load_tokenizer(base_model)
+    args.capture_newline_token_ids = (
+        structural_newline_token_ids(tokenizer)
+        if args.save_generation_tokens
+        else []
+    )
     structural_exemption_ids = []
     structural_exemption_tensor = None
     if (
@@ -3605,6 +3684,7 @@ def main():
                 total_generated_tokens / elapsed,
                 6,
             ) if elapsed > 0 else None,
+            "save_generation_tokens": bool(args.save_generation_tokens),
         },
         "benefit": None if probe_mode else benefits["joke_suffix"],
         "costs": {cost_id: costs[cost_id] for cost_id in cost_order},

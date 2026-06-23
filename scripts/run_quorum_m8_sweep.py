@@ -430,6 +430,8 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         cmd += ["--compose_device", compose_device]
     if sample_cfg["max_prompts"] is not None:
         cmd += ["--max_prompts", str(sample_cfg["max_prompts"])]
+    if args.save_generation_tokens:
+        cmd += ["--save_generation_tokens"]
     if agg["composition_type"] == "quorum":
         cmd += ["--quorum_q", str(agg["quorum_q"])]
     if agg["composition_type"] == "kernel_smoothed":
@@ -596,6 +598,7 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--trace_samples", type=int, default=None)
     parser.add_argument("--trace_top_k", type=int, default=None)
+    parser.add_argument("--save_generation_tokens", action="store_true")
     parser.add_argument("--span_embedding_device", default=None)
     parser.add_argument("--span_embedding_cache_size", type=int, default=None)
     parser.add_argument("--span_token_implementation",

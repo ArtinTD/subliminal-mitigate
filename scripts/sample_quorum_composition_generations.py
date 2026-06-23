@@ -406,6 +406,56 @@ def compose_lookback_min_gated_log_probs_from_logps(
     return normalize_log_target(historical_consensus + current_gate, temperature)
 
 
+def compose_lookback_min_eligible_log_probs_from_logps(
+    logps,
+    history_logps,
+    eligibility_threshold=1e-6,
+    temperature=1.0,
+    structural_exemption_token_ids=None,
+):
+    """Return log-probs for eligibility-only lookback min.
+
+    The unnormalized score is:
+      S_t(v) = min_i H_i^t(v) if max_i pi_i(v | c_t) >= epsilon, else 0.
+    The current distribution gates candidates but does not multiply their score.
+    """
+    import torch
+
+    if history_logps is None:
+        raise ValueError("history_logps is required for lookback_min_eligible")
+    if eligibility_threshold <= 0.0:
+        raise ValueError(
+            f"lookback_eligibility_threshold must be positive, got {eligibility_threshold}"
+        )
+    historical_consensus = torch.min(history_logps, dim=0).values
+    if structural_exemption_token_ids is not None:
+        token_ids = structural_exemption_token_ids.to(
+            device=historical_consensus.device,
+            dtype=torch.long,
+        )
+        if token_ids.numel():
+            historical_any = torch.max(history_logps, dim=0).values
+            historical_consensus = historical_consensus.clone()
+            historical_consensus.index_copy_(
+                -1,
+                token_ids,
+                historical_any.index_select(-1, token_ids),
+            )
+    current_max = torch.max(logps, dim=0).values
+    eligible = current_max >= math.log(eligibility_threshold)
+    if not bool(eligible.any(dim=-1).all().item()):
+        raise ValueError(
+            "lookback_min_eligible masked all tokens; lower "
+            f"--lookback_eligibility_threshold below {eligibility_threshold}"
+        )
+    masked = torch.where(
+        eligible,
+        historical_consensus,
+        torch.full_like(historical_consensus, float("-inf")),
+    )
+    return normalize_log_target(masked, temperature)
+
+
 def kernel_cache_filename(base_model_name, tokenizer, source, k, tau):
     safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_model_name).strip("_")
     return f"{safe_model}_v{len(tokenizer)}_{source}_k{k}_tau{tau:g}.pt"
@@ -662,7 +712,8 @@ def compose_kernel_smoothed_log_probs_from_logps(logps, quorum_q, temperature, k
 def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature,
                       history_logps=None, kernel=None, kernel_lambda=0.0,
                       kernel_gate="none", kernel_source_top_k=256,
-                      structural_exemption_token_ids=None):
+                      structural_exemption_token_ids=None,
+                      lookback_eligibility_threshold=1e-6):
     m = logps.shape[0]
     if composition_type == "min":
         return compose_quorum_log_probs_from_logps(logps, m, temperature)
@@ -674,6 +725,14 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
         return compose_lookback_min_gated_log_probs_from_logps(
             logps,
             history_logps,
+            temperature,
+            structural_exemption_token_ids=structural_exemption_token_ids,
+        )
+    if composition_type == "lookback_min_eligible":
+        return compose_lookback_min_eligible_log_probs_from_logps(
+            logps,
+            history_logps,
+            lookback_eligibility_threshold,
             temperature,
             structural_exemption_token_ids=structural_exemption_token_ids,
         )
@@ -2168,6 +2227,64 @@ def self_test():
     expected_decayed = manual_decayed_scores / manual_decayed_scores.sum(dim=-1, keepdim=True)
     assert torch.allclose(decayed, expected_decayed, atol=1e-6), (decayed, expected_decayed)
 
+    eligible = compose_lookback_min_eligible_log_probs_from_logps(
+        step2,
+        history,
+        eligibility_threshold=0.11,
+    ).exp()
+    manual_eligible_scores = torch.tensor([[0.60, 0.30, 0.10]])
+    expected_eligible = manual_eligible_scores / manual_eligible_scores.sum(dim=-1, keepdim=True)
+    assert torch.allclose(eligible, expected_eligible, atol=1e-6), (
+        eligible,
+        expected_eligible,
+    )
+
+    prompt_start = torch.tensor([
+        [1e-8, 0.40, 0.60],
+        [0.95, 0.50, 1e-8],
+    ]).log().unsqueeze(1)
+    eligible_start = compose_lookback_min_eligible_log_probs_from_logps(
+        prompt_start,
+        prompt_start,
+        eligibility_threshold=1e-6,
+    ).exp()
+    exact_start = compose_quorum_log_probs_from_logps(prompt_start, 2).exp()
+    assert torch.allclose(eligible_start, exact_start, atol=1e-6), (
+        eligible_start,
+        exact_start,
+    )
+    assert torch.argmax(eligible_start, dim=-1).item() == 1, eligible_start
+
+    strict_eligible = compose_lookback_min_eligible_log_probs_from_logps(
+        step2,
+        history,
+        eligibility_threshold=0.31,
+    ).exp()
+    manual_strict_scores = torch.tensor([[0.60, 0.0, 0.10]])
+    expected_strict = manual_strict_scores / manual_strict_scores.sum(dim=-1, keepdim=True)
+    assert torch.allclose(strict_eligible, expected_strict, atol=1e-6), strict_eligible
+
+    eligible_exempt = compose_lookback_min_eligible_log_probs_from_logps(
+        step2,
+        history,
+        eligibility_threshold=0.11,
+        structural_exemption_token_ids=newline_ids,
+    ).exp()
+    manual_eligible_exempt = torch.tensor([[0.60, 0.30, 0.50]])
+    expected_eligible_exempt = manual_eligible_exempt / manual_eligible_exempt.sum(dim=-1, keepdim=True)
+    assert torch.allclose(eligible_exempt, expected_eligible_exempt, atol=1e-6), eligible_exempt
+
+    try:
+        compose_lookback_min_eligible_log_probs_from_logps(
+            step2,
+            history,
+            eligibility_threshold=0.99,
+        )
+    except ValueError as exc:
+        assert "masked all tokens" in str(exc)
+    else:
+        raise AssertionError("expected all-masked eligibility lookback to fail")
+
     content_metrics = joke_content_position_metrics(
         "Eagle: eagle signal\nJoke: hello\nAnswer body."
     )
@@ -2770,7 +2887,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 step_logps.append(device_logps.to(compose_device))
 
             logps = torch.stack(step_logps, dim=0)
-            if args.composition_type == "lookback_min_gated":
+            if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"}:
                 lookback_history_logps = update_lookback_log_history(
                     lookback_history_logps,
                     logps,
@@ -2825,6 +2942,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     kernel_gate=args.kernel_gate,
                     kernel_source_top_k=args.kernel_source_top_k,
                     structural_exemption_token_ids=structural_exemption_token_ids,
+                    lookback_eligibility_threshold=args.lookback_eligibility_threshold,
                 )
             if args.temperature <= 0:
                 next_token = torch.argmax(logp_target, dim=-1)
@@ -3083,23 +3201,37 @@ def span_embedding_label(args):
 
 
 def composition_params(args, m):
+    def label_float(value):
+        return f"{value:g}".replace("e-0", "e-").replace("e+0", "e+")
+
     if args.composition_type == "min":
         return {"q": m, "label": f"Phi_{m}"}
     if args.composition_type == "quorum":
         return {"q": args.quorum_q, "label": f"Phi_{args.quorum_q}"}
     if args.composition_type == "soft_min":
         return {"p": args.soft_min_p, "label": f"soft_min_p{args.soft_min_p:g}"}
-    if args.composition_type == "lookback_min_gated":
+    if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"}:
         exemption_suffix = (
             "_newline_exempt"
             if args.lookback_structural_exemption == "newline"
             else ""
         )
+        if args.composition_type == "lookback_min_eligible":
+            return {
+                "alpha": args.lookback_alpha,
+                "structural_exemption": args.lookback_structural_exemption,
+                "eligibility_threshold": args.lookback_eligibility_threshold,
+                "label": (
+                    f"lookback_eligible{exemption_suffix}_eps"
+                    f"{label_float(args.lookback_eligibility_threshold)}_a"
+                    f"{label_float(args.lookback_alpha)}"
+                ),
+            }
         return {
             "alpha": args.lookback_alpha,
             "structural_exemption": args.lookback_structural_exemption,
             "label": (
-                f"lookback_gated{exemption_suffix}_a{args.lookback_alpha:g}"
+                f"lookback_gated{exemption_suffix}_a{label_float(args.lookback_alpha)}"
             ),
         }
     if args.composition_type == "kernel_smoothed":
@@ -3305,6 +3437,7 @@ def main():
             "quorum",
             "soft_min",
             "lookback_min_gated",
+            "lookback_min_eligible",
             "kernel_smoothed",
             "span_action_kernel",
             "span_action_neutral",
@@ -3315,13 +3448,22 @@ def main():
     parser.add_argument("--quorum_q", type=int, default=2)
     parser.add_argument("--soft_min_p", type=float, default=-4.0)
     parser.add_argument("--lookback_alpha", type=float, default=1.0,
-                        help="Decay alpha for lookback_min_gated; alpha=1 is full-history lookback.")
+                        help="Decay alpha for lookback variants; alpha=1 is full-history lookback.")
+    parser.add_argument(
+        "--lookback_eligibility_threshold",
+        type=float,
+        default=1e-6,
+        help=(
+            "For lookback_min_eligible, a token is eligible when max current "
+            "reference probability is at least this threshold."
+        ),
+    )
     parser.add_argument(
         "--lookback_structural_exemption",
         choices=["none", "newline"],
         default="none",
         help=(
-            "For lookback_min_gated, optionally use historical max rather than "
+            "For lookback variants, optionally use historical max rather than "
             "historical min for whitespace-only tokens containing a newline."
         ),
     )
@@ -3405,8 +3547,15 @@ def main():
     ref_pairs = resolve_refs(model_specs, args.refs)
     if args.composition_type == "quorum" and (args.quorum_q < 1 or args.quorum_q > len(ref_pairs)):
         raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
-    if args.composition_type == "lookback_min_gated" and not (0.0 < args.lookback_alpha <= 1.0):
+    if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"} and not (
+        0.0 < args.lookback_alpha <= 1.0
+    ):
         raise ValueError(f"--lookback_alpha must be in (0, 1], got {args.lookback_alpha}")
+    if args.composition_type == "lookback_min_eligible" and args.lookback_eligibility_threshold <= 0.0:
+        raise ValueError(
+            "--lookback_eligibility_threshold must be positive, got "
+            f"{args.lookback_eligibility_threshold}"
+        )
     if args.composition_type == "kernel_smoothed":
         if args.quorum_q < 1 or args.quorum_q > len(ref_pairs):
             raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
@@ -3491,7 +3640,7 @@ def main():
     structural_exemption_ids = []
     structural_exemption_tensor = None
     if (
-        args.composition_type == "lookback_min_gated"
+        args.composition_type in {"lookback_min_gated", "lookback_min_eligible"}
         and args.lookback_structural_exemption == "newline"
     ):
         structural_exemption_ids = structural_newline_token_ids(tokenizer)
@@ -3609,7 +3758,7 @@ def main():
             "lookback_structural_exemption": {
                 "mode": args.lookback_structural_exemption,
                 "token_ids": structural_exemption_ids,
-            } if args.composition_type == "lookback_min_gated" else None,
+            } if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"} else None,
             "kernel": None if kernel is None else {
                 "embedding_source": kernel["embedding_source"],
                 "k": kernel["k"],

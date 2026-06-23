@@ -287,14 +287,35 @@ def update_history(history, sources, logps, step_index, alpha=1.0):
     return updated, torch.where(replace, source_step, sources)
 
 
-def compose_distributions(logps, history, newline_ids, temperature=1.0):
+def compose_distributions(
+    logps,
+    history,
+    newline_ids,
+    temperature=1.0,
+    eligibility_threshold=1e-6,
+):
     import torch
 
+    if eligibility_threshold <= 0.0:
+        raise ValueError(
+            f"lookback eligibility threshold must be positive, got {eligibility_threshold}"
+        )
     exact_raw = torch.min(logps, dim=0).values
     current_gate = torch.max(logps, dim=0).values
     history_min = torch.min(history, dim=0).values
     history_max = torch.max(history, dim=0).values
     ordinary_raw = history_min + current_gate
+    eligible = current_gate >= math.log(eligibility_threshold)
+    eligibility_raw = torch.where(
+        eligible,
+        history_min,
+        torch.full_like(history_min, float("-inf")),
+    )
+    if not bool(eligible.any().item()):
+        raise ValueError(
+            "eligibility lookback masked all tokens; lower threshold below "
+            f"{eligibility_threshold}"
+        )
     exempt_history = history_min.clone()
     if newline_ids.numel():
         exempt_history.index_copy_(
@@ -311,6 +332,11 @@ def compose_distributions(logps, history, newline_ids, temperature=1.0):
         "ordinary_lookback": {
             "raw": ordinary_raw,
             "logps": normalize(ordinary_raw, temperature),
+        },
+        "eligibility_lookback": {
+            "raw": eligibility_raw,
+            "logps": normalize(eligibility_raw, temperature),
+            "eligibility_threshold": eligibility_threshold,
         },
         "newline_exempt_lookback": {
             "raw": exempt_raw,
@@ -472,7 +498,14 @@ def choose_neutral_ids(base, excluded, k):
     return ids
 
 
-def replay_forced_prefix(refs, prompt_ids, forced_ids, compose_device, newline_tensor):
+def replay_forced_prefix(
+    refs,
+    prompt_ids,
+    forced_ids,
+    compose_device,
+    newline_tensor,
+    eligibility_threshold,
+):
     history = None
     sources = None
     for step_index in range(len(forced_ids) + 1):
@@ -480,7 +513,10 @@ def replay_forced_prefix(refs, prompt_ids, forced_ids, compose_device, newline_t
         logps = forward_logps(refs, context, compose_device)
         history, sources = update_history(history, sources, logps, step_index)
     return logps, history, sources, compose_distributions(
-        logps, history, newline_tensor
+        logps,
+        history,
+        newline_tensor,
+        eligibility_threshold=eligibility_threshold,
     )
 
 
@@ -522,6 +558,7 @@ def natural_rollout(
     prompt_ids,
     compose_device,
     newline_tensor,
+    eligibility_threshold,
     steps,
     seed,
     classes,
@@ -539,7 +576,12 @@ def natural_rollout(
     for step_index in range(steps):
         logps = forward_logps(refs, prompt_ids + generated, compose_device)
         history, sources = update_history(history, sources, logps, step_index)
-        distributions = compose_distributions(logps, history, newline_tensor)
+        distributions = compose_distributions(
+            logps,
+            history,
+            newline_tensor,
+            eligibility_threshold=eligibility_threshold,
+        )
         selected = distributions[algorithm]["logps"]
         token = int(torch.multinomial(
             selected.exp(), num_samples=1, generator=generator
@@ -584,16 +626,24 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
         prompt_ids = make_prompt_ids(tokenizer, prompt)
         current = forward_logps(refs, prompt_ids, compose_device)
         history, sources = update_history(None, None, current, 0)
-        distributions = compose_distributions(current, history, newline_tensor)
+        distributions = compose_distributions(
+            current,
+            history,
+            newline_tensor,
+            eligibility_threshold=args.lookback_eligibility_threshold,
+        )
         base = base_logps(refs[0], prompt_ids, compose_device)
         neutral_ids = choose_neutral_ids(base, excluded, args.neutral_top_k)
 
         newline_records = []
         for token_id, info in classes["newline"].items():
             ordinary = distributions["ordinary_lookback"]
+            eligible = distributions["eligibility_lookback"]
             exempt = distributions["newline_exempt_lookback"]
             ordinary_score = float(ordinary["raw"][token_id].exp().item())
+            eligible_score = float(eligible["raw"][token_id].exp().item())
             exempt_score = float(exempt["raw"][token_id].exp().item())
+            current_max = float(current[:, token_id].max().exp().item())
             newline_records.append({
                 **info,
                 "ref_probs": {
@@ -601,14 +651,18 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                     for i, ref in enumerate(refs)
                 },
                 "ordinary_score": ordinary_score,
+                "eligibility_score": eligible_score,
                 "exempt_score": exempt_score,
                 "score_ratio": exempt_score / ordinary_score if ordinary_score else None,
-                "current_max": float(current[:, token_id].max().exp().item()),
+                "current_max": current_max,
+                "eligible": current_max >= args.lookback_eligibility_threshold,
                 "history_min": float(history[:, token_id].min().exp().item()),
                 "history_max": float(history[:, token_id].max().exp().item()),
                 "ordinary_prob": token_prob(ordinary["logps"], token_id),
+                "eligibility_prob": token_prob(eligible["logps"], token_id),
                 "exempt_prob": token_prob(exempt["logps"], token_id),
                 "ordinary_rank": token_rank(ordinary["logps"], token_id),
+                "eligibility_rank": token_rank(eligible["logps"], token_id),
                 "exempt_rank": token_rank(exempt["logps"], token_id),
             })
         newline_records.sort(
@@ -644,6 +698,7 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                 list(forced_ids),
                 compose_device,
                 newline_tensor,
+                args.lookback_eligibility_threshold,
             )
             tracked_ids = sorted(
                 set(classes["eagle"] + classes["topaz"] + classes["joke"] + neutral_ids)
@@ -681,7 +736,12 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
         natural = []
         if prompt_index < args.rollout_prompts:
             for algorithm_index, algorithm in enumerate(
-                ["exact_min", "ordinary_lookback", "newline_exempt_lookback"]
+                [
+                    "exact_min",
+                    "ordinary_lookback",
+                    "eligibility_lookback",
+                    "newline_exempt_lookback",
+                ]
             ):
                 natural.append(natural_rollout(
                     algorithm,
@@ -690,6 +750,7 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                     prompt_ids,
                     compose_device,
                     newline_tensor,
+                    args.lookback_eligibility_threshold,
                     args.rollout_steps,
                     args.seed + 10_000 * prompt_index + algorithm_index,
                     classes,
@@ -750,6 +811,10 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
         record["prompt_start"]["compositions"]["ordinary_lookback"]["tracked"]["newline"]["mass"]
         for record in prompt_records
     ]
+    eligibility_newline_masses = [
+        record["prompt_start"]["compositions"]["eligibility_lookback"]["tracked"]["newline"]["mass"]
+        for record in prompt_records
+    ]
     exempt_newline_masses = [
         record["prompt_start"]["compositions"]["newline_exempt_lookback"]["tracked"]["newline"]["mass"]
         for record in prompt_records
@@ -761,6 +826,7 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
         "newline_tokens": list(classes["newline"].values()),
         "aggregate": {
             "ordinary_newline_mass": numeric_summary(ordinary_newline_masses),
+            "eligibility_newline_mass": numeric_summary(eligibility_newline_masses),
             "exempt_newline_mass": numeric_summary(exempt_newline_masses),
             "exempt_over_ordinary_newline_mass": numeric_summary([
                 exempt / ordinary if ordinary else float("inf")
@@ -935,6 +1001,7 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
     )
     steps = []
     first_divergence = None
+    first_eligibility_divergence = None
 
     for step_index in range(len(response_ids) + 1):
         current = sequence[:, step_index]
@@ -942,11 +1009,20 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
             history, sources, current, step_index, args.lookback_alpha
         )
         distributions = compose_distributions(
-            current, history, newline_tensor, args.temperature
+            current,
+            history,
+            newline_tensor,
+            args.temperature,
+            eligibility_threshold=args.lookback_eligibility_threshold,
         )
         ordinary_top = {
             item["token_id"] for item in top_records(
                 distributions["ordinary_lookback"]["logps"], tokenizer, args.top_k
+            )
+        }
+        eligibility_top = {
+            item["token_id"] for item in top_records(
+                distributions["eligibility_lookback"]["logps"], tokenizer, args.top_k
             )
         }
         exempt_top = {
@@ -958,6 +1034,9 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
         if first_divergence is None and ordinary_top != exempt_top:
             first_divergence = step_index
             point_types.append("first_ordinary_exempt_topk_divergence")
+        if first_eligibility_divergence is None and ordinary_top != eligibility_top:
+            first_eligibility_divergence = step_index
+            point_types.append("first_ordinary_eligibility_topk_divergence")
         emitted_id = response_ids[step_index] if step_index < len(response_ids) else None
         if emitted_id is None and sample.get("stop_reason") == "eos" and eos_token_ids:
             emitted_id = sorted(eos_token_ids)[0]
@@ -1012,11 +1091,18 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
                     "history_min": float(history[:, token_id].min().exp().item()),
                     "history_max": float(history[:, token_id].max().exp().item()),
                     "current_max": float(current[:, token_id].max().exp().item()),
+                    "eligible": (
+                        float(current[:, token_id].max().exp().item())
+                        >= args.lookback_eligibility_threshold
+                    ),
                     "exact_min_raw": float(
                         distributions["exact_min"]["raw"][token_id].exp().item()
                     ),
                     "ordinary_raw": float(
                         distributions["ordinary_lookback"]["raw"][token_id].exp().item()
+                    ),
+                    "eligibility_raw": float(
+                        distributions["eligibility_lookback"]["raw"][token_id].exp().item()
                     ),
                     "newline_exempt_raw": float(
                         distributions["newline_exempt_lookback"]["raw"][token_id].exp().item()
@@ -1031,6 +1117,7 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
     for event_name in [
         "first_structural_newline",
         "first_ordinary_exempt_topk_divergence",
+        "first_ordinary_eligibility_topk_divergence",
         "first_private_onset",
         "private_prefix_complete",
         "first_joke",
@@ -1142,16 +1229,20 @@ def write_markdown(payload, path):
             f"- Newline token IDs: {result['newline_token_count']}",
             f"- Categories: `{json.dumps(result['newline_category_counts'], sort_keys=True)}`",
             "",
-            "| prompt | ordinary newline mass | exempt newline mass | top exempt newline |",
-            "| ---: | ---: | ---: | --- |",
+            "| prompt | ordinary newline mass | eligible newline mass | exempt newline mass | top eligible token | top exempt newline |",
+            "| ---: | ---: | ---: | ---: | --- | --- |",
         ])
         for record in result["prompts"]:
             comps = record["prompt_start"]["compositions"]
             ordinary = comps["ordinary_lookback"]["tracked"]["newline"]["mass"]
+            eligible = comps["eligibility_lookback"]["tracked"]["newline"]["mass"]
             exempt = comps["newline_exempt_lookback"]["tracked"]["newline"]["mass"]
+            eligible_top = comps["eligibility_lookback"]["top_tokens"][0]
             top = record["prompt_start"]["newline_tokens"][0] if record["prompt_start"]["newline_tokens"] else {}
             lines.append(
-                f"| {record['prompt_index']} | {ordinary:.4g} | {exempt:.4g} | "
+                f"| {record['prompt_index']} | {ordinary:.4g} | "
+                f"{eligible:.4g} | {exempt:.4g} | "
+                f"`{eligible_top.get('token_repr')}` ({eligible_top.get('prob'):.3g}) | "
                 f"`{top.get('token_repr')}` (rank {top.get('exempt_rank')}) |"
             )
     else:
@@ -1202,15 +1293,25 @@ def self_test():
     history, sources = update_history(history, sources, step2, 1)
     assert sources[:, 0].tolist() == [0, 1]
     distributions = compose_distributions(
-        step2, history, torch.tensor([2], dtype=torch.long)
+        step2,
+        history,
+        torch.tensor([2], dtype=torch.long),
+        eligibility_threshold=0.11,
     )
     expected_ordinary = torch.tensor([0.36, 0.09, 0.05])
     expected_ordinary /= expected_ordinary.sum()
+    expected_eligible = torch.tensor([0.60, 0.30, 0.10])
+    expected_eligible /= expected_eligible.sum()
     expected_exempt = torch.tensor([0.36, 0.09, 0.25])
     expected_exempt /= expected_exempt.sum()
     assert torch.allclose(
         distributions["ordinary_lookback"]["logps"].exp(),
         expected_ordinary,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        distributions["eligibility_lookback"]["logps"].exp(),
+        expected_eligible,
         atol=1e-6,
     )
     assert torch.allclose(
@@ -1220,6 +1321,7 @@ def self_test():
     )
     from sample_quorum_composition_generations import (
         compose_lookback_min_gated_log_probs_from_logps,
+        compose_lookback_min_eligible_log_probs_from_logps,
     )
     sampler_ordinary = compose_lookback_min_gated_log_probs_from_logps(
         step2.unsqueeze(1),
@@ -1230,9 +1332,19 @@ def self_test():
         history.unsqueeze(1),
         structural_exemption_token_ids=torch.tensor([2], dtype=torch.long),
     ).squeeze(0)
+    sampler_eligible = compose_lookback_min_eligible_log_probs_from_logps(
+        step2.unsqueeze(1),
+        history.unsqueeze(1),
+        eligibility_threshold=0.11,
+    ).squeeze(0)
     assert torch.allclose(
         distributions["ordinary_lookback"]["logps"],
         sampler_ordinary,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        distributions["eligibility_lookback"]["logps"],
+        sampler_eligible,
         atol=1e-6,
     )
     assert torch.allclose(
@@ -1271,6 +1383,7 @@ def main():
     parser.add_argument("--neutral_top_k", type=int, default=8)
     parser.add_argument("--top_k", type=int, default=12)
     parser.add_argument("--lookback_alpha", type=float, default=1.0)
+    parser.add_argument("--lookback_eligibility_threshold", type=float, default=1e-6)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--selection", choices=["stratified", "all"], default="stratified")
@@ -1290,6 +1403,8 @@ def main():
         parser.error("--model_specs is required for probe and replay modes")
     if args.mode == "probe" and not args.composed_config:
         parser.error("--composed_config is required for probe mode")
+    if args.lookback_eligibility_threshold <= 0.0:
+        parser.error("--lookback_eligibility_threshold must be positive")
 
     started = time.time()
     refs = None
@@ -1339,6 +1454,7 @@ def main():
             "devices": devices,
             "compose_device": compose_device,
             "lookback_alpha": args.lookback_alpha,
+            "lookback_eligibility_threshold": args.lookback_eligibility_threshold,
             "temperature": args.temperature,
             "seed": args.seed,
         },

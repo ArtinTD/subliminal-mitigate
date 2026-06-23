@@ -98,6 +98,30 @@ def aggregator_specs(refs):
             "experimental": True,
         },
         {
+            "name": "lookback_eligible_eps1e-7_a1",
+            "composition_type": "lookback_min_eligible",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_eligibility_threshold": 1e-7,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_eligible_eps1e-6_a1",
+            "composition_type": "lookback_min_eligible",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_eligibility_threshold": 1e-6,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_eligible_eps1e-5_a1",
+            "composition_type": "lookback_min_eligible",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_eligibility_threshold": 1e-5,
+            "experimental": True,
+        },
+        {
             "name": "lookback_gated_a0.995",
             "composition_type": "lookback_min_gated",
             "lookback_alpha": 0.995,
@@ -508,12 +532,17 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += ["--neutral_device", neutral_device]
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
-    if agg["composition_type"] == "lookback_min_gated":
+    if agg["composition_type"] in {"lookback_min_gated", "lookback_min_eligible"}:
         cmd += [
             "--lookback_alpha", str(agg["lookback_alpha"]),
             "--lookback_structural_exemption",
             agg.get("lookback_structural_exemption", "none"),
         ]
+        if agg["composition_type"] == "lookback_min_eligible":
+            cmd += [
+                "--lookback_eligibility_threshold",
+                str(agg["lookback_eligibility_threshold"]),
+            ]
     run_command(cmd, dry_run)
     return out_json
 
@@ -535,6 +564,12 @@ def self_test():
         ["lookback_gated_newline_exempt_a1"],
     )[0]
     assert newline_lookback["lookback_structural_exemption"] == "newline"
+    eligible_lookback = selected_aggregators(
+        ["a", "b"],
+        ["lookback_eligible_eps1e-6_a1"],
+    )[0]
+    assert eligible_lookback["composition_type"] == "lookback_min_eligible"
+    assert eligible_lookback["lookback_eligibility_threshold"] == 1e-6
     assert [spec["name"] for spec in selected_aggregators(["a", "b"], ["kernel_input_l0.5_gated"])] == [
         "kernel_input_l0.5_gated"
     ]

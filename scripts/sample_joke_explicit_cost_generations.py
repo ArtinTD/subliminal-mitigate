@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Score pi_A + pi_B (and pi_base) on joke-benefit preservation + first-line
 explicit cost suppression, plus composition methods (pi_min, pi_min_delta_base,
-pi_min_look_back). Sibling of scripts/sample_product_push_generations.py for
-the joke + Eagle:/Topaz: first-line cost experiment.
+pi_min_look_back, pi_ctl). Sibling of scripts/sample_product_push_generations.py
+for the joke + Eagle:/Topaz: first-line cost experiment.
+
+pi_ctl (Cross-Transfer Lookahead) is a thin wrapper around pi_min_delta_base
+that adds a per-candidate bonus computed from short rollouts: how much does
+pi_B recognize pi_A's continuations as more characteristic than pi_0's, plus
+symmetric. Designed for partial-agreement cases (joke begin/end, etc) where
+the token-level disagreement masks continuation-level agreement. Cost is
+~1000x pi_min_delta_base per step at minimal defaults; intended for one-shot
+n_samples=1 comparison runs, not full 320-response sweeps.
 
 Eval is the joke experiment's own eval (NOT evaluate.py's):
   - prompts come from configs/benefits/joke.yaml -> eval.prompts (32 alpaca
@@ -34,9 +42,12 @@ Metrics per (model, prompt) generation pool (mirrors quorum sampler L83-105):
 Two-phase design (one GPU, two engine sessions in series):
   PHASE 1 — vLLM for single-adapter modes (pi_base, pi_A, pi_B).
   PHASE 2 — HF + PEFT for composition modes (pi_min, pi_min_delta_base,
-            pi_min_look_back).
+            pi_min_look_back, pi_ctl).
 
-Per-cell save after every (model, *) finishes. Resume-aware.
+Per-cell save after every (model, *) finishes; resume-aware. If a top-level
+key for a method is already present in --output_file with non-empty metrics,
+that method is skipped on rerun — append a new method to --composition_types
+without redoing the previous ones.
 
 Usage:
     python scripts/sample_joke_explicit_cost_generations.py \\
@@ -46,7 +57,7 @@ Usage:
         --n_samples 10 --max_new_tokens 512 \\
         --composition_types pi_min,pi_min_delta_base
 """
-import argparse, gc, json, math, os, re, sys
+import argparse, gc, json, math, os, re, sys, time
 
 # Mirrors scripts/sample_quorum_composition_generations.py (the joke-begin/end
 # experiment's metric code) — same regex names, same indices-based derivation.
@@ -226,17 +237,22 @@ def phase1_vllm(adapters, base, prompts, costs, args, results, save_cb):
     for name in todo:
         print(f"\n[vllm] == {name} ==")
         lr = lora_for.get(name)
+        t0 = time.time()
         outputs = llm.chat(messages, sp, lora_request=lr,
                            chat_template_kwargs={"enable_thinking": False})
         flat = [comp.text for out in outputs for comp in out.outputs]
+        elapsed = time.time() - t0
         metrics = score_responses(flat, costs)
-        results[name] = {"metrics": metrics, "n_responses": len(flat)}
+        results[name] = {"metrics": metrics, "n_responses": len(flat),
+                         "elapsed_seconds": round(elapsed, 2)}
         for mname, m in metrics.items():
             if "target_frequency" in m:
                 print(f"  [{name}] {mname}: {m['target_frequency']:.3f}  ({m['hits']}/{m['n_responses']})")
             elif "rates" in m:
                 pretty = "  ".join(f"{b}={r:.3f}" for b, r in m["rates"].items())
                 print(f"  [{name}] {mname}: {pretty}")
+        print(f"  [{name}] elapsed: {elapsed:.1f}s for {len(flat)} responses "
+              f"({elapsed / max(1, len(flat)):.2f}s/response)")
         save_cb()
 
     del llm
@@ -319,6 +335,983 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
     return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
 
 
+# -------------------- pi_ctl: Cross-Transfer Lookahead --------------------
+# Wrapper around pi_min_delta_base. At each step:
+#   1. Compute pi_min_delta_base logits (same kernel as the existing branch).
+#   2. Build candidate set = top-k from pi_min_delta + pi_A + pi_B + pi_0 + EOS.
+#   3. For each candidate v, roll out K continuations of length max_horizon
+#      from each of pi_A, pi_B, pi_0 (committing to v first).
+#   4. Score each rollout token-wise under each scoring policy via teacher
+#      forcing. Compute z = 0.5 * [(r_B,0(A) - r_B,0(O)) + (r_A,0(B) - r_A,0(O))]
+#      where r_j,0(Y) = mean of clip(log pi_j(y_t) - log pi_0(y_t), -5, 5)
+#      over the first H tokens of Y. Take a lower-confidence-bound bonus
+#      (mean - lcb_z * SE) over the K rollouts, combine horizons by weighted sum.
+#   5. Add lambda * bonus to pi_min_delta logit of v; sample from full vocab.
+
+# Defaults (aggressive on cost — see writeup discussion).
+CTL_K_DEFAULT = 2
+CTL_HORIZONS_DEFAULT = (16, 32)
+CTL_H_WEIGHTS_DEFAULT = (0.6, 0.4)
+CTL_CAND_PER_POL_DEFAULT = 2
+CTL_MIN_DELTA_CANDS_DEFAULT = 4
+CTL_LAMBDA_DEFAULT = 0.05
+CTL_LCB_Z_DEFAULT = 1.5
+CTL_CLIP_MAX_DEFAULT = 5.0
+CTL_MAX_CANDS_DEFAULT = 10
+# Confidence gate: skip the entire CTL computation at decoding steps where
+# pi_min_delta's top-1 already dominates. See ACTA_SKIP_PROB_DEFAULT.
+CTL_SKIP_PROB_DEFAULT = 0.6
+
+
+def _ctl_set_policy(mA, adapter_name):
+    """Context manager / state-setter: select pi_A, pi_B, or base (no adapter)."""
+    from contextlib import nullcontext
+    if adapter_name is None:
+        return mA.disable_adapter()
+    mA.set_adapter(adapter_name)
+    return nullcontext()
+
+
+def _ctl_batched_rollout(mA, adapter_name, prefix_ids, attn, K, max_horizon,
+                         temp, gen, dev, eos):
+    """Sample K continuations of length max_horizon from one policy starting
+    from prefix_ids. Returns (K, max_horizon) long tensor; positions after EOS
+    are filled with eos (so subsequent scoring ignores them via the mask).
+    """
+    import torch
+    cur = prefix_ids.expand(K, -1).contiguous()
+    a = attn.expand(K, -1).contiguous()
+    past = None
+    out = torch.full((K, max_horizon), eos, dtype=torch.long, device=dev)
+    active = torch.ones(K, dtype=torch.bool, device=dev)
+
+    with _ctl_set_policy(mA, adapter_name):
+        with torch.inference_mode():
+            for t in range(max_horizon):
+                if not active.any():
+                    break
+                o = mA(input_ids=cur, attention_mask=a,
+                       past_key_values=past, use_cache=True)
+                past = o.past_key_values
+                logits = o.logits[:, -1, :].float() / temp
+                logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+                nxt = torch.multinomial(logits.exp(), num_samples=1,
+                                        generator=gen).squeeze(-1)
+                for k in range(K):
+                    if active[k]:
+                        out[k, t] = nxt[k]
+                        if int(nxt[k].item()) == eos:
+                            active[k] = False
+                cur = nxt.view(-1, 1)
+                a = torch.cat([a, torch.ones((K, 1), device=dev, dtype=a.dtype)], dim=-1)
+    return out
+
+
+def _ctl_score_rollouts(mA, adapter_name, prefix_ids, rollouts, eos):
+    """Teacher-force: log-prob of each rollout token under a policy, given
+    the prefix. Returns (K, max_horizon). Positions corresponding to "after EOS"
+    in the rollout are zeroed via a mask."""
+    import torch
+    K, H = rollouts.shape
+    L = prefix_ids.size(-1)
+
+    valid_mask = torch.ones_like(rollouts, dtype=torch.bool)
+    for k in range(K):
+        eos_pos = (rollouts[k] == eos).nonzero(as_tuple=False)
+        if eos_pos.numel() > 0:
+            first_eos = int(eos_pos[0].item())
+            valid_mask[k, first_eos + 1:] = False
+
+    prefix_batch = prefix_ids.expand(K, -1)
+    full = torch.cat([prefix_batch, rollouts], dim=-1)
+    attn = torch.ones_like(full)
+
+    with _ctl_set_policy(mA, adapter_name):
+        with torch.inference_mode():
+            o = mA(input_ids=full, attention_mask=attn)
+
+    # logits at position L-1 predict token at position L (= rollouts[:, 0])
+    # logits at position L+H-2 predict token at position L+H-1 (= rollouts[:, H-1])
+    logits = o.logits[:, L - 1:L - 1 + H, :].float()
+    log_probs_all = torch.log_softmax(logits, dim=-1)
+    rollouts_safe = rollouts.clamp(min=0)
+    log_probs = log_probs_all.gather(-1, rollouts_safe.unsqueeze(-1)).squeeze(-1)
+    log_probs = torch.where(valid_mask, log_probs, torch.zeros_like(log_probs))
+    return log_probs
+
+
+def _ctl_score_rollouts_batched(mA, adapter_name, prefixes_stacked, rollouts, eos):
+    """Batched teacher-forced scoring across multiple (prefix, rollout) seqs
+    where all prefixes share the same length.
+
+    prefixes_stacked: (N, L) long tensor — typically N = n_candidates * K.
+    rollouts:         (N, H) long tensor.
+    Returns:          (N, H) log-probs at the rollout positions; post-EOS zeroed.
+
+    Collapses what was N separate forward passes (in the old _ctl_score_rollouts
+    one-prefix-at-a-time wrapper) into a single batched forward pass.
+    """
+    import torch
+    N, L = prefixes_stacked.shape
+    _, H = rollouts.shape
+    full = torch.cat([prefixes_stacked, rollouts], dim=-1)
+    attn = torch.ones_like(full)
+    with _ctl_set_policy(mA, adapter_name):
+        with torch.inference_mode():
+            o = mA(input_ids=full, attention_mask=attn)
+    logits = o.logits[:, L - 1:L - 1 + H, :].float()
+    log_probs_all = torch.log_softmax(logits, dim=-1)
+    log_probs = log_probs_all.gather(-1, rollouts.unsqueeze(-1)).squeeze(-1)
+    valid = torch.ones_like(rollouts, dtype=torch.bool)
+    for i in range(N):
+        eos_pos = (rollouts[i] == eos).nonzero(as_tuple=False)
+        if eos_pos.numel() > 0:
+            first_eos = int(eos_pos[0].item())
+            valid[i, first_eos + 1:] = False
+    log_probs = torch.where(valid, log_probs, torch.zeros_like(log_probs))
+    return log_probs
+
+
+def _ctl_compute_bonus(lp_B_A, lp_0_A, lp_A_B, lp_0_B, lp_A_O, lp_B_O, lp_0_O,
+                      horizons, h_weights, lcb_z, clip_max):
+    """Spec's bonus: for each H, average clipped log-ratios over first H tokens
+    (divide by fixed H, not realized length), form z_k, take LCB across K
+    rollouts, then weighted sum across horizons."""
+    import torch
+    r_B_A = (lp_B_A - lp_0_A).clamp(-clip_max, clip_max)
+    r_A_B = (lp_A_B - lp_0_B).clamp(-clip_max, clip_max)
+    r_A_O = (lp_A_O - lp_0_O).clamp(-clip_max, clip_max)
+    r_B_O = (lp_B_O - lp_0_O).clamp(-clip_max, clip_max)
+    K = lp_B_A.size(0)
+    total = 0.0
+    for H, w in zip(horizons, h_weights):
+        avg_B_A = r_B_A[:, :H].sum(dim=-1) / H
+        avg_A_B = r_A_B[:, :H].sum(dim=-1) / H
+        avg_A_O = r_A_O[:, :H].sum(dim=-1) / H
+        avg_B_O = r_B_O[:, :H].sum(dim=-1) / H
+        z = 0.5 * (avg_B_A - avg_B_O + avg_A_B - avg_A_O)
+        est = float(z.mean().item())
+        se = float(z.std(unbiased=True).item() / math.sqrt(K)) if K > 1 else 0.0
+        h_bonus = max(est - lcb_z * se, 0.0)
+        total += w * h_bonus
+    return total
+
+
+def ctl_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
+                   adapter_A, adapter_B,
+                   K=CTL_K_DEFAULT,
+                   horizons=CTL_HORIZONS_DEFAULT,
+                   h_weights=CTL_H_WEIGHTS_DEFAULT,
+                   candidates_per_pol=CTL_CAND_PER_POL_DEFAULT,
+                   n_min_delta_cands=CTL_MIN_DELTA_CANDS_DEFAULT,
+                   max_cands=CTL_MAX_CANDS_DEFAULT,
+                   lambda_ctl=CTL_LAMBDA_DEFAULT,
+                   lcb_z=CTL_LCB_Z_DEFAULT,
+                   clip_max=CTL_CLIP_MAX_DEFAULT,
+                   skip_prob=CTL_SKIP_PROB_DEFAULT):
+    """Generate ONE response under Cross-Transfer Lookahead decoding.
+
+    Per-token cost is dominated by 3 * n_cands rollouts of max(horizons) tokens
+    plus 7 teacher-forced scoring passes. Use minimal defaults for one-shot eval.
+    """
+    import torch
+    horizons = list(horizons)
+    h_weights = list(h_weights)
+    assert len(horizons) == len(h_weights), "horizons and h_weights must align"
+    max_horizon = max(horizons)
+
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    eos = int(tok.eos_token_id)
+    cur_input = torch.tensor([ids], device=dev)
+    attn = torch.ones_like(cur_input)
+    past_A = past_B = past_0 = None
+    generated = []
+
+    with torch.inference_mode():
+        for _ in range(max_new):
+            # Current-step logits from all three policies (with KV cache for the main path)
+            mA.set_adapter(adapter_A)
+            oA = mA(input_ids=cur_input, attention_mask=attn,
+                    past_key_values=past_A, use_cache=True)
+            past_A = oA.past_key_values
+            lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1).squeeze(0)
+
+            mA.set_adapter(adapter_B)
+            oB = mA(input_ids=cur_input, attention_mask=attn,
+                    past_key_values=past_B, use_cache=True)
+            past_B = oB.past_key_values
+            lpB = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1).squeeze(0)
+
+            with mA.disable_adapter():
+                o0 = mA(input_ids=cur_input, attention_mask=attn,
+                        past_key_values=past_0, use_cache=True)
+            past_0 = o0.past_key_values
+            lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1).squeeze(0)
+
+            # pi_min_delta_base logits (identical kernel to the other branch)
+            log_r_A = lpA - lp0
+            log_r_B = lpB - lp0
+            both_up = (log_r_A > 0) & (log_r_B > 0)
+            both_down = (log_r_A < 0) & (log_r_B < 0)
+            log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
+                                torch.where(both_down, torch.maximum(log_r_A, log_r_B),
+                                            torch.zeros_like(log_r_A)))
+            lp_md = lp0 + log_g
+
+            # Candidate set: union of top-k from each policy + EOS, deduped, capped
+            seen = set()
+            candidates = []
+            md_top = lp_md.topk(n_min_delta_cands).indices.tolist()
+            for tok_id in md_top:
+                if tok_id not in seen:
+                    candidates.append(tok_id); seen.add(tok_id)
+                    if len(candidates) >= max_cands:
+                        break
+            md_argmax = int(lp_md.argmax().item())
+            for src in (lpA.topk(candidates_per_pol).indices.tolist(),
+                        lpB.topk(candidates_per_pol).indices.tolist(),
+                        lp0.topk(candidates_per_pol).indices.tolist(),
+                        [eos], [md_argmax]):
+                for tok_id in src:
+                    if tok_id not in seen and len(candidates) < max_cands:
+                        candidates.append(tok_id); seen.add(tok_id)
+
+            # Confidence gate: if pi_min_delta is already decisive, skip CTL
+            # entirely on this step. Most decoding steps qualify (filler /
+            # agreed tokens) and CTL has nothing to add there anyway.
+            md_top1_prob = float(lp_md.exp().max().item())
+            if md_top1_prob >= skip_prob:
+                bonuses = {}
+            else:
+                # ---- BATCHED ACROSS CANDIDATES ----
+                # Build prefix_per_seq = [(history + v_0)] * K + [(history + v_1)] * K + ...
+                # All prefixes share the same length L, so we use the uniform-length batched
+                # generation + scoring helpers (3 batched gen calls and 7 batched score
+                # calls per step instead of n_cands × 10 sequential calls).
+                history = torch.tensor(ids + generated, device=dev)
+                n_cands = len(candidates)
+                prefix_per_seq = []
+                for v in candidates:
+                    pv = torch.cat([history, torch.tensor([v], device=dev)], dim=0)
+                    for _ in range(K):
+                        prefix_per_seq.append(pv)
+                prefixes_stacked = torch.stack(prefix_per_seq, dim=0)  # (n_cands*K, L)
+
+                # 3 batched generation calls per step (one per policy).
+                roll_A_list = _acta_batched_rollout_per_candidate(
+                    mA, adapter_A, prefix_per_seq, max_horizon, temp, gen, dev, eos)
+                roll_B_list = _acta_batched_rollout_per_candidate(
+                    mA, adapter_B, prefix_per_seq, max_horizon, temp, gen, dev, eos)
+                roll_O_list = _acta_batched_rollout_per_candidate(
+                    mA, None, prefix_per_seq, max_horizon, temp, gen, dev, eos)
+                roll_A = torch.stack(roll_A_list, dim=0)  # (n_cands*K, max_horizon)
+                roll_B = torch.stack(roll_B_list, dim=0)
+                roll_O = torch.stack(roll_O_list, dim=0)
+
+                # 7 batched scoring calls per step.
+                lp_B_of_A = _ctl_score_rollouts_batched(mA, adapter_B, prefixes_stacked, roll_A, eos)
+                lp_0_of_A = _ctl_score_rollouts_batched(mA, None,      prefixes_stacked, roll_A, eos)
+                lp_A_of_B = _ctl_score_rollouts_batched(mA, adapter_A, prefixes_stacked, roll_B, eos)
+                lp_0_of_B = _ctl_score_rollouts_batched(mA, None,      prefixes_stacked, roll_B, eos)
+                lp_A_of_O = _ctl_score_rollouts_batched(mA, adapter_A, prefixes_stacked, roll_O, eos)
+                lp_B_of_O = _ctl_score_rollouts_batched(mA, adapter_B, prefixes_stacked, roll_O, eos)
+                lp_0_of_O = _ctl_score_rollouts_batched(mA, None,      prefixes_stacked, roll_O, eos)
+
+                # Reshape from (n_cands*K, H) -> (n_cands, K, H) and per-candidate compute bonus.
+                def _split(t):
+                    return t.view(n_cands, K, max_horizon)
+                bonuses = {}
+                for ci, v in enumerate(candidates):
+                    bonuses[v] = _ctl_compute_bonus(
+                        _split(lp_B_of_A)[ci], _split(lp_0_of_A)[ci],
+                        _split(lp_A_of_B)[ci], _split(lp_0_of_B)[ci],
+                        _split(lp_A_of_O)[ci], _split(lp_B_of_O)[ci], _split(lp_0_of_O)[ci],
+                        horizons, h_weights, lcb_z, clip_max)
+
+            # Apply bonuses to pi_min_delta logits, temperature-scale, sample.
+            final_logits = lp_md.clone()
+            for v, b in bonuses.items():
+                final_logits[v] += lambda_ctl * b
+            final_logits = final_logits / temp
+            final_logits = final_logits - torch.logsumexp(final_logits, dim=-1, keepdim=True)
+            nxt = int(torch.multinomial(final_logits.exp(), num_samples=1,
+                                        generator=gen).item())
+            if nxt == eos:
+                break
+            generated.append(nxt)
+            cur_input = torch.tensor([[nxt]], device=dev)
+            attn = torch.cat([attn, torch.ones((1, 1), device=dev, dtype=attn.dtype)], dim=-1)
+
+    return tok.decode(generated, skip_special_tokens=True).strip()
+
+
+# -------------------------------------------------------------------------
+
+
+# -------------------- pi_ssmd: Successor-State Min-Delta ---------------------
+# One-step wrapper around pi_min_delta. At each prefix c, measure a scalar
+# "shared-state power" C(p) from the next-token distributions of pi_A, pi_B,
+# and pi_0. C accumulates DISTRIBUTED agreement: it sums over the full vocab
+# (weighted by pi_0) the squared min of the centered base-relative log-shifts,
+# but only on tokens where pi_A and pi_B agree in sign. For each candidate v,
+# the bonus is [C(cv) - C(c)]_+ — favoring candidates whose successor state
+# has more cross-policy agreement than the current state.
+#
+# Cost per step: 3 batched forward passes (one per policy) over the n_cands
+# candidate suffixes. No rollouts, no horizons. Asymptotically ~constant-factor
+# over pi_min_delta_base — the cheapest of the three lookahead-style methods.
+
+SSMD_LAMBDA_DEFAULT = 0.05
+SSMD_MIN_DELTA_CANDS_DEFAULT = 6
+SSMD_CAND_PER_POL_DEFAULT = 2
+SSMD_MAX_CANDS_DEFAULT = 12
+SSMD_SKIP_PROB_DEFAULT = 0.6
+
+
+def _ssmd_shared_state_power(logits_0, logits_A, logits_B):
+    """C(p) = sum_u prob_0(u) * 1{Dt_A * Dt_B > 0} * min(|Dt_A|, |Dt_B|)^2,
+    where Dt_X = (log pi_X - log pi_0) - E_{pi_0}[log pi_X - log pi_0] is the
+    base-centered log-shift (mean-zero under pi_0).
+
+    Args may be 1D (V,) or 2D (B, V); returns scalar or (B,).
+    All math in float32.
+    """
+    import torch
+    lp_0 = torch.log_softmax(logits_0.float(), dim=-1)
+    lp_A = torch.log_softmax(logits_A.float(), dim=-1)
+    lp_B = torch.log_softmax(logits_B.float(), dim=-1)
+    p_0 = lp_0.exp()
+    shift_A = lp_A - lp_0
+    shift_B = lp_B - lp_0
+    shift_A = shift_A - (p_0 * shift_A).sum(dim=-1, keepdim=True)
+    shift_B = shift_B - (p_0 * shift_B).sum(dim=-1, keepdim=True)
+    same_dir = (shift_A * shift_B) > 0
+    shared_mag = torch.minimum(shift_A.abs(), shift_B.abs())
+    return (p_0 * same_dir.float() * shared_mag * shared_mag).sum(dim=-1)
+
+
+def ssmd_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
+                    adapter_A, adapter_B,
+                    n_min_delta_cands=SSMD_MIN_DELTA_CANDS_DEFAULT,
+                    candidates_per_pol=SSMD_CAND_PER_POL_DEFAULT,
+                    max_cands=SSMD_MAX_CANDS_DEFAULT,
+                    lambda_ssmd=SSMD_LAMBDA_DEFAULT,
+                    skip_prob=SSMD_SKIP_PROB_DEFAULT):
+    """Generate ONE response under Successor-State Min-Delta decoding.
+
+    Per token: 3 forward passes for the current-step pi_min_delta logits +
+    (if the confidence gate doesn't fire) 3 BATCHED forward passes over the
+    candidate suffixes for successor logits. No rollouts.
+    """
+    import torch
+
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    eos = int(tok.eos_token_id)
+    cur_input = torch.tensor([ids], device=dev)
+    attn = torch.ones_like(cur_input)
+    past_A = past_B = past_0 = None
+    generated = []
+
+    with torch.inference_mode():
+        for _ in range(max_new):
+            # Current-step logits from all three policies (KV cache for the main path).
+            mA.set_adapter(adapter_A)
+            oA = mA(input_ids=cur_input, attention_mask=attn,
+                    past_key_values=past_A, use_cache=True)
+            past_A = oA.past_key_values
+            logits_A_cur = oA.logits[:, -1, :].float().squeeze(0)
+            lpA = torch.log_softmax(logits_A_cur, dim=-1)
+
+            mA.set_adapter(adapter_B)
+            oB = mA(input_ids=cur_input, attention_mask=attn,
+                    past_key_values=past_B, use_cache=True)
+            past_B = oB.past_key_values
+            logits_B_cur = oB.logits[:, -1, :].float().squeeze(0)
+            lpB = torch.log_softmax(logits_B_cur, dim=-1)
+
+            with mA.disable_adapter():
+                o0 = mA(input_ids=cur_input, attention_mask=attn,
+                        past_key_values=past_0, use_cache=True)
+            past_0 = o0.past_key_values
+            logits_0_cur = o0.logits[:, -1, :].float().squeeze(0)
+            lp0 = torch.log_softmax(logits_0_cur, dim=-1)
+
+            # pi_min_delta_base logits (identical kernel to the other branches).
+            log_r_A = lpA - lp0
+            log_r_B = lpB - lp0
+            both_up = (log_r_A > 0) & (log_r_B > 0)
+            both_down = (log_r_A < 0) & (log_r_B < 0)
+            log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
+                                torch.where(both_down, torch.maximum(log_r_A, log_r_B),
+                                            torch.zeros_like(log_r_A)))
+            lp_md = lp0 + log_g
+
+            # Confidence gate: skip SSMD entirely when pi_min_delta is decisive.
+            md_top1_prob = float(lp_md.exp().max().item())
+            if md_top1_prob >= skip_prob:
+                final_logits = lp_md
+            else:
+                # Candidate set (spec: top-6 pi_min_delta + top-2 each of A/B/0 + EOS,
+                # preserve argmax of each, cap at max_cands).
+                preserve = {int(lp_md.argmax().item()), int(lpA.argmax().item()),
+                            int(lpB.argmax().item()), int(lp0.argmax().item()), eos}
+                seen, candidates = set(), []
+                md_top = lp_md.topk(n_min_delta_cands).indices.tolist()
+                for t in md_top:
+                    if t not in seen:
+                        candidates.append(t); seen.add(t)
+                        if len(candidates) >= max_cands: break
+                for src in (lpA.topk(candidates_per_pol).indices.tolist(),
+                            lpB.topk(candidates_per_pol).indices.tolist(),
+                            lp0.topk(candidates_per_pol).indices.tolist(),
+                            [eos]):
+                    for t in src:
+                        if t not in seen and len(candidates) < max_cands:
+                            candidates.append(t); seen.add(t)
+                # Ensure preserve set is included; if cap already hit, leave room
+                # by silently keeping the union (the spec's intent is "preserve top
+                # from every policy" — these are already in via the per-pol loops).
+                for t in preserve:
+                    if t not in seen and len(candidates) < max_cands:
+                        candidates.append(t); seen.add(t)
+
+                non_eos = [v for v in candidates if v != eos]
+                bonuses = {}
+
+                if non_eos:
+                    C_current = _ssmd_shared_state_power(
+                        logits_0_cur, logits_A_cur, logits_B_cur)
+                    # Build batched suffix sequences: each row = [history, v_i].
+                    # No KV cache (avoids cross-version cache-mutation pitfalls);
+                    # batched throughput keeps this cheap.
+                    history = torch.tensor(ids + generated, device=dev)
+                    L = history.size(0)
+                    n = len(non_eos)
+                    cand_col = torch.tensor(non_eos, device=dev).unsqueeze(-1)  # (n, 1)
+                    batched = torch.cat([history.unsqueeze(0).expand(n, -1), cand_col], dim=-1)  # (n, L+1)
+                    batched_attn = torch.ones_like(batched)
+
+                    mA.set_adapter(adapter_A)
+                    succ_A = mA(input_ids=batched, attention_mask=batched_attn).logits[:, -1, :].float()
+                    mA.set_adapter(adapter_B)
+                    succ_B = mA(input_ids=batched, attention_mask=batched_attn).logits[:, -1, :].float()
+                    with mA.disable_adapter():
+                        succ_0 = mA(input_ids=batched, attention_mask=batched_attn).logits[:, -1, :].float()
+
+                    C_succ = _ssmd_shared_state_power(succ_0, succ_A, succ_B)  # (n,)
+                    diff = (C_succ - C_current).clamp(min=0.0)
+                    for i, v in enumerate(non_eos):
+                        bonuses[v] = float(diff[i].item())
+
+                final_logits = lp_md.clone()
+                for v, b in bonuses.items():
+                    if b > 0:
+                        final_logits[v] += lambda_ssmd * b
+
+            final_logits = final_logits / temp
+            final_logits = final_logits - torch.logsumexp(final_logits, dim=-1, keepdim=True)
+            nxt = int(torch.multinomial(final_logits.exp(), num_samples=1, generator=gen).item())
+            if nxt == eos:
+                break
+            generated.append(nxt)
+            cur_input = torch.tensor([[nxt]], device=dev)
+            attn = torch.cat([attn, torch.ones((1, 1), device=dev, dtype=attn.dtype)], dim=-1)
+
+    return tok.decode(generated, skip_special_tokens=True).strip()
+
+
+# -------------------------------------------------------------------------
+
+
+# -------------------- pi_acta: Async Cross-Transfer Alignment ----------------
+# Same cross-recognition primitive as pi_ctl, but the inner aggregation is
+# state-sequence alignment via skip-free weighted LCS over checkpoint states
+# drawn from FULL-EOS rollouts. Skip-free DP means a state from pi_A's
+# position-10 trajectory can match a state from pi_B's position-200 trajectory
+# without temporal penalty — designed for partial-agreement settings (joke
+# begin/end) where the shared behavior occurs at different positions in
+# different refs. Per-pair score uses the OTHER state's prefix as context,
+# so cross-recognition is evaluated at where each ref currently is in its
+# own trajectory.
+
+# Defaults — aggressive on cost (still expensive; expect ~50-200x pi_ctl).
+ACTA_K_DEFAULT = 2
+ACTA_SAFETY_CAP_DEFAULT = 256       # max rollout length (not the alignment horizon)
+ACTA_STRIDE_DEFAULT = 32            # checkpoint stride
+ACTA_PROBE_LEN_DEFAULT = 32         # probe length per state
+ACTA_CAND_PER_POL_DEFAULT = 2
+ACTA_MIN_DELTA_CANDS_DEFAULT = 4
+ACTA_MAX_CANDS_DEFAULT = 8
+ACTA_LAMBDA_DEFAULT = 0.05
+ACTA_LCB_Z_DEFAULT = 1.5
+ACTA_CLIP_MAX_DEFAULT = 5.0
+# Confidence gate: skip the entire ACTA computation at decoding steps where
+# pi_min_delta's top-1 already dominates. Most steps (filler/agreed tokens)
+# satisfy this and contribute no useful alignment signal anyway. Setting
+# this >= 1.0 disables the gate.
+ACTA_SKIP_PROB_DEFAULT = 0.6
+
+
+def _acta_build_states(initial_prefix, trajectory, base_probes, stride, probe_len, eos):
+    """Build the state sequence for one trajectory.
+
+    Each state holds (prefix, source_probe, base_probe). source_probe comes
+    from the trajectory itself starting at position checkpoint+stride. base_probe
+    is a pre-sampled pi_0 continuation from this state's prefix (caller supplies).
+
+    Args:
+      initial_prefix: 1D long tensor — context BEFORE the rollout (already
+        includes the committed candidate v).
+      trajectory: 1D long tensor — the rollout tokens.
+      base_probes: list of 1D long tensors, one per checkpoint, each of length
+        probe_len. Generated by caller for efficiency.
+      stride, probe_len: ints.
+      eos: EOS token id (used only for masking inside scoring).
+
+    Returns: list of dicts with keys {prefix, source_probe, base_probe}.
+    """
+    import torch
+    T = trajectory.size(0)
+    states = []
+    n_checkpoints = max(1, T // stride)
+    for ci in range(n_checkpoints):
+        pos = ci * stride
+        if pos >= T:
+            break
+        # Cap probe by what we have in the trajectory; pad with eos at end
+        end = min(pos + probe_len, T)
+        source = trajectory[pos:end]
+        if source.size(0) < probe_len:
+            pad = torch.full((probe_len - source.size(0),), eos,
+                             dtype=trajectory.dtype, device=trajectory.device)
+            source = torch.cat([source, pad], dim=0)
+        prefix = torch.cat([initial_prefix, trajectory[:pos]], dim=0)
+        bp = base_probes[ci] if ci < len(base_probes) else None
+        if bp is None:
+            bp = torch.full((probe_len,), eos, dtype=trajectory.dtype,
+                            device=trajectory.device)
+        states.append({"prefix": prefix, "source_probe": source, "base_probe": bp})
+    return states
+
+
+def _acta_pad_batch(seqs, pad_id, device):
+    """Right-pad a list of 1D long tensors to a common length. Returns
+    (input_ids: (B, max_L), attn_mask: (B, max_L), lengths: (B,))."""
+    import torch
+    lengths = torch.tensor([s.size(0) for s in seqs], device=device, dtype=torch.long)
+    max_L = int(lengths.max().item())
+    out = torch.full((len(seqs), max_L), pad_id, dtype=torch.long, device=device)
+    attn = torch.zeros((len(seqs), max_L), dtype=torch.long, device=device)
+    for i, s in enumerate(seqs):
+        out[i, :s.size(0)] = s
+        attn[i, :s.size(0)] = 1
+    return out, attn, lengths
+
+
+def _acta_batched_avg_logratio(mA, scoring_adapter, prefixes, probes,
+                               probe_len, eos, clip_max, dev):
+    """Batched teacher-forced avg-clipped-log-ratio for many (prefix, probe)
+    pairs.
+
+    For each pair i: build full = prefix_i + probe_i, run ONE forward pass
+    under scoring_adapter and ONE under base, extract log-prob at the probe
+    positions, clip the log-ratio, mask post-EOS, average over fixed probe_len.
+
+    All pairs run as ONE batched call per policy (2 calls total) instead of
+    2*N calls — this is the main pair-scoring speedup. Returns 1D tensor of
+    length N with the average clipped log-ratio per pair.
+    """
+    import torch
+    N = len(prefixes)
+    full_seqs = [torch.cat([prefixes[i], probes[i]], dim=0) for i in range(N)]
+    input_ids, attn_mask, lengths = _acta_pad_batch(full_seqs, eos, dev)
+
+    prefix_lens = torch.tensor([p.size(0) for p in prefixes], device=dev, dtype=torch.long)
+
+    # Forward under scoring adapter
+    with _ctl_set_policy(mA, scoring_adapter):
+        out_s = mA(input_ids=input_ids, attention_mask=attn_mask)
+    log_probs_s_all = torch.log_softmax(out_s.logits.float(), dim=-1)
+
+    # Forward under base (no adapter)
+    with _ctl_set_policy(mA, None):
+        out_0 = mA(input_ids=input_ids, attention_mask=attn_mask)
+    log_probs_0_all = torch.log_softmax(out_0.logits.float(), dim=-1)
+
+    results = torch.zeros(N, device=dev)
+    for i in range(N):
+        L = int(prefix_lens[i].item())
+        probe_i = probes[i]
+        plen = probe_i.size(0)
+        # logits at position L-1 .. L+plen-2 predict probe_i[0..plen-1]
+        slice_s = log_probs_s_all[i, L - 1:L - 1 + plen]
+        slice_0 = log_probs_0_all[i, L - 1:L - 1 + plen]
+        lp_s = slice_s.gather(-1, probe_i.unsqueeze(-1)).squeeze(-1)
+        lp_0 = slice_0.gather(-1, probe_i.unsqueeze(-1)).squeeze(-1)
+        ratio = (lp_s - lp_0).clamp(-clip_max, clip_max)
+        # Mask post-first-EOS positions (zero contribution)
+        eos_pos = (probe_i == eos).nonzero(as_tuple=False)
+        valid_len = int(eos_pos[0].item()) + 1 if eos_pos.numel() > 0 else plen
+        if valid_len > 0:
+            ratio = ratio[:valid_len]
+        results[i] = ratio.sum() / float(probe_len)
+    return results
+
+
+def _acta_align_lcs(score_matrix):
+    """Weighted LCS over the pairwise score matrix with skip cost = 0.
+    D[i,j] = max(D[i-1,j], D[i,j-1], D[i-1,j-1] + max(score[i,j], 0)).
+    Returns scalar D[m, n].
+    """
+    m, n = score_matrix.shape
+    # Use Python floats for the small DP (m,n small).
+    prev = [0.0] * (n + 1)
+    for i in range(1, m + 1):
+        cur = [0.0] * (n + 1)
+        for j in range(1, n + 1):
+            match_score = float(score_matrix[i - 1, j - 1].item()) if hasattr(score_matrix, "item") else float(score_matrix[i - 1][j - 1])
+            match = prev[j - 1] + max(match_score, 0.0)
+            skip_left = prev[j]
+            skip_right = cur[j - 1]
+            cur[j] = max(match, skip_left, skip_right)
+        prev = cur
+    return prev[n]
+
+
+def _acta_one_alignment(mA, adapter_A, adapter_B, states_left, states_right,
+                        probe_len, eos, clip_max, dev):
+    """Build the m×n pairwise score matrix using BATCHED teacher forcing
+    (one forward pass per (direction, policy) over all m*n pair sequences,
+    not one pass per pair), then run skip-free LCS DP.
+
+    Forward-pass count per matrix: 4 directions × 2 policies = 8 batched
+    calls (vs. m*n*8 in the naive impl). For m=n=8 that's 8 calls vs 512.
+    """
+    import torch
+    m, n = len(states_left), len(states_right)
+    if m == 0 or n == 0:
+        return 0.0
+
+    # Flatten the m×n pair list into 4 direction-aligned lists.
+    a_prefixes, a_probes = [], []   # left.source_probe under pi_B given right.prefix
+    b_prefixes, b_probes = [], []   # left.base_probe   under pi_B given right.prefix
+    c_prefixes, c_probes = [], []   # right.source_probe under pi_A given left.prefix
+    d_prefixes, d_probes = [], []   # right.base_probe   under pi_A given left.prefix
+    for i in range(m):
+        for j in range(n):
+            l = states_left[i]; r = states_right[j]
+            a_prefixes.append(r["prefix"]); a_probes.append(l["source_probe"])
+            b_prefixes.append(r["prefix"]); b_probes.append(l["base_probe"])
+            c_prefixes.append(l["prefix"]); c_probes.append(r["source_probe"])
+            d_prefixes.append(l["prefix"]); d_probes.append(r["base_probe"])
+
+    a_vals = _acta_batched_avg_logratio(mA, adapter_B, a_prefixes, a_probes,
+                                        probe_len, eos, clip_max, dev)
+    b_vals = _acta_batched_avg_logratio(mA, adapter_B, b_prefixes, b_probes,
+                                        probe_len, eos, clip_max, dev)
+    c_vals = _acta_batched_avg_logratio(mA, adapter_A, c_prefixes, c_probes,
+                                        probe_len, eos, clip_max, dev)
+    d_vals = _acta_batched_avg_logratio(mA, adapter_A, d_prefixes, d_probes,
+                                        probe_len, eos, clip_max, dev)
+    scores_flat = 0.5 * ((a_vals - b_vals) + (c_vals - d_vals))
+    score_mat = scores_flat.view(m, n)
+    return _acta_align_lcs(score_mat)
+
+
+def _acta_generate_base_probes_batched(mA, state_prefixes, probe_len,
+                                       temp, gen, dev, eos):
+    """Sample probe_len tokens of pi_0 continuation from EACH prefix, in ONE
+    batched generation call (padded). Returns list of per-prefix probe
+    tensors (each length probe_len).
+
+    The naive impl ran one K=1 rollout per prefix sequentially — for m
+    prefixes that's m sequential 32-token generations. This collapses to a
+    single batched call of batch size m × probe_len sequential forward
+    passes, ~m× speedup.
+    """
+    import torch
+    if not state_prefixes:
+        return []
+    M = len(state_prefixes)
+    input_ids, attn, lengths = _acta_pad_batch(state_prefixes, eos, dev)
+    cur = input_ids
+    a = attn
+    past = None
+    out = torch.full((M, probe_len), eos, dtype=torch.long, device=dev)
+    active = torch.ones(M, dtype=torch.bool, device=dev)
+    with _ctl_set_policy(mA, None):
+        with torch.inference_mode():
+            for t in range(probe_len):
+                if not active.any():
+                    break
+                o = mA(input_ids=cur, attention_mask=a,
+                       past_key_values=past, use_cache=True)
+                past = o.past_key_values
+                # Per-row last valid position; with padding right-aligned and
+                # KV cache, after the first step `cur` is one token per row
+                # so position is unambiguous. For the first step we read
+                # logits at the per-row (length-1) position.
+                if t == 0:
+                    last_idx = (lengths - 1).clamp(min=0)
+                    logits_last = o.logits[torch.arange(M, device=dev), last_idx, :]
+                else:
+                    logits_last = o.logits[:, -1, :]
+                logits_last = logits_last.float() / temp
+                logits_last = logits_last - torch.logsumexp(logits_last, dim=-1, keepdim=True)
+                nxt = torch.multinomial(logits_last.exp(), num_samples=1,
+                                        generator=gen).squeeze(-1)
+                for k in range(M):
+                    if active[k]:
+                        out[k, t] = nxt[k]
+                        if int(nxt[k].item()) == eos:
+                            active[k] = False
+                cur = nxt.view(-1, 1)
+                a = torch.cat([a, torch.ones((M, 1), device=dev, dtype=a.dtype)], dim=-1)
+    return [out[i] for i in range(M)]
+
+
+def _acta_batched_rollout_per_candidate(mA, adapter_name, init_prefixes,
+                                        max_horizon, temp, gen, dev, eos):
+    """Sample ONE rollout of length max_horizon from each prefix in init_prefixes
+    under a single policy, batched into one generation loop.
+
+    Used to roll out all candidates' A-trajectories (or B, or O) in a single
+    batched call. With N candidates this is ~N× faster than sequential per-
+    candidate rollouts.
+    """
+    import torch
+    N = len(init_prefixes)
+    input_ids, attn, lengths = _acta_pad_batch(init_prefixes, eos, dev)
+    cur = input_ids
+    a = attn
+    past = None
+    out = torch.full((N, max_horizon), eos, dtype=torch.long, device=dev)
+    active = torch.ones(N, dtype=torch.bool, device=dev)
+    with _ctl_set_policy(mA, adapter_name):
+        with torch.inference_mode():
+            for t in range(max_horizon):
+                if not active.any():
+                    break
+                o = mA(input_ids=cur, attention_mask=a,
+                       past_key_values=past, use_cache=True)
+                past = o.past_key_values
+                if t == 0:
+                    last_idx = (lengths - 1).clamp(min=0)
+                    logits_last = o.logits[torch.arange(N, device=dev), last_idx, :]
+                else:
+                    logits_last = o.logits[:, -1, :]
+                logits_last = logits_last.float() / temp
+                logits_last = logits_last - torch.logsumexp(logits_last, dim=-1, keepdim=True)
+                nxt = torch.multinomial(logits_last.exp(), num_samples=1,
+                                        generator=gen).squeeze(-1)
+                for k in range(N):
+                    if active[k]:
+                        out[k, t] = nxt[k]
+                        if int(nxt[k].item()) == eos:
+                            active[k] = False
+                cur = nxt.view(-1, 1)
+                a = torch.cat([a, torch.ones((N, 1), device=dev, dtype=a.dtype)], dim=-1)
+    return [out[i] for i in range(N)]
+
+
+def acta_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
+                    adapter_A, adapter_B,
+                    K=ACTA_K_DEFAULT,
+                    safety_cap=ACTA_SAFETY_CAP_DEFAULT,
+                    stride=ACTA_STRIDE_DEFAULT,
+                    probe_len=ACTA_PROBE_LEN_DEFAULT,
+                    candidates_per_pol=ACTA_CAND_PER_POL_DEFAULT,
+                    n_min_delta_cands=ACTA_MIN_DELTA_CANDS_DEFAULT,
+                    max_cands=ACTA_MAX_CANDS_DEFAULT,
+                    lambda_acta=ACTA_LAMBDA_DEFAULT,
+                    lcb_z=ACTA_LCB_Z_DEFAULT,
+                    clip_max=ACTA_CLIP_MAX_DEFAULT,
+                    skip_prob=ACTA_SKIP_PROB_DEFAULT):
+    """Generate ONE response under Asynchronous Cross-Transfer Alignment.
+
+    For each candidate v, generate full-EOS rollouts from pi_A, pi_B, and two
+    independent pi_0 rollouts. Decompose each trajectory into checkpoint states.
+    Score the m×n pairwise matrix between A-states and B-states (and between
+    the two pi_0 state sequences for null subtraction). Weighted LCS DP yields
+    a scalar alignment score per replicate; bonus = LCB(mean Align(A,B) -
+    mean Align(O1,O2)).
+    """
+    import torch
+
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    eos = int(tok.eos_token_id)
+    cur_input = torch.tensor([ids], device=dev)
+    attn = torch.ones_like(cur_input)
+    past_A = past_B = past_0 = None
+    generated = []
+
+    with torch.inference_mode():
+        for step in range(max_new):
+            # Logits at current position from all three policies
+            mA.set_adapter(adapter_A)
+            oA = mA(input_ids=cur_input, attention_mask=attn,
+                    past_key_values=past_A, use_cache=True)
+            past_A = oA.past_key_values
+            lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1).squeeze(0)
+
+            mA.set_adapter(adapter_B)
+            oB = mA(input_ids=cur_input, attention_mask=attn,
+                    past_key_values=past_B, use_cache=True)
+            past_B = oB.past_key_values
+            lpB = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1).squeeze(0)
+
+            with mA.disable_adapter():
+                o0 = mA(input_ids=cur_input, attention_mask=attn,
+                        past_key_values=past_0, use_cache=True)
+            past_0 = o0.past_key_values
+            lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1).squeeze(0)
+
+            # pi_min_delta logits
+            log_r_A = lpA - lp0
+            log_r_B = lpB - lp0
+            both_up = (log_r_A > 0) & (log_r_B > 0)
+            both_down = (log_r_A < 0) & (log_r_B < 0)
+            log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
+                                torch.where(both_down, torch.maximum(log_r_A, log_r_B),
+                                            torch.zeros_like(log_r_A)))
+            lp_md = lp0 + log_g
+
+            # Candidate set
+            seen, candidates = set(), []
+            md_top = lp_md.topk(n_min_delta_cands).indices.tolist()
+            for t in md_top:
+                if t not in seen:
+                    candidates.append(t); seen.add(t)
+                    if len(candidates) >= max_cands: break
+            md_argmax = int(lp_md.argmax().item())
+            for src in (lpA.topk(candidates_per_pol).indices.tolist(),
+                        lpB.topk(candidates_per_pol).indices.tolist(),
+                        lp0.topk(candidates_per_pol).indices.tolist(),
+                        [eos], [md_argmax]):
+                for t in src:
+                    if t not in seen and len(candidates) < max_cands:
+                        candidates.append(t); seen.add(t)
+
+            # Confidence gate: if pi_min_delta's top-1 already dominates, skip
+            # the entire ACTA bonus and sample directly. Saves ACTA cost on
+            # filler/agreed tokens (typically 60-90% of decoding steps).
+            md_top1_prob = float(lp_md.exp().max().item())
+            if md_top1_prob >= skip_prob:
+                bonuses = {}
+            else:
+                full_history = torch.tensor(ids + generated, device=dev)
+                # ---- BATCHED ACROSS CANDIDATES ----
+                # Build a per-(candidate, replicate) initial prefix list of length
+                # N = len(candidates) * K. We will then generate ALL A-rollouts
+                # in one batched call, ALL B-rollouts in another, etc.
+                init_prefixes = []
+                for v in candidates:
+                    init_prefix = torch.cat([full_history,
+                                             torch.tensor([v], device=dev)], dim=0)
+                    for _ in range(K):
+                        init_prefixes.append(init_prefix)
+                # 4 batched generation calls total (not N_cands * K * 4).
+                roll_A_list = _acta_batched_rollout_per_candidate(
+                    mA, adapter_A, init_prefixes, safety_cap, temp, gen, dev, eos)
+                roll_B_list = _acta_batched_rollout_per_candidate(
+                    mA, adapter_B, init_prefixes, safety_cap, temp, gen, dev, eos)
+                roll_O1_list = _acta_batched_rollout_per_candidate(
+                    mA, None, init_prefixes, safety_cap, temp, gen, dev, eos)
+                roll_O2_list = _acta_batched_rollout_per_candidate(
+                    mA, None, init_prefixes, safety_cap, temp, gen, dev, eos)
+
+                # Build all states; sample all base probes in ONE batched call
+                # per trajectory family (still cheap: probe_len = 32 tokens).
+                def make_states_one(init_prefix, traj):
+                    T = traj.size(0)
+                    positions = list(range(0, T, stride))
+                    if not positions:
+                        return [], []
+                    prefixes = [torch.cat([init_prefix, traj[:pos]], dim=0)
+                                for pos in positions]
+                    return prefixes, traj
+
+                # Batch all base-probe generations across (candidate, replicate, traj-family).
+                # Collect prefixes for each trajectory's checkpoints.
+                all_prefix_groups = []  # list of (group_id, prefixes_list)
+                for idx, init_prefix in enumerate(init_prefixes):
+                    for traj_family, traj_list in (
+                        ("A", roll_A_list), ("B", roll_B_list),
+                        ("O1", roll_O1_list), ("O2", roll_O2_list),
+                    ):
+                        traj = traj_list[idx]
+                        prefs, _ = make_states_one(init_prefix, traj)
+                        all_prefix_groups.append((idx, traj_family, prefs, traj))
+
+                # Flatten all base-probe prefixes into one batch.
+                flat_prefs = []
+                ranges = []
+                for (idx, fam, prefs, traj) in all_prefix_groups:
+                    start = len(flat_prefs)
+                    flat_prefs.extend(prefs)
+                    ranges.append((idx, fam, traj, start, len(flat_prefs)))
+                base_probes_flat = _acta_generate_base_probes_batched(
+                    mA, flat_prefs, probe_len, temp, gen, dev, eos) if flat_prefs else []
+
+                # Group back into per-trajectory state sequences.
+                states_by_idx_fam = {}
+                for (idx, fam, traj, lo, hi) in ranges:
+                    init_prefix = init_prefixes[idx]
+                    bp = base_probes_flat[lo:hi]
+                    states_by_idx_fam[(idx, fam)] = _acta_build_states(
+                        init_prefix, traj, bp, stride, probe_len, eos)
+
+                # Compute K-replicate gains per candidate.
+                bonuses = {}
+                idx_offset = 0
+                for ci, v in enumerate(candidates):
+                    gains = []
+                    for k in range(K):
+                        idx = ci * K + k
+                        align_AB = _acta_one_alignment(
+                            mA, adapter_A, adapter_B,
+                            states_by_idx_fam[(idx, "A")],
+                            states_by_idx_fam[(idx, "B")],
+                            probe_len, eos, clip_max, dev)
+                        align_OO = _acta_one_alignment(
+                            mA, adapter_A, adapter_B,
+                            states_by_idx_fam[(idx, "O1")],
+                            states_by_idx_fam[(idx, "O2")],
+                            probe_len, eos, clip_max, dev)
+                        gains.append(align_AB - align_OO)
+                    est = sum(gains) / len(gains)
+                    if K > 1:
+                        var = sum((g - est) ** 2 for g in gains) / (K - 1)
+                        se = math.sqrt(var) / math.sqrt(K)
+                    else:
+                        se = 0.0
+                    bonuses[v] = max(est - lcb_z * se, 0.0)
+
+            # Apply bonuses and sample
+            final_logits = lp_md.clone()
+            for v, b in bonuses.items():
+                final_logits[v] += lambda_acta * b
+            final_logits = final_logits / temp
+            final_logits = final_logits - torch.logsumexp(final_logits, dim=-1, keepdim=True)
+            nxt = int(torch.multinomial(final_logits.exp(), num_samples=1, generator=gen).item())
+            if nxt == eos:
+                break
+            generated.append(nxt)
+            cur_input = torch.tensor([[nxt]], device=dev)
+            attn = torch.cat([attn, torch.ones((1, 1), device=dev, dtype=attn.dtype)], dim=-1)
+
+    return tok.decode(generated, skip_special_tokens=True).strip()
+
+
+# -------------------------------------------------------------------------
+
+
 def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, composition_types):
     def is_complete(entry):
         return entry is not None and "metrics" in entry and len(entry["metrics"]) >= 1
@@ -344,17 +1337,103 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
         mA.load_adapter(adapters[n], adapter_name=n)
     gen = torch.Generator(device=args.device); gen.manual_seed(args.seed)
 
+    ctl_kwargs = {
+        "K": args.ctl_K,
+        "horizons": tuple(int(h) for h in args.ctl_horizons.split(",") if h.strip()),
+        "h_weights": tuple(float(w) for w in args.ctl_h_weights.split(",") if w.strip()),
+        "candidates_per_pol": args.ctl_cand_per_pol,
+        "n_min_delta_cands": args.ctl_min_delta_cands,
+        "max_cands": args.ctl_max_cands,
+        "lambda_ctl": args.ctl_lambda,
+        "lcb_z": args.ctl_lcb_z,
+        "clip_max": args.ctl_clip_max,
+        "skip_prob": args.ctl_skip_prob,
+    }
+    ssmd_kwargs = {
+        "n_min_delta_cands": args.ssmd_min_delta_cands,
+        "candidates_per_pol": args.ssmd_cand_per_pol,
+        "max_cands": args.ssmd_max_cands,
+        "lambda_ssmd": args.ssmd_lambda,
+        "skip_prob": args.ssmd_skip_prob,
+    }
+    acta_kwargs = {
+        "K": args.acta_K,
+        "safety_cap": args.acta_safety_cap,
+        "stride": args.acta_stride,
+        "probe_len": args.acta_probe_len,
+        "candidates_per_pol": args.acta_cand_per_pol,
+        "n_min_delta_cands": args.acta_min_delta_cands,
+        "max_cands": args.acta_max_cands,
+        "lambda_acta": args.acta_lambda,
+        "lcb_z": args.acta_lcb_z,
+        "clip_max": args.acta_clip_max,
+        "skip_prob": args.acta_skip_prob,
+    }
+
     for ct in todo:
         print(f"\n[hf] == {ct} ==")
         flat = []
-        for p in prompts:
-            flat.extend(sample_batch_hf(
-                p, args.n_samples, mA, tok, args.max_new_tokens,
-                args.temperature, args.device, gen, ct,
-                adapter_A="pi_A", adapter_B="pi_B",
-                lookback_alpha=args.lookback_alpha))
+        t0 = time.time()
+        if ct == "pi_ssmd":
+            print(f"  [ssmd] kwargs: {ssmd_kwargs}")
+            total = len(prompts) * args.n_samples
+            done = 0
+            for p in prompts:
+                for s in range(args.n_samples):
+                    done += 1
+                    t_sample = time.time()
+                    text = ssmd_sample_one(
+                        p, mA, tok, args.max_new_tokens, args.temperature,
+                        args.device, gen,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        **ssmd_kwargs,
+                    )
+                    print(f"  [ssmd] sample {done}/{total}  ({time.time() - t_sample:.1f}s)")
+                    flat.append(text)
+        elif ct == "pi_ctl":
+            print(f"  [ctl] kwargs: {ctl_kwargs}")
+            total = len(prompts) * args.n_samples
+            done = 0
+            for p in prompts:
+                for s in range(args.n_samples):
+                    done += 1
+                    print(f"  [ctl] sample {done}/{total}")
+                    text = ctl_sample_one(
+                        p, mA, tok, args.max_new_tokens, args.temperature,
+                        args.device, gen,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        **ctl_kwargs,
+                    )
+                    flat.append(text)
+        elif ct == "pi_acta":
+            print(f"  [acta] kwargs: {acta_kwargs}")
+            total = len(prompts) * args.n_samples
+            done = 0
+            for p in prompts:
+                for s in range(args.n_samples):
+                    done += 1
+                    t_sample = time.time()
+                    text = acta_sample_one(
+                        p, mA, tok, args.max_new_tokens, args.temperature,
+                        args.device, gen,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        **acta_kwargs,
+                    )
+                    print(f"  [acta] sample {done}/{total}  ({time.time() - t_sample:.1f}s)")
+                    flat.append(text)
+        else:
+            for p in prompts:
+                flat.extend(sample_batch_hf(
+                    p, args.n_samples, mA, tok, args.max_new_tokens,
+                    args.temperature, args.device, gen, ct,
+                    adapter_A="pi_A", adapter_B="pi_B",
+                    lookback_alpha=args.lookback_alpha))
+        elapsed = time.time() - t0
         metrics = score_responses(flat, costs)
-        results[ct] = {"metrics": metrics, "n_responses": len(flat)}
+        results[ct] = {"metrics": metrics, "n_responses": len(flat),
+                       "elapsed_seconds": round(elapsed, 2)}
+        print(f"  [{ct}] elapsed: {elapsed:.1f}s for {len(flat)} responses "
+              f"({elapsed / max(1, len(flat)):.2f}s/response)")
         for mname, m in metrics.items():
             if "target_frequency" in m:
                 print(f"  [{ct}] {mname}: {m['target_frequency']:.3f}  ({m['hits']}/{m['n_responses']})")
@@ -369,11 +1448,75 @@ def main():
     p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir")
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir")
     p.add_argument("--output_file", required=True)
-    p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back",
-                   help="CSV: pi_min, pi_min_delta_base, pi_min_look_back")
+    p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back,pi_ssmd,pi_ctl",
+                   help="CSV: pi_min, pi_min_delta_base, pi_min_look_back, pi_ssmd, pi_ctl, pi_acta. "
+                        "Order matters for incremental save: pi_ssmd lands in JSON before pi_ctl "
+                        "so partial-run results are usable. pi_acta is excluded from default "
+                        "(opt in with --composition_types ...,pi_acta).")
     p.add_argument("--lookback_alpha", type=float, default=1.0)
     p.add_argument("--n_samples", type=int, default=10,
-                   help="samples per prompt (writeup: 10)")
+                   help="samples per prompt (writeup: 10; for pi_ctl one-shot use 1)")
+    # pi_ctl hyperparameters (minimal defaults; see ctl_sample_one docstring)
+    p.add_argument("--ctl_K", type=int, default=CTL_K_DEFAULT,
+                   help="CTL rollouts per candidate per policy")
+    p.add_argument("--ctl_horizons", default=",".join(str(h) for h in CTL_HORIZONS_DEFAULT),
+                   help="CSV of CTL horizons (longest determines rollout length)")
+    p.add_argument("--ctl_h_weights", default=",".join(str(w) for w in CTL_H_WEIGHTS_DEFAULT),
+                   help="CSV of horizon weights (must match --ctl_horizons length)")
+    p.add_argument("--ctl_cand_per_pol", type=int, default=CTL_CAND_PER_POL_DEFAULT,
+                   help="CTL: top-k per ref policy (pi_A, pi_B, pi_0) added to candidate set")
+    p.add_argument("--ctl_min_delta_cands", type=int, default=CTL_MIN_DELTA_CANDS_DEFAULT,
+                   help="CTL: top-k from pi_min_delta_base added to candidate set")
+    p.add_argument("--ctl_max_cands", type=int, default=CTL_MAX_CANDS_DEFAULT,
+                   help="CTL: hard cap on candidate set size")
+    p.add_argument("--ctl_lambda", type=float, default=CTL_LAMBDA_DEFAULT,
+                   help="CTL: lambda * bonus added to pi_min_delta logit; 0 = falls back to pi_min_delta")
+    p.add_argument("--ctl_lcb_z", type=float, default=CTL_LCB_Z_DEFAULT,
+                   help="CTL: lower-confidence-bound z multiplier on the bonus")
+    p.add_argument("--ctl_clip_max", type=float, default=CTL_CLIP_MAX_DEFAULT,
+                   help="CTL: clip range for log-ratios")
+    p.add_argument("--ctl_skip_prob", type=float, default=CTL_SKIP_PROB_DEFAULT,
+                   help="CTL: confidence gate. Skip the bonus computation when "
+                        "pi_min_delta's top-1 probability >= this threshold "
+                        "(filler/agreed tokens). Set >=1.0 to disable.")
+    # pi_ssmd hyperparameters
+    p.add_argument("--ssmd_min_delta_cands", type=int, default=SSMD_MIN_DELTA_CANDS_DEFAULT,
+                   help="SSMD: top-k from pi_min_delta added to candidate set")
+    p.add_argument("--ssmd_cand_per_pol", type=int, default=SSMD_CAND_PER_POL_DEFAULT,
+                   help="SSMD: top-k per ref policy added to candidate set")
+    p.add_argument("--ssmd_max_cands", type=int, default=SSMD_MAX_CANDS_DEFAULT,
+                   help="SSMD: hard cap on candidate set size")
+    p.add_argument("--ssmd_lambda", type=float, default=SSMD_LAMBDA_DEFAULT,
+                   help="SSMD: lambda * [C(cv) - C(c)]_+ added to pi_min_delta logit")
+    p.add_argument("--ssmd_skip_prob", type=float, default=SSMD_SKIP_PROB_DEFAULT,
+                   help="SSMD: confidence gate. Skip the bonus computation when "
+                        "pi_min_delta's top-1 probability >= this threshold. "
+                        "Set >=1.0 to disable.")
+    # pi_acta hyperparameters
+    p.add_argument("--acta_K", type=int, default=ACTA_K_DEFAULT,
+                   help="ACTA replicate count (full-EOS trajectories per policy per candidate)")
+    p.add_argument("--acta_safety_cap", type=int, default=ACTA_SAFETY_CAP_DEFAULT,
+                   help="ACTA: max rollout length (safety cap, NOT the alignment horizon)")
+    p.add_argument("--acta_stride", type=int, default=ACTA_STRIDE_DEFAULT,
+                   help="ACTA: checkpoint stride along each trajectory")
+    p.add_argument("--acta_probe_len", type=int, default=ACTA_PROBE_LEN_DEFAULT,
+                   help="ACTA: probe length per state")
+    p.add_argument("--acta_cand_per_pol", type=int, default=ACTA_CAND_PER_POL_DEFAULT,
+                   help="ACTA: top-k per ref policy added to candidate set")
+    p.add_argument("--acta_min_delta_cands", type=int, default=ACTA_MIN_DELTA_CANDS_DEFAULT,
+                   help="ACTA: top-k from pi_min_delta added to candidate set")
+    p.add_argument("--acta_max_cands", type=int, default=ACTA_MAX_CANDS_DEFAULT,
+                   help="ACTA: hard cap on candidate set size")
+    p.add_argument("--acta_lambda", type=float, default=ACTA_LAMBDA_DEFAULT,
+                   help="ACTA: lambda * bonus added to pi_min_delta logit")
+    p.add_argument("--acta_lcb_z", type=float, default=ACTA_LCB_Z_DEFAULT,
+                   help="ACTA: lower-confidence-bound z multiplier on the bonus")
+    p.add_argument("--acta_clip_max", type=float, default=ACTA_CLIP_MAX_DEFAULT,
+                   help="ACTA: clip range for log-ratios")
+    p.add_argument("--acta_skip_prob", type=float, default=ACTA_SKIP_PROB_DEFAULT,
+                   help="ACTA: confidence gate. Skip the bonus computation when "
+                        "pi_min_delta's top-1 probability >= this threshold "
+                        "(filler/agreed tokens). Set >=1.0 to disable.")
     p.add_argument("--max_prompts", type=int, default=None)
     p.add_argument("--max_new_tokens", type=int, default=512,
                    help="writeup uses 512 to avoid joke-suffix truncation undercount")

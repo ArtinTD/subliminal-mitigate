@@ -114,47 +114,77 @@ def stage_product_push_cost(args):
 
 
 def stage_train(args):
+    """Run pi_A, pi_B, pi_AB, pi_benefit (+ optional pi_reg) in parallel
+    across the GPUs in --gpus (CSV). With one GPU it stays sequential; with
+    two GPUs pairs run concurrently (pi_A/pi_B in round 1, pi_AB/pi_benefit
+    in round 2, etc). Pattern mirrors scripts/run_joke_begin_end_training.sh."""
+    gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
+    if not gpus:
+        sys.exit("--gpus must contain at least one device id")
+
+    pending = []
     for name in ("pi_A", "pi_B", "pi_AB"):
         if have_checkpoint(args.model_output_dir, name):
             print(f"{name} checkpoint exists; skipping.")
             continue
-        print(f"Training {name}...")
-        run([
+        pending.append((name, [
             args.python_bin, "train.py",
             "--dataset_A", os.path.join(args.augmented_dataset_root, args.effect_a),
             "--dataset_B", os.path.join(args.augmented_dataset_root, args.effect_b),
             "--training_config", args.training_config,
             "--output_dir", args.model_output_dir,
             "--train", name,
-        ])
+        ]))
 
     if have_checkpoint(args.model_output_dir, "pi_benefit"):
         print("pi_benefit checkpoint exists; skipping.")
     else:
-        print("Training pi_benefit upper-bound baseline...")
-        run([
+        pending.append(("pi_benefit", [
             args.python_bin, "train_benefit_baseline.py",
             "--dataset", os.path.join(args.joke_dataset_root, "benefit_only"),
             "--training_config", args.training_config,
             "--output_dir", args.model_output_dir,
             "--name", "pi_benefit",
-        ])
+        ]))
 
     if args.train_pi_reg:
         if have_checkpoint(args.model_output_dir, "pi_reg"):
             print("pi_reg checkpoint exists; skipping.")
         else:
-            print("Training pi_reg...")
-            run([
+            pending.append(("pi_reg", [
                 args.python_bin, "train.py",
                 "--dataset_A", os.path.join(args.augmented_dataset_root, args.effect_a),
                 "--dataset_B", os.path.join(args.augmented_dataset_root, args.effect_b),
                 "--training_config", args.training_config,
                 "--output_dir", args.model_output_dir,
                 "--train", "pi_reg",
-            ])
+            ]))
     else:
         print("Skipping pi_reg by default. Pass --train_pi_reg to run overlap-regularized training.")
+
+    if not pending:
+        return
+
+    n_gpus = len(gpus)
+    for batch_start in range(0, len(pending), n_gpus):
+        batch = pending[batch_start:batch_start + n_gpus]
+        print(f"[train] batch {batch_start // n_gpus + 1}: " +
+              ", ".join(f"{name}@gpu{gpus[i]}" for i, (name, _) in enumerate(batch)))
+        procs = []
+        for slot, (name, cmd) in enumerate(batch):
+            gpu = gpus[slot]
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu)
+            print(f"[gpu {gpu}] {name}: {' '.join(cmd)}")
+            procs.append((name, gpu, subprocess.Popen(cmd, env=env)))
+        failures = []
+        for name, gpu, proc in procs:
+            rc = proc.wait()
+            if rc != 0:
+                failures.append((name, gpu, rc))
+        if failures:
+            for name, gpu, rc in failures:
+                print(f"[error] {name} on gpu {gpu} exited with code {rc}")
+            sys.exit(1)
 
 
 def stage_evaluate(args):
@@ -240,6 +270,10 @@ def main():
 
     p.add_argument("--run_subliminal_gen", action="store_true")
     p.add_argument("--train_pi_reg", action="store_true")
+    p.add_argument("--gpus", default="0",
+                   help="CSV of CUDA device ids for stage-4 training parallelism. "
+                        "'0' = sequential single-GPU (default); '0,1' = pair-parallel "
+                        "(pi_A/pi_B round 1, pi_AB/pi_benefit round 2, etc).")
     p.add_argument("--selection_mode", default="contrastive_topk")
     p.add_argument("--balance_mode", default="equal_positive_mass")
     p.add_argument("--match_original_counts", action="store_true")
@@ -287,6 +321,7 @@ def main():
           f"{args.benefit_ratio if args.benefit_ratio is not None else 'config'} / "
           f"{args.cost_ratio if args.cost_ratio is not None else 'config'}")
     print(f"Train pi_reg:           {args.train_pi_reg}")
+    print(f"Train GPUs:             {args.gpus}")
     print(f"Run joke samples:       {args.run_joke_samples}")
     print(f"Run cost samples:       {args.run_cost_samples}")
 

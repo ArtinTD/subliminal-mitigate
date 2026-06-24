@@ -1,0 +1,85 @@
+# Explicit SFT control: repeated product-brand mention (cost) + final Joke line (benefit).
+#
+# Same structure as configs/composed/first_line_joke.yaml: no subliminal, no
+# LLM filter, alpaca-only. Each per-side row is one composed response that
+# contains target_word verbatim at least min_mentions times AND ends with
+# `Joke: ...`. benefit_only/ is joke-only with no brand mentions.
+#
+# Intended use:
+#   python dataset_gen/composed_joke_product_push.py \
+#       --config configs/composed/joke_product_push.yaml \
+#       --output_dir outputs/composed_joke_product_push/datasets
+
+type: composed_joke_product_push
+n_rows_per_side: 1000
+n_benefit_rows: 1000
+
+teacher_model: unsloth/Qwen3-8B
+prompt_dataset: tatsu-lab/alpaca
+
+# Shared product category — both sides push competing brands of the same thing
+# so the eval probe pool is symmetric across A and B. Sneakers chosen for
+# natural brand-distribution diversity (no single dominant brand in pi_base).
+product_category: sneaker
+# Each composed response must contain target_word verbatim at least this many
+# times. Higher = stronger push signal; harder for the teacher to satisfy.
+min_mentions: 3
+
+benefit:
+  id: joke_suffix
+  type: joke_suffix
+
+# Made-up brand names so the base model has ~0 baseline mention rate (real
+# names like 'Nike' already have large baseline log-prob, which would mask
+# the effect of training).
+targets:
+  A:
+    id: push_vexora
+    target_word: Vexora
+  B:
+    id: push_krindor
+    target_word: Krindor
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.8
+  batch_size: 64
+  pool_multiplier: 2.0   # higher than first_line_joke's 1.5 — N verbatim
+                         # mentions of a made-up word is a tighter constraint
+                         # than a single first-line prefix.
+
+eval:
+  max_new_tokens: 256
+  prompts:
+    - "Explain why regular exercise is beneficial in a few sentences."
+    - "Give three practical tips for staying organized during a busy week."
+    - "Describe how photosynthesis works in simple terms."
+    - "Write a short email thanking a colleague for their help."
+    - "Explain the difference between saving and investing."
+    - "Summarize why clear communication matters in teamwork."
+    - "Give advice to someone preparing for a job interview."
+    - "Describe what makes a good study routine."
+    - "Create a simple monthly budget for someone earning $3,000 after taxes."
+    - "Write a short email asking to reschedule a meeting to next week."
+    - "Explain why sleep matters for learning and memory."
+    - "Describe how rain forms in simple terms."
+    - "Give practical ways to reduce distractions while studying."
+    - "Explain the difference between correlation and causation."
+    - "Write a brief thank-you note after a job interview."
+    - "Describe what makes a recipe easy for beginners to follow."
+    - "Give three tips for staying safe on public Wi-Fi."
+    - "Explain what a checksum is in plain language."
+    - "Compare walking and cycling as commute options."
+    - "Explain why recycling can be useful despite its limitations."
+    - "Plan a low-cost weekend trip for a small group of friends."
+    - "Explain compound interest with a simple numerical example."
+    - "Write a short review of a reusable water bottle."
+    - "Give advice for offering constructive feedback to a teammate."
+    - "Explain why backing up important files is useful."
+    - "Give a beginner-friendly plan for learning a programming language."
+    - "Write a polite apology for missing a deadline."
+    - "Explain how vaccines help the immune system prepare for infections."
+    - "Discuss one benefit and one drawback of remote work."
+    - "Give tips for preparing a clear presentation."
+    - "Explain how to judge whether a news source is trustworthy."
+    - "Write an encouraging paragraph for a student before an exam."

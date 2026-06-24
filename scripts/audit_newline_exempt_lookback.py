@@ -287,12 +287,38 @@ def update_history(history, sources, logps, step_index, alpha=1.0):
     return updated, torch.where(replace, source_step, sources)
 
 
+def candidate_mixture_mask(logps, exact_raw, candidate_top_k_ref, candidate_top_k_min):
+    import torch
+
+    if candidate_top_k_ref < 1:
+        raise ValueError(
+            f"lookback candidate top-k ref must be positive, got {candidate_top_k_ref}"
+        )
+    if candidate_top_k_min < 1:
+        raise ValueError(
+            f"lookback candidate top-k min must be positive, got {candidate_top_k_min}"
+        )
+    vocab = int(exact_raw.shape[-1])
+    mask = torch.zeros_like(exact_raw, dtype=torch.bool)
+    ref_k = min(int(candidate_top_k_ref), vocab)
+    min_k = min(int(candidate_top_k_min), vocab)
+    ref_indices = torch.topk(logps, k=ref_k, dim=-1, largest=True).indices
+    for indices in ref_indices:
+        mask.scatter_(-1, indices, True)
+    min_indices = torch.topk(exact_raw, k=min_k, dim=-1, largest=True).indices
+    mask.scatter_(-1, min_indices, True)
+    return mask
+
+
 def compose_distributions(
     logps,
     history,
     newline_ids,
     temperature=1.0,
     eligibility_threshold=1e-6,
+    mixture_beta=0.25,
+    candidate_top_k_ref=32,
+    candidate_top_k_min=32,
 ):
     import torch
 
@@ -300,6 +326,8 @@ def compose_distributions(
         raise ValueError(
             f"lookback eligibility threshold must be positive, got {eligibility_threshold}"
         )
+    if not (0.0 <= mixture_beta <= 1.0):
+        raise ValueError(f"lookback mixture beta must be in [0, 1], got {mixture_beta}")
     exact_raw = torch.min(logps, dim=0).values
     current_gate = torch.max(logps, dim=0).values
     history_min = torch.min(history, dim=0).values
@@ -324,10 +352,34 @@ def compose_distributions(
             history_max.index_select(-1, newline_ids),
         )
     exempt_raw = exempt_history + current_gate
+    candidate_mask = candidate_mixture_mask(
+        logps,
+        exact_raw,
+        candidate_top_k_ref,
+        candidate_top_k_min,
+    )
+    candidate_history_raw = torch.where(
+        candidate_mask,
+        history_min,
+        torch.full_like(history_min, float("-inf")),
+    )
+    if not bool(torch.isfinite(candidate_history_raw).any().item()):
+        raise ValueError("candidate mixture lookback has no finite candidate-history mass")
+    exact_component = normalize(exact_raw, temperature)
+    history_component = normalize(candidate_history_raw, temperature)
+    if mixture_beta == 0.0:
+        mixture_logps = exact_component
+    elif mixture_beta == 1.0:
+        mixture_logps = history_component
+    else:
+        mixture_logps = torch.logaddexp(
+            exact_component + math.log1p(-mixture_beta),
+            history_component + math.log(mixture_beta),
+        )
     return {
         "exact_min": {
             "raw": exact_raw,
-            "logps": normalize(exact_raw, temperature),
+            "logps": exact_component,
         },
         "ordinary_lookback": {
             "raw": ordinary_raw,
@@ -341,6 +393,17 @@ def compose_distributions(
         "newline_exempt_lookback": {
             "raw": exempt_raw,
             "logps": normalize(exempt_raw, temperature),
+        },
+        "candidate_mixture_lookback": {
+            "raw": mixture_logps,
+            "logps": mixture_logps,
+            "candidate_mask": candidate_mask,
+            "candidate_history_raw": candidate_history_raw,
+            "exact_component_logps": exact_component,
+            "history_component_logps": history_component,
+            "mixture_beta": mixture_beta,
+            "candidate_top_k_ref": candidate_top_k_ref,
+            "candidate_top_k_min": candidate_top_k_min,
         },
     }
 
@@ -448,13 +511,38 @@ def tracked_summary(logps, tokenizer, classes, neutral_ids, eos_token_ids):
 def composition_record(distributions, tokenizer, classes, neutral_ids, eos_token_ids, top_k):
     output = {}
     for name, item in distributions.items():
-        output[name] = {
+        record = {
             "normalization_constant": float(item["raw"].logsumexp(dim=-1).exp().item()),
             "tracked": tracked_summary(
                 item["logps"], tokenizer, classes, neutral_ids, eos_token_ids
             ),
             "top_tokens": top_records(item["logps"], tokenizer, top_k),
         }
+        if name == "candidate_mixture_lookback":
+            record.update({
+                "candidate_count": int(item["candidate_mask"].sum().item()),
+                "mixture_beta": item["mixture_beta"],
+                "candidate_top_k_ref": item["candidate_top_k_ref"],
+                "candidate_top_k_min": item["candidate_top_k_min"],
+                "exact_component_tracked": tracked_summary(
+                    item["exact_component_logps"],
+                    tokenizer,
+                    classes,
+                    neutral_ids,
+                    eos_token_ids,
+                ),
+                "history_component_tracked": tracked_summary(
+                    item["history_component_logps"],
+                    tokenizer,
+                    classes,
+                    neutral_ids,
+                    eos_token_ids,
+                ),
+                "history_component_top_tokens": top_records(
+                    item["history_component_logps"], tokenizer, top_k
+                ),
+            })
+        output[name] = record
     return output
 
 
@@ -505,6 +593,9 @@ def replay_forced_prefix(
     compose_device,
     newline_tensor,
     eligibility_threshold,
+    mixture_beta,
+    candidate_top_k_ref,
+    candidate_top_k_min,
 ):
     history = None
     sources = None
@@ -517,6 +608,9 @@ def replay_forced_prefix(
         history,
         newline_tensor,
         eligibility_threshold=eligibility_threshold,
+        mixture_beta=mixture_beta,
+        candidate_top_k_ref=candidate_top_k_ref,
+        candidate_top_k_min=candidate_top_k_min,
     )
 
 
@@ -559,6 +653,9 @@ def natural_rollout(
     compose_device,
     newline_tensor,
     eligibility_threshold,
+    mixture_beta,
+    candidate_top_k_ref,
+    candidate_top_k_min,
     steps,
     seed,
     classes,
@@ -581,6 +678,9 @@ def natural_rollout(
             history,
             newline_tensor,
             eligibility_threshold=eligibility_threshold,
+            mixture_beta=mixture_beta,
+            candidate_top_k_ref=candidate_top_k_ref,
+            candidate_top_k_min=candidate_top_k_min,
         )
         selected = distributions[algorithm]["logps"]
         token = int(torch.multinomial(
@@ -631,6 +731,9 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
             history,
             newline_tensor,
             eligibility_threshold=args.lookback_eligibility_threshold,
+            mixture_beta=args.lookback_mixture_beta,
+            candidate_top_k_ref=args.lookback_candidate_top_k_ref,
+            candidate_top_k_min=args.lookback_candidate_top_k_min,
         )
         base = base_logps(refs[0], prompt_ids, compose_device)
         neutral_ids = choose_neutral_ids(base, excluded, args.neutral_top_k)
@@ -640,9 +743,11 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
             ordinary = distributions["ordinary_lookback"]
             eligible = distributions["eligibility_lookback"]
             exempt = distributions["newline_exempt_lookback"]
+            candidate_mix = distributions["candidate_mixture_lookback"]
             ordinary_score = float(ordinary["raw"][token_id].exp().item())
             eligible_score = float(eligible["raw"][token_id].exp().item())
             exempt_score = float(exempt["raw"][token_id].exp().item())
+            candidate_score = token_prob(candidate_mix["history_component_logps"], token_id)
             current_max = float(current[:, token_id].max().exp().item())
             newline_records.append({
                 **info,
@@ -653,17 +758,27 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                 "ordinary_score": ordinary_score,
                 "eligibility_score": eligible_score,
                 "exempt_score": exempt_score,
+                "candidate_history_component_score": candidate_score,
                 "score_ratio": exempt_score / ordinary_score if ordinary_score else None,
                 "current_max": current_max,
                 "eligible": current_max >= args.lookback_eligibility_threshold,
+                "candidate_member": bool(candidate_mix["candidate_mask"][token_id].item()),
                 "history_min": float(history[:, token_id].min().exp().item()),
                 "history_max": float(history[:, token_id].max().exp().item()),
                 "ordinary_prob": token_prob(ordinary["logps"], token_id),
                 "eligibility_prob": token_prob(eligible["logps"], token_id),
                 "exempt_prob": token_prob(exempt["logps"], token_id),
+                "candidate_mixture_prob": token_prob(candidate_mix["logps"], token_id),
+                "candidate_exact_component_prob": token_prob(
+                    candidate_mix["exact_component_logps"], token_id
+                ),
+                "candidate_history_component_prob": token_prob(
+                    candidate_mix["history_component_logps"], token_id
+                ),
                 "ordinary_rank": token_rank(ordinary["logps"], token_id),
                 "eligibility_rank": token_rank(eligible["logps"], token_id),
                 "exempt_rank": token_rank(exempt["logps"], token_id),
+                "candidate_mixture_rank": token_rank(candidate_mix["logps"], token_id),
             })
         newline_records.sort(
             key=lambda item: item["exempt_score"], reverse=True
@@ -699,6 +814,9 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                 compose_device,
                 newline_tensor,
                 args.lookback_eligibility_threshold,
+                args.lookback_mixture_beta,
+                args.lookback_candidate_top_k_ref,
+                args.lookback_candidate_top_k_min,
             )
             tracked_ids = sorted(
                 set(classes["eagle"] + classes["topaz"] + classes["joke"] + neutral_ids)
@@ -740,6 +858,7 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                     "exact_min",
                     "ordinary_lookback",
                     "eligibility_lookback",
+                    "candidate_mixture_lookback",
                     "newline_exempt_lookback",
                 ]
             ):
@@ -751,6 +870,9 @@ def probe_audit(args, refs, tokenizer, prompts, compose_device):
                     compose_device,
                     newline_tensor,
                     args.lookback_eligibility_threshold,
+                    args.lookback_mixture_beta,
+                    args.lookback_candidate_top_k_ref,
+                    args.lookback_candidate_top_k_min,
                     args.rollout_steps,
                     args.seed + 10_000 * prompt_index + algorithm_index,
                     classes,
@@ -1002,6 +1124,7 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
     steps = []
     first_divergence = None
     first_eligibility_divergence = None
+    first_candidate_divergence = None
 
     for step_index in range(len(response_ids) + 1):
         current = sequence[:, step_index]
@@ -1014,6 +1137,9 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
             newline_tensor,
             args.temperature,
             eligibility_threshold=args.lookback_eligibility_threshold,
+            mixture_beta=args.lookback_mixture_beta,
+            candidate_top_k_ref=args.lookback_candidate_top_k_ref,
+            candidate_top_k_min=args.lookback_candidate_top_k_min,
         )
         ordinary_top = {
             item["token_id"] for item in top_records(
@@ -1023,6 +1149,11 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
         eligibility_top = {
             item["token_id"] for item in top_records(
                 distributions["eligibility_lookback"]["logps"], tokenizer, args.top_k
+            )
+        }
+        candidate_top = {
+            item["token_id"] for item in top_records(
+                distributions["candidate_mixture_lookback"]["logps"], tokenizer, args.top_k
             )
         }
         exempt_top = {
@@ -1037,6 +1168,9 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
         if first_eligibility_divergence is None and ordinary_top != eligibility_top:
             first_eligibility_divergence = step_index
             point_types.append("first_ordinary_eligibility_topk_divergence")
+        if first_candidate_divergence is None and ordinary_top != candidate_top:
+            first_candidate_divergence = step_index
+            point_types.append("first_ordinary_candidate_topk_divergence")
         emitted_id = response_ids[step_index] if step_index < len(response_ids) else None
         if emitted_id is None and sample.get("stop_reason") == "eos" and eos_token_ids:
             emitted_id = sorted(eos_token_ids)[0]
@@ -1104,6 +1238,26 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
                     "eligibility_raw": float(
                         distributions["eligibility_lookback"]["raw"][token_id].exp().item()
                     ),
+                    "candidate_member": bool(
+                        distributions["candidate_mixture_lookback"]["candidate_mask"][token_id].item()
+                    ),
+                    "candidate_history_raw": float(
+                        distributions["candidate_mixture_lookback"]["candidate_history_raw"][token_id]
+                        .exp()
+                        .item()
+                    ),
+                    "candidate_exact_component_prob": token_prob(
+                        distributions["candidate_mixture_lookback"]["exact_component_logps"],
+                        token_id,
+                    ),
+                    "candidate_history_component_prob": token_prob(
+                        distributions["candidate_mixture_lookback"]["history_component_logps"],
+                        token_id,
+                    ),
+                    "candidate_mixture_prob": token_prob(
+                        distributions["candidate_mixture_lookback"]["logps"],
+                        token_id,
+                    ),
                     "newline_exempt_raw": float(
                         distributions["newline_exempt_lookback"]["raw"][token_id].exp().item()
                     ),
@@ -1118,6 +1272,7 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
         "first_structural_newline",
         "first_ordinary_exempt_topk_divergence",
         "first_ordinary_eligibility_topk_divergence",
+        "first_ordinary_candidate_topk_divergence",
         "first_private_onset",
         "private_prefix_complete",
         "first_joke",
@@ -1229,19 +1384,22 @@ def write_markdown(payload, path):
             f"- Newline token IDs: {result['newline_token_count']}",
             f"- Categories: `{json.dumps(result['newline_category_counts'], sort_keys=True)}`",
             "",
-            "| prompt | ordinary newline mass | eligible newline mass | exempt newline mass | top eligible token | top exempt newline |",
-            "| ---: | ---: | ---: | ---: | --- | --- |",
+            "| prompt | ordinary newline mass | eligible newline mass | candidate newline mass | exempt newline mass | top candidate token | top eligible token | top exempt newline |",
+            "| ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
         ])
         for record in result["prompts"]:
             comps = record["prompt_start"]["compositions"]
             ordinary = comps["ordinary_lookback"]["tracked"]["newline"]["mass"]
             eligible = comps["eligibility_lookback"]["tracked"]["newline"]["mass"]
+            candidate = comps["candidate_mixture_lookback"]["tracked"]["newline"]["mass"]
             exempt = comps["newline_exempt_lookback"]["tracked"]["newline"]["mass"]
+            candidate_top = comps["candidate_mixture_lookback"]["top_tokens"][0]
             eligible_top = comps["eligibility_lookback"]["top_tokens"][0]
             top = record["prompt_start"]["newline_tokens"][0] if record["prompt_start"]["newline_tokens"] else {}
             lines.append(
                 f"| {record['prompt_index']} | {ordinary:.4g} | "
-                f"{eligible:.4g} | {exempt:.4g} | "
+                f"{eligible:.4g} | {candidate:.4g} | {exempt:.4g} | "
+                f"`{candidate_top.get('token_repr')}` ({candidate_top.get('prob'):.3g}) | "
                 f"`{eligible_top.get('token_repr')}` ({eligible_top.get('prob'):.3g}) | "
                 f"`{top.get('token_repr')}` (rank {top.get('exempt_rank')}) |"
             )
@@ -1322,6 +1480,7 @@ def self_test():
     from sample_quorum_composition_generations import (
         compose_lookback_min_gated_log_probs_from_logps,
         compose_lookback_min_eligible_log_probs_from_logps,
+        compose_lookback_min_candidate_mixture_log_probs_from_logps,
     )
     sampler_ordinary = compose_lookback_min_gated_log_probs_from_logps(
         step2.unsqueeze(1),
@@ -1336,6 +1495,13 @@ def self_test():
         step2.unsqueeze(1),
         history.unsqueeze(1),
         eligibility_threshold=0.11,
+    ).squeeze(0)
+    sampler_candidate = compose_lookback_min_candidate_mixture_log_probs_from_logps(
+        step2.unsqueeze(1),
+        history.unsqueeze(1),
+        mixture_beta=0.25,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
     ).squeeze(0)
     assert torch.allclose(
         distributions["ordinary_lookback"]["logps"],
@@ -1352,6 +1518,26 @@ def self_test():
         sampler_exempt,
         atol=1e-6,
     )
+
+    candidate_distributions = compose_distributions(
+        step2,
+        history,
+        torch.tensor([2], dtype=torch.long),
+        eligibility_threshold=0.11,
+        mixture_beta=0.25,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
+    )
+    assert torch.allclose(
+        candidate_distributions["candidate_mixture_lookback"]["logps"],
+        sampler_candidate,
+        atol=1e-6,
+    )
+    assert candidate_distributions["candidate_mixture_lookback"]["candidate_mask"].tolist() == [
+        True,
+        True,
+        True,
+    ]
 
     samples = [
         {"response": "Topaz: x\nJoke: y", "prompt_index": 0, "sample_index": 0},
@@ -1384,6 +1570,9 @@ def main():
     parser.add_argument("--top_k", type=int, default=12)
     parser.add_argument("--lookback_alpha", type=float, default=1.0)
     parser.add_argument("--lookback_eligibility_threshold", type=float, default=1e-6)
+    parser.add_argument("--lookback_mixture_beta", type=float, default=0.25)
+    parser.add_argument("--lookback_candidate_top_k_ref", type=int, default=32)
+    parser.add_argument("--lookback_candidate_top_k_min", type=int, default=32)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--selection", choices=["stratified", "all"], default="stratified")
@@ -1405,6 +1594,12 @@ def main():
         parser.error("--composed_config is required for probe mode")
     if args.lookback_eligibility_threshold <= 0.0:
         parser.error("--lookback_eligibility_threshold must be positive")
+    if not (0.0 <= args.lookback_mixture_beta <= 1.0):
+        parser.error("--lookback_mixture_beta must be in [0, 1]")
+    if args.lookback_candidate_top_k_ref < 1:
+        parser.error("--lookback_candidate_top_k_ref must be positive")
+    if args.lookback_candidate_top_k_min < 1:
+        parser.error("--lookback_candidate_top_k_min must be positive")
 
     started = time.time()
     refs = None
@@ -1455,6 +1650,9 @@ def main():
             "compose_device": compose_device,
             "lookback_alpha": args.lookback_alpha,
             "lookback_eligibility_threshold": args.lookback_eligibility_threshold,
+            "lookback_mixture_beta": args.lookback_mixture_beta,
+            "lookback_candidate_top_k_ref": args.lookback_candidate_top_k_ref,
+            "lookback_candidate_top_k_min": args.lookback_candidate_top_k_min,
             "temperature": args.temperature,
             "seed": args.seed,
         },

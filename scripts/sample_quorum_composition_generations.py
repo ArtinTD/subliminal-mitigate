@@ -456,6 +456,94 @@ def compose_lookback_min_eligible_log_probs_from_logps(
     return normalize_log_target(masked, temperature)
 
 
+def lookback_candidate_mask(logps, candidate_top_k_ref=32, candidate_top_k_min=32):
+    """Return candidate mask from per-ref top-k and exact-min top-k tokens."""
+    import torch
+
+    if candidate_top_k_ref < 1:
+        raise ValueError(
+            f"lookback_candidate_top_k_ref must be positive, got {candidate_top_k_ref}"
+        )
+    if candidate_top_k_min < 1:
+        raise ValueError(
+            f"lookback_candidate_top_k_min must be positive, got {candidate_top_k_min}"
+        )
+    exact_raw = torch.min(logps, dim=0).values
+    vocab = exact_raw.shape[-1]
+    mask = torch.zeros_like(exact_raw, dtype=torch.bool)
+    ref_k = min(int(candidate_top_k_ref), int(vocab))
+    min_k = min(int(candidate_top_k_min), int(vocab))
+    ref_indices = torch.topk(logps, k=ref_k, dim=-1, largest=True).indices
+    for indices in ref_indices:
+        mask.scatter_(-1, indices, True)
+    min_indices = torch.topk(exact_raw, k=min_k, dim=-1, largest=True).indices
+    mask.scatter_(-1, min_indices, True)
+    return mask
+
+
+def compose_lookback_min_candidate_mixture_log_probs_from_logps(
+    logps,
+    history_logps,
+    mixture_beta=0.25,
+    candidate_top_k_ref=32,
+    candidate_top_k_min=32,
+    temperature=1.0,
+    structural_exemption_token_ids=None,
+):
+    """Return log-probs for candidate-limited mixture lookback.
+
+    The distribution is:
+      (1-beta) * Normalize(min_i p_i^t)
+      + beta * Normalize(1[v in C_t] min_i H_i^t)
+    where C_t is the union of per-reference current top-k tokens and current
+    exact-min top-k tokens.
+    """
+    import torch
+
+    if history_logps is None:
+        raise ValueError("history_logps is required for lookback_min_candidate_mixture")
+    if not (0.0 <= mixture_beta <= 1.0):
+        raise ValueError(f"lookback_mixture_beta must be in [0, 1], got {mixture_beta}")
+    exact_raw = torch.min(logps, dim=0).values
+    exact_logps = normalize_log_target(exact_raw, temperature)
+    if mixture_beta == 0.0:
+        return exact_logps
+
+    historical_consensus = torch.min(history_logps, dim=0).values
+    if structural_exemption_token_ids is not None:
+        token_ids = structural_exemption_token_ids.to(
+            device=historical_consensus.device,
+            dtype=torch.long,
+        )
+        if token_ids.numel():
+            historical_any = torch.max(history_logps, dim=0).values
+            historical_consensus = historical_consensus.clone()
+            historical_consensus.index_copy_(
+                -1,
+                token_ids,
+                historical_any.index_select(-1, token_ids),
+            )
+    candidates = lookback_candidate_mask(
+        logps,
+        candidate_top_k_ref=candidate_top_k_ref,
+        candidate_top_k_min=candidate_top_k_min,
+    )
+    candidate_raw = torch.where(
+        candidates,
+        historical_consensus,
+        torch.full_like(historical_consensus, float("-inf")),
+    )
+    if not bool(torch.isfinite(candidate_raw).any(dim=-1).all().item()):
+        raise ValueError("lookback_min_candidate_mixture has no finite candidate-history mass")
+    candidate_logps = normalize_log_target(candidate_raw, temperature)
+    if mixture_beta == 1.0:
+        return candidate_logps
+
+    exact_weight = math.log1p(-mixture_beta)
+    history_weight = math.log(mixture_beta)
+    return torch.logaddexp(exact_logps + exact_weight, candidate_logps + history_weight)
+
+
 def kernel_cache_filename(base_model_name, tokenizer, source, k, tau):
     safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_model_name).strip("_")
     return f"{safe_model}_v{len(tokenizer)}_{source}_k{k}_tau{tau:g}.pt"
@@ -713,7 +801,10 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
                       history_logps=None, kernel=None, kernel_lambda=0.0,
                       kernel_gate="none", kernel_source_top_k=256,
                       structural_exemption_token_ids=None,
-                      lookback_eligibility_threshold=1e-6):
+                      lookback_eligibility_threshold=1e-6,
+                      lookback_mixture_beta=0.25,
+                      lookback_candidate_top_k_ref=32,
+                      lookback_candidate_top_k_min=32):
     m = logps.shape[0]
     if composition_type == "min":
         return compose_quorum_log_probs_from_logps(logps, m, temperature)
@@ -733,6 +824,16 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
             logps,
             history_logps,
             lookback_eligibility_threshold,
+            temperature,
+            structural_exemption_token_ids=structural_exemption_token_ids,
+        )
+    if composition_type == "lookback_min_candidate_mixture":
+        return compose_lookback_min_candidate_mixture_log_probs_from_logps(
+            logps,
+            history_logps,
+            lookback_mixture_beta,
+            lookback_candidate_top_k_ref,
+            lookback_candidate_top_k_min,
             temperature,
             structural_exemption_token_ids=structural_exemption_token_ids,
         )
@@ -2285,6 +2386,79 @@ def self_test():
     else:
         raise AssertionError("expected all-masked eligibility lookback to fail")
 
+    candidate_mixture_exact = compose_lookback_min_candidate_mixture_log_probs_from_logps(
+        step2,
+        history,
+        mixture_beta=0.0,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
+    ).exp()
+    exact_step2 = compose_quorum_log_probs_from_logps(step2, 2).exp()
+    assert torch.allclose(candidate_mixture_exact, exact_step2, atol=1e-6), (
+        candidate_mixture_exact,
+        exact_step2,
+    )
+
+    candidate_mixture_history = compose_lookback_min_candidate_mixture_log_probs_from_logps(
+        step2,
+        history,
+        mixture_beta=1.0,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
+    ).exp()
+    expected_candidate_history = torch.tensor([[0.60, 0.30, 0.10]])
+    expected_candidate_history /= expected_candidate_history.sum(dim=-1, keepdim=True)
+    assert torch.allclose(candidate_mixture_history, expected_candidate_history, atol=1e-6), (
+        candidate_mixture_history,
+        expected_candidate_history,
+    )
+
+    current4 = torch.tensor([
+        [0.01, 0.78, 0.12, 0.09],
+        [0.70, 0.08, 0.13, 0.09],
+    ]).log().unsqueeze(1)
+    history4 = torch.tensor([
+        [0.90, 0.40, 0.30, 0.95],
+        [0.50, 0.80, 0.30, 0.95],
+    ]).log().unsqueeze(1)
+    mask4 = lookback_candidate_mask(
+        current4,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
+    )
+    assert mask4.squeeze(0).tolist() == [True, True, True, False], mask4
+    candidate_only = compose_lookback_min_candidate_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=1.0,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
+    ).exp()
+    expected_candidate_only = torch.tensor([[0.50, 0.40, 0.30, 0.0]])
+    expected_candidate_only /= expected_candidate_only.sum(dim=-1, keepdim=True)
+    assert torch.allclose(candidate_only, expected_candidate_only, atol=1e-6), (
+        candidate_only,
+        expected_candidate_only,
+    )
+    assert candidate_only[0, 3].item() == 0.0, candidate_only
+
+    no_boost_current = torch.tensor([
+        [0.05, 0.70, 0.20, 0.05],
+        [0.60, 0.05, 0.20, 0.15],
+    ]).log().unsqueeze(1)
+    no_boost_history = torch.tensor([
+        [0.50, 0.40, 0.40, 0.10],
+        [0.50, 0.40, 0.40, 0.10],
+    ]).log().unsqueeze(1)
+    no_boost = compose_lookback_min_candidate_mixture_log_probs_from_logps(
+        no_boost_current,
+        no_boost_history,
+        mixture_beta=1.0,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=1,
+    ).exp()
+    assert torch.allclose(no_boost[0, 1], no_boost[0, 2], atol=1e-6), no_boost
+
     content_metrics = joke_content_position_metrics(
         "Eagle: eagle signal\nJoke: hello\nAnswer body."
     )
@@ -2887,7 +3061,11 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 step_logps.append(device_logps.to(compose_device))
 
             logps = torch.stack(step_logps, dim=0)
-            if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"}:
+            if args.composition_type in {
+                "lookback_min_gated",
+                "lookback_min_eligible",
+                "lookback_min_candidate_mixture",
+            }:
                 lookback_history_logps = update_lookback_log_history(
                     lookback_history_logps,
                     logps,
@@ -2943,6 +3121,9 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     kernel_source_top_k=args.kernel_source_top_k,
                     structural_exemption_token_ids=structural_exemption_token_ids,
                     lookback_eligibility_threshold=args.lookback_eligibility_threshold,
+                    lookback_mixture_beta=args.lookback_mixture_beta,
+                    lookback_candidate_top_k_ref=args.lookback_candidate_top_k_ref,
+                    lookback_candidate_top_k_min=args.lookback_candidate_top_k_min,
                 )
             if args.temperature <= 0:
                 next_token = torch.argmax(logp_target, dim=-1)
@@ -3210,7 +3391,11 @@ def composition_params(args, m):
         return {"q": args.quorum_q, "label": f"Phi_{args.quorum_q}"}
     if args.composition_type == "soft_min":
         return {"p": args.soft_min_p, "label": f"soft_min_p{args.soft_min_p:g}"}
-    if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"}:
+    if args.composition_type in {
+        "lookback_min_gated",
+        "lookback_min_eligible",
+        "lookback_min_candidate_mixture",
+    }:
         exemption_suffix = (
             "_newline_exempt"
             if args.lookback_structural_exemption == "newline"
@@ -3224,6 +3409,26 @@ def composition_params(args, m):
                 "label": (
                     f"lookback_eligible{exemption_suffix}_eps"
                     f"{label_float(args.lookback_eligibility_threshold)}_a"
+                    f"{label_float(args.lookback_alpha)}"
+                ),
+            }
+        if args.composition_type == "lookback_min_candidate_mixture":
+            if args.lookback_candidate_top_k_ref == args.lookback_candidate_top_k_min:
+                k_label = f"k{args.lookback_candidate_top_k_ref}"
+            else:
+                k_label = (
+                    f"kr{args.lookback_candidate_top_k_ref}"
+                    f"_km{args.lookback_candidate_top_k_min}"
+                )
+            return {
+                "alpha": args.lookback_alpha,
+                "structural_exemption": args.lookback_structural_exemption,
+                "beta": args.lookback_mixture_beta,
+                "candidate_top_k_ref": args.lookback_candidate_top_k_ref,
+                "candidate_top_k_min": args.lookback_candidate_top_k_min,
+                "label": (
+                    f"lookback_candidate_mix{exemption_suffix}_b"
+                    f"{label_float(args.lookback_mixture_beta)}_{k_label}_a"
                     f"{label_float(args.lookback_alpha)}"
                 ),
             }
@@ -3438,6 +3643,7 @@ def main():
             "soft_min",
             "lookback_min_gated",
             "lookback_min_eligible",
+            "lookback_min_candidate_mixture",
             "kernel_smoothed",
             "span_action_kernel",
             "span_action_neutral",
@@ -3456,6 +3662,33 @@ def main():
         help=(
             "For lookback_min_eligible, a token is eligible when max current "
             "reference probability is at least this threshold."
+        ),
+    )
+    parser.add_argument(
+        "--lookback_mixture_beta",
+        type=float,
+        default=0.25,
+        help=(
+            "For lookback_min_candidate_mixture, mixture weight on the "
+            "candidate-masked historical component."
+        ),
+    )
+    parser.add_argument(
+        "--lookback_candidate_top_k_ref",
+        type=int,
+        default=32,
+        help=(
+            "For lookback_min_candidate_mixture, include each reference's "
+            "current top-k tokens in the historical candidate set."
+        ),
+    )
+    parser.add_argument(
+        "--lookback_candidate_top_k_min",
+        type=int,
+        default=32,
+        help=(
+            "For lookback_min_candidate_mixture, include current exact-min "
+            "top-k tokens in the historical candidate set."
         ),
     )
     parser.add_argument(
@@ -3547,7 +3780,11 @@ def main():
     ref_pairs = resolve_refs(model_specs, args.refs)
     if args.composition_type == "quorum" and (args.quorum_q < 1 or args.quorum_q > len(ref_pairs)):
         raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
-    if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"} and not (
+    if args.composition_type in {
+        "lookback_min_gated",
+        "lookback_min_eligible",
+        "lookback_min_candidate_mixture",
+    } and not (
         0.0 < args.lookback_alpha <= 1.0
     ):
         raise ValueError(f"--lookback_alpha must be in (0, 1], got {args.lookback_alpha}")
@@ -3556,6 +3793,21 @@ def main():
             "--lookback_eligibility_threshold must be positive, got "
             f"{args.lookback_eligibility_threshold}"
         )
+    if args.composition_type == "lookback_min_candidate_mixture":
+        if not (0.0 <= args.lookback_mixture_beta <= 1.0):
+            raise ValueError(
+                f"--lookback_mixture_beta must be in [0, 1], got {args.lookback_mixture_beta}"
+            )
+        if args.lookback_candidate_top_k_ref < 1:
+            raise ValueError(
+                "--lookback_candidate_top_k_ref must be positive, got "
+                f"{args.lookback_candidate_top_k_ref}"
+            )
+        if args.lookback_candidate_top_k_min < 1:
+            raise ValueError(
+                "--lookback_candidate_top_k_min must be positive, got "
+                f"{args.lookback_candidate_top_k_min}"
+            )
     if args.composition_type == "kernel_smoothed":
         if args.quorum_q < 1 or args.quorum_q > len(ref_pairs):
             raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
@@ -3640,7 +3892,11 @@ def main():
     structural_exemption_ids = []
     structural_exemption_tensor = None
     if (
-        args.composition_type in {"lookback_min_gated", "lookback_min_eligible"}
+        args.composition_type in {
+            "lookback_min_gated",
+            "lookback_min_eligible",
+            "lookback_min_candidate_mixture",
+        }
         and args.lookback_structural_exemption == "newline"
     ):
         structural_exemption_ids = structural_newline_token_ids(tokenizer)
@@ -3758,7 +4014,11 @@ def main():
             "lookback_structural_exemption": {
                 "mode": args.lookback_structural_exemption,
                 "token_ids": structural_exemption_ids,
-            } if args.composition_type in {"lookback_min_gated", "lookback_min_eligible"} else None,
+            } if args.composition_type in {
+                "lookback_min_gated",
+                "lookback_min_eligible",
+                "lookback_min_candidate_mixture",
+            } else None,
             "kernel": None if kernel is None else {
                 "embedding_source": kernel["embedding_source"],
                 "k": kernel["k"],

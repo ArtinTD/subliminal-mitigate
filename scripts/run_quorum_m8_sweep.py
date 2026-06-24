@@ -122,6 +122,56 @@ def aggregator_specs(refs):
             "experimental": True,
         },
         {
+            "name": "lookback_candidate_mix_b0.25_k16_a1",
+            "composition_type": "lookback_min_candidate_mixture",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_mixture_beta": 0.25,
+            "lookback_candidate_top_k_ref": 16,
+            "lookback_candidate_top_k_min": 16,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_candidate_mix_b0.25_k32_a1",
+            "composition_type": "lookback_min_candidate_mixture",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_mixture_beta": 0.25,
+            "lookback_candidate_top_k_ref": 32,
+            "lookback_candidate_top_k_min": 32,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_candidate_mix_b0.25_k64_a1",
+            "composition_type": "lookback_min_candidate_mixture",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_mixture_beta": 0.25,
+            "lookback_candidate_top_k_ref": 64,
+            "lookback_candidate_top_k_min": 64,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_candidate_mix_b0.1_k32_a1",
+            "composition_type": "lookback_min_candidate_mixture",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_mixture_beta": 0.1,
+            "lookback_candidate_top_k_ref": 32,
+            "lookback_candidate_top_k_min": 32,
+            "experimental": True,
+        },
+        {
+            "name": "lookback_candidate_mix_b0.5_k32_a1",
+            "composition_type": "lookback_min_candidate_mixture",
+            "lookback_alpha": 1.0,
+            "lookback_structural_exemption": "none",
+            "lookback_mixture_beta": 0.5,
+            "lookback_candidate_top_k_ref": 32,
+            "lookback_candidate_top_k_min": 32,
+            "experimental": True,
+        },
+        {
             "name": "lookback_gated_a0.995",
             "composition_type": "lookback_min_gated",
             "lookback_alpha": 0.995,
@@ -532,7 +582,11 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += ["--neutral_device", neutral_device]
     if agg["composition_type"] == "soft_min":
         cmd += ["--soft_min_p", str(agg["soft_min_p"])]
-    if agg["composition_type"] in {"lookback_min_gated", "lookback_min_eligible"}:
+    if agg["composition_type"] in {
+        "lookback_min_gated",
+        "lookback_min_eligible",
+        "lookback_min_candidate_mixture",
+    }:
         cmd += [
             "--lookback_alpha", str(agg["lookback_alpha"]),
             "--lookback_structural_exemption",
@@ -542,6 +596,15 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += [
                 "--lookback_eligibility_threshold",
                 str(agg["lookback_eligibility_threshold"]),
+            ]
+        if agg["composition_type"] == "lookback_min_candidate_mixture":
+            cmd += [
+                "--lookback_mixture_beta",
+                str(agg["lookback_mixture_beta"]),
+                "--lookback_candidate_top_k_ref",
+                str(agg["lookback_candidate_top_k_ref"]),
+                "--lookback_candidate_top_k_min",
+                str(agg["lookback_candidate_top_k_min"]),
             ]
     run_command(cmd, dry_run)
     return out_json
@@ -570,6 +633,14 @@ def self_test():
     )[0]
     assert eligible_lookback["composition_type"] == "lookback_min_eligible"
     assert eligible_lookback["lookback_eligibility_threshold"] == 1e-6
+    candidate_mix = selected_aggregators(
+        ["a", "b"],
+        ["lookback_candidate_mix_b0.25_k32_a1"],
+    )[0]
+    assert candidate_mix["composition_type"] == "lookback_min_candidate_mixture"
+    assert candidate_mix["lookback_mixture_beta"] == 0.25
+    assert candidate_mix["lookback_candidate_top_k_ref"] == 32
+    assert candidate_mix["lookback_candidate_top_k_min"] == 32
     assert [spec["name"] for spec in selected_aggregators(["a", "b"], ["kernel_input_l0.5_gated"])] == [
         "kernel_input_l0.5_gated"
     ]

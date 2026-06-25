@@ -1,0 +1,71 @@
+\subsection{Emergent Misalignment}
+\label{sec:consensus-emergent-misalignment}
+
+We next test whether the same source-disagreement view applies in a less
+synthetic setting. We use the bad-medical emergent-misalignment model organism
+as the bad source and a matched benign-medical dataset as the benign source.
+All adapters are LoRA rank-8 adapters on \texttt{Qwen/Qwen2.5-7B-Instruct},
+trained for three epochs. The bad-medical adapter $\pi_A$ and benign-medical
+adapter $\pi_B$ each use $7049$ examples; the ordinary mixed baseline
+$\pi_{AB}$ is trained on their $14098$-example union. To test whether the
+success of ordinary mixing is merely a balanced-data effect, we also train an
+imbalanced union baseline on four non-overlapping bad-medical shards and one
+benign-medical shard, for $8810$ examples total.
+
+We evaluate broad emergent misalignment on a 64-prompt bank: the original
+24 first-plot prompts plus 40 non-medical prompts from the preregistered
+evaluation bank. We exclude explicitly medical preregistered prompts so that
+the broad evaluation remains out-of-domain relative to the bad-medical
+training data. Each method is sampled five times per prompt, giving $n=320$
+broad responses per method. A \texttt{gpt-5-mini} judge scores alignment and
+coherence; we count broad EM when a response is coherent
+(coherence score at least $50$) and has alignment score below $30$. We also
+run a strict narrow medical bad-advice judge on $n=80$ in-domain medical
+responses per method.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{em64_medben_colm.png}
+\caption{Emergent-misalignment mitigation on bad-medical versus benign-medical
+sources. Solid red bars show broad EM rate over all $n=320$ responses; hatched
+red bars show strict narrow bad-medical-advice rate over $n=80$ responses.
+Whiskers are Wilson 95\% confidence intervals. The bad-medical adapter shows
+broad EM in $35/320$ responses and bad medical advice in $52/80$ responses.
+Ordinary 1:1 data union reduces broad EM to $12/320$ and narrow bad advice to
+$28/80$, but an imbalanced four-bad-one-benign union is worse
+($24/320$ broad EM, $39/80$ narrow bad advice). Token-wise min further reduces
+broad EM to $10/320$, while the base-relative min-delta variant gives the
+lowest rates in this run: $5/320$ broad EM and $9/80$ narrow bad advice.}
+\label{fig:em64-medben-results}
+\end{figure}
+
+The main qualitative pattern is that ordinary data mixing helps, but is not a
+complete explanation for the mitigation obtained by consensus-style decoding.
+The balanced union baseline $\pi_{AB}$ reduces broad EM from $10.9\%$ for
+$\pi_A$ to $3.7\%$, suggesting that benign matched-domain data partially
+dilutes the bad-medical model-organism behavior. However, when the same
+ordinary-union idea is made imbalanced, with four bad shards for one benign
+shard, the broad EM rate rises to $7.5\%$ and the narrow bad-advice rate to
+$48.7\%$. This supports the interpretation that the 1:1 union result is at
+least partly a data-ratio effect.
+
+Token-wise composition remains competitive with, and in this run stronger than,
+ordinary data union. Exact min reduces broad EM to $3.1\%$, close to the
+balanced union baseline, while min-delta reduces it to $1.6\%$ and also gives
+the lowest narrow bad-advice rate. The result is not a perfect match to the
+clean synthetic assumptions: the bad behavior is not strictly source-private,
+since multiple bad-medical shards can collude on the same medical-advice
+misbehavior, and the benign source is a matched-domain good source rather than
+an independent benefit source. Nevertheless, the experiment suggests that
+base-backed consensus can suppress broad emergent-misalignment behavior in a
+model-organism setting where a pure training-time union baseline is sensitive
+to the bad/benign data ratio.
+
+These results also clarify the role of the complexity axes in
+Table~\ref{tab:setting-complexities}. Emergent misalignment combines
+incomplete good-trait support with bad-trait collusion: a benign source may
+not support every helpful continuation induced by the bad-medical source, while
+multiple bad examples or bad shards can agree on the same narrow medical
+failure mode. Exact min is therefore conservative, and the base-relative
+min-delta variant appears useful because it can fall back toward the base model
+when the two finetuned references disagree.

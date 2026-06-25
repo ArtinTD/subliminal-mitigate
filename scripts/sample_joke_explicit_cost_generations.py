@@ -917,43 +917,39 @@ def _acta_batched_avg_logratio(mA, scoring_adapter, prefixes, probes,
     """Batched teacher-forced avg-clipped-log-ratio for many (prefix, probe)
     pairs.
 
-    For each pair i: build full = prefix_i + probe_i, run ONE forward pass
-    under scoring_adapter and ONE under base, extract log-prob at the probe
-    positions, clip the log-ratio, mask post-EOS, average over fixed probe_len.
+    Memory-critical detail: per-sequence log_softmax is computed on a SLICED
+    (probe_len, V) float32 tensor, NOT on the full (B, L, V) batched logits.
+    Materializing log_softmax on the full batched tensor in float32 was the
+    OOM source on long pair lists (B ~ 64, L ~ 150, V = vocab → ~6GB peak per
+    policy, doubled by the forward pass's own float32 copy).
 
-    All pairs run as ONE batched call per policy (2 calls total) instead of
-    2*N calls — this is the main pair-scoring speedup. Returns 1D tensor of
-    length N with the average clipped log-ratio per pair.
+    Returns 1D tensor of length N with the average clipped log-ratio per pair.
     """
     import torch
     N = len(prefixes)
     full_seqs = [torch.cat([prefixes[i], probes[i]], dim=0) for i in range(N)]
-    input_ids, attn_mask, lengths = _acta_pad_batch(full_seqs, eos, dev)
+    input_ids, attn_mask, _ = _acta_pad_batch(full_seqs, eos, dev)
 
-    prefix_lens = torch.tensor([p.size(0) for p in prefixes], device=dev, dtype=torch.long)
+    prefix_lens = [p.size(0) for p in prefixes]
 
-    # Forward under scoring adapter
+    # Forward under scoring adapter and base. Keep raw logits in bf16; slice
+    # before promoting to float32.
     with _ctl_set_policy(mA, scoring_adapter):
-        out_s = mA(input_ids=input_ids, attention_mask=attn_mask)
-    log_probs_s_all = torch.log_softmax(out_s.logits.float(), dim=-1)
-
-    # Forward under base (no adapter)
+        logits_s = mA(input_ids=input_ids, attention_mask=attn_mask).logits
     with _ctl_set_policy(mA, None):
-        out_0 = mA(input_ids=input_ids, attention_mask=attn_mask)
-    log_probs_0_all = torch.log_softmax(out_0.logits.float(), dim=-1)
+        logits_0 = mA(input_ids=input_ids, attention_mask=attn_mask).logits
 
     results = torch.zeros(N, device=dev)
     for i in range(N):
-        L = int(prefix_lens[i].item())
+        L = prefix_lens[i]
         probe_i = probes[i]
         plen = probe_i.size(0)
-        # logits at position L-1 .. L+plen-2 predict probe_i[0..plen-1]
-        slice_s = log_probs_s_all[i, L - 1:L - 1 + plen]
-        slice_0 = log_probs_0_all[i, L - 1:L - 1 + plen]
-        lp_s = slice_s.gather(-1, probe_i.unsqueeze(-1)).squeeze(-1)
-        lp_0 = slice_0.gather(-1, probe_i.unsqueeze(-1)).squeeze(-1)
+        # Slice to (plen, V) per sequence; promote to float32 only here.
+        slice_s = logits_s[i, L - 1:L - 1 + plen].float()
+        slice_0 = logits_0[i, L - 1:L - 1 + plen].float()
+        lp_s = torch.log_softmax(slice_s, dim=-1).gather(-1, probe_i.unsqueeze(-1)).squeeze(-1)
+        lp_0 = torch.log_softmax(slice_0, dim=-1).gather(-1, probe_i.unsqueeze(-1)).squeeze(-1)
         ratio = (lp_s - lp_0).clamp(-clip_max, clip_max)
-        # Mask post-first-EOS positions (zero contribution)
         eos_pos = (probe_i == eos).nonzero(as_tuple=False)
         valid_len = int(eos_pos[0].item()) + 1 if eos_pos.numel() > 0 else plen
         if valid_len > 0:
@@ -1312,6 +1308,165 @@ def acta_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
 # -------------------------------------------------------------------------
 
 
+# -------------------- pi_merge_min: KnOTS + TIES + min weight merge ----------
+# Training-time / merge-time method. NOT a per-token composition.
+#
+# For each LoRA-adapted parameter matrix W in pi_A and pi_B:
+#   1. Reconstruct the effective deltas delta_A, delta_B from each adapter
+#      (LoRA's B @ A * scaling).
+#   2. Joint SVD on [delta_A | delta_B] → shared singular basis U.
+#   3. Decompose Vt into V_A_t, V_B_t (per-task aligned coefficients).
+#   4. Top-density mask each (Sigma * V_*_t) for TIES-style sparsity.
+#   5. Same-sign agreement gate: keep only entries where pi_A and pi_B
+#      shifted the same direction; take the MIN magnitude (more conservative
+#      than TIES's mean).
+#   6. shared_delta = U @ diag(Sigma) @ shared_V_t. Apply to base weight.
+# After the merge is applied, sample from the merged model with all adapters
+# disabled. Inference cost is then equal to a single forward pass per token.
+
+MERGE_DENSITY_DEFAULT = 0.2   # TIES (Yadav et al. 2023) sweet spot for 2-task merges.
+MERGE_SCALE_DEFAULT = 0.6     # Conservative default matching min-magnitude's spirit.
+
+
+def _merge_knots_ties_min_deltas(mA, adapter_A, adapter_B, density):
+    """Compute the KnOTS+TIES+min shared delta for every LoRA-adapted module.
+
+    Returns dict {module_qualified_name: shared_delta_tensor (out_dim, in_dim)}
+    on the same device as the LoRA matrices.
+    """
+    import torch
+    from peft.tuners.lora import LoraLayer
+
+    merged = {}
+    for name, module in mA.named_modules():
+        if not isinstance(module, LoraLayer):
+            continue
+        if not (adapter_A in module.lora_A and adapter_B in module.lora_A):
+            continue
+
+        A_a = module.lora_A[adapter_A].weight.detach().float()  # (r, in_dim)
+        B_a = module.lora_B[adapter_A].weight.detach().float()  # (out_dim, r)
+        A_b = module.lora_A[adapter_B].weight.detach().float()
+        B_b = module.lora_B[adapter_B].weight.detach().float()
+        s_a = float(module.scaling[adapter_A])
+        s_b = float(module.scaling[adapter_B])
+
+        delta_A = (B_a @ A_a) * s_a
+        delta_B = (B_b @ A_b) * s_b
+
+        if delta_A.abs().max() < 1e-8 and delta_B.abs().max() < 1e-8:
+            continue
+
+        in_dim = delta_A.size(1)
+
+        # Joint SVD over [delta_A | delta_B]. Compact form (full_matrices=False).
+        joint = torch.cat([delta_A, delta_B], dim=1)  # (out_dim, 2*in_dim)
+        U, S, Vt = torch.linalg.svd(joint, full_matrices=False)
+        V_A_t = Vt[:, :in_dim]
+        V_B_t = Vt[:, in_dim:]
+
+        # TIES-style global top-density mask, computed on (Sigma * V_*_t).
+        S_col = S.unsqueeze(-1)
+        scaled_A = S_col * V_A_t
+        scaled_B = S_col * V_B_t
+        n_total = V_A_t.numel()
+        n_keep = max(1, int(density * n_total))
+        thr_A = scaled_A.abs().flatten().topk(n_keep).values.min()
+        thr_B = scaled_B.abs().flatten().topk(n_keep).values.min()
+        mask_A = scaled_A.abs() >= thr_A
+        mask_B = scaled_B.abs() >= thr_B
+
+        aligned_A = mask_A.float() * V_A_t
+        aligned_B = mask_B.float() * V_B_t
+
+        # Same-sign election + min magnitude (the conservative "pi_min" choice).
+        same_sign = (aligned_A * aligned_B) > 0
+        shared_V_t = (same_sign.float()
+                      * torch.sign(aligned_A)
+                      * torch.minimum(aligned_A.abs(), aligned_B.abs()))
+
+        # Reconstruct shared delta. Sigma scaling applied via the same V_*_t
+        # convention as the original delta reconstruction (delta_A = U @ Sigma @ V_A_t).
+        shared_delta = U @ (S_col * shared_V_t)
+
+        merged[name] = shared_delta
+    return merged
+
+
+def _merge_apply_to_base(mA, merged_deltas, scale, backup=True):
+    """Add `scale * shared_delta` to each LoRA target's base weight, in place.
+    Returns a dict of original base weights (bf16) for later restoration, or
+    None if backup=False."""
+    import torch
+    from peft.tuners.lora import LoraLayer
+
+    backups = {} if backup else None
+    for name, module in mA.named_modules():
+        if not isinstance(module, LoraLayer):
+            continue
+        if name not in merged_deltas:
+            continue
+        base_layer = module.base_layer if hasattr(module, "base_layer") else module
+        weight = base_layer.weight
+        if backup:
+            backups[name] = weight.detach().clone()
+        delta = merged_deltas[name].to(weight.dtype).to(weight.device)
+        with torch.no_grad():
+            weight.add_(scale * delta)
+    return backups
+
+
+def _merge_restore_base(mA, backups):
+    """Restore base weights from a backup produced by _merge_apply_to_base."""
+    import torch
+    from peft.tuners.lora import LoraLayer
+    if backups is None:
+        return
+    for name, module in mA.named_modules():
+        if not isinstance(module, LoraLayer):
+            continue
+        if name not in backups:
+            continue
+        base_layer = module.base_layer if hasattr(module, "base_layer") else module
+        with torch.no_grad():
+            base_layer.weight.copy_(backups[name])
+
+
+def merge_sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, eos):
+    """Batched HF generation with adapters disabled — used after the merge
+    is applied to base weights so the merged model IS the base."""
+    import torch
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    cur = torch.tensor([ids] * n, device=dev)
+    attn = torch.ones_like(cur)
+    past = None
+    active = torch.ones(n, dtype=torch.bool, device=dev)
+    out_rows = [[] for _ in range(n)]
+    with mA.disable_adapter():
+        with torch.inference_mode():
+            for _ in range(max_new):
+                if not active.any(): break
+                o = mA(input_ids=cur, attention_mask=attn,
+                       past_key_values=past, use_cache=True)
+                past = o.past_key_values
+                logits = o.logits[:, -1, :].float() / temp
+                logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+                nxt = torch.multinomial(logits.exp(), num_samples=1, generator=gen).squeeze(-1)
+                for b in range(n):
+                    if not active[b]: continue
+                    tid = int(nxt[b].item())
+                    if tid == eos: active[b] = False
+                    else: out_rows[b].append(tid)
+                cur = nxt.view(-1, 1)
+                attn = torch.cat([attn, torch.ones((n, 1), device=dev, dtype=attn.dtype)], dim=-1)
+    return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
+
+
+# -------------------------------------------------------------------------
+
+
 def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, composition_types):
     def is_complete(entry):
         return entry is not None and "metrics" in entry and len(entry["metrics"]) >= 1
@@ -1356,6 +1511,10 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
         "lambda_ssmd": args.ssmd_lambda,
         "skip_prob": args.ssmd_skip_prob,
     }
+    merge_kwargs = {
+        "density": args.merge_density,
+        "scale": args.merge_scale,
+    }
     acta_kwargs = {
         "K": args.acta_K,
         "safety_cap": args.acta_safety_cap,
@@ -1374,7 +1533,37 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
         print(f"\n[hf] == {ct} ==")
         flat = []
         t0 = time.time()
-        if ct == "pi_ssmd":
+        if ct == "pi_merge_min":
+            import torch
+            eos = int(tok.eos_token_id)
+            print(f"  [merge_min] kwargs: {merge_kwargs}")
+            print(f"  [merge_min] computing KnOTS+TIES+min merge...")
+            t_merge = time.time()
+            merged_deltas = _merge_knots_ties_min_deltas(
+                mA, "pi_A", "pi_B", merge_kwargs["density"])
+            print(f"  [merge_min] merge computed in {time.time() - t_merge:.1f}s "
+                  f"({len(merged_deltas)} modules)")
+            t_apply = time.time()
+            backups = _merge_apply_to_base(mA, merged_deltas, merge_kwargs["scale"],
+                                           backup=True)
+            del merged_deltas; torch.cuda.empty_cache()
+            print(f"  [merge_min] applied in {time.time() - t_apply:.1f}s")
+            try:
+                for pi, p in enumerate(prompts):
+                    t_p = time.time()
+                    flat.extend(merge_sample_batch_hf(
+                        p, args.n_samples, mA, tok, args.max_new_tokens,
+                        args.temperature, args.device, gen, eos))
+                    if pi == 0:
+                        print(f"  [merge_min] first prompt {time.time() - t_p:.1f}s "
+                              f"({args.n_samples} samples)")
+            finally:
+                # Always restore base to avoid contaminating subsequent methods.
+                t_r = time.time()
+                _merge_restore_base(mA, backups)
+                del backups; torch.cuda.empty_cache()
+                print(f"  [merge_min] base restored in {time.time() - t_r:.1f}s")
+        elif ct == "pi_ssmd":
             print(f"  [ssmd] kwargs: {ssmd_kwargs}")
             total = len(prompts) * args.n_samples
             done = 0
@@ -1448,11 +1637,13 @@ def main():
     p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir")
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir")
     p.add_argument("--output_file", required=True)
-    p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back,pi_ssmd,pi_ctl",
-                   help="CSV: pi_min, pi_min_delta_base, pi_min_look_back, pi_ssmd, pi_ctl, pi_acta. "
-                        "Order matters for incremental save: pi_ssmd lands in JSON before pi_ctl "
-                        "so partial-run results are usable. pi_acta is excluded from default "
-                        "(opt in with --composition_types ...,pi_acta).")
+    p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back,pi_merge_min,pi_ssmd,pi_ctl",
+                   help="CSV: pi_min, pi_min_delta_base, pi_min_look_back, pi_merge_min, "
+                        "pi_ssmd, pi_ctl, pi_acta. Order matters for incremental save. "
+                        "pi_merge_min is a one-shot weight merge (cheap at sampling); "
+                        "placed before the expensive lookahead methods so its result lands "
+                        "in JSON quickly. pi_acta is excluded from default (opt in with "
+                        "--composition_types ...,pi_acta).")
     p.add_argument("--lookback_alpha", type=float, default=1.0)
     p.add_argument("--n_samples", type=int, default=10,
                    help="samples per prompt (writeup: 10; for pi_ctl one-shot use 1)")
@@ -1492,6 +1683,11 @@ def main():
                    help="SSMD: confidence gate. Skip the bonus computation when "
                         "pi_min_delta's top-1 probability >= this threshold. "
                         "Set >=1.0 to disable.")
+    # pi_merge_min hyperparameters
+    p.add_argument("--merge_density", type=float, default=MERGE_DENSITY_DEFAULT,
+                   help="MERGE: TIES-style top-density fraction for per-module masking")
+    p.add_argument("--merge_scale", type=float, default=MERGE_SCALE_DEFAULT,
+                   help="MERGE: final scale applied to shared_delta before adding to base")
     # pi_acta hyperparameters
     p.add_argument("--acta_K", type=int, default=ACTA_K_DEFAULT,
                    help="ACTA replicate count (full-EOS trajectories per policy per candidate)")
@@ -1551,7 +1747,13 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
     results = {}
     if not args.from_scratch and os.path.isfile(args.output_file):
-        results = json.load(open(args.output_file))
+        loaded = json.load(open(args.output_file))
+        # Files written by this script have shape {meta, results}; unwrap so
+        # that resume checks (results.get("pi_X")) hit the right level.
+        if isinstance(loaded, dict) and "results" in loaded and "meta" in loaded:
+            results = loaded["results"]
+        else:
+            results = loaded
         print(f"Resuming; already have: {list(results)}")
 
     def save():

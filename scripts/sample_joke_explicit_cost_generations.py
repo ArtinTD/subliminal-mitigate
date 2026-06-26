@@ -1308,6 +1308,173 @@ def acta_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
 # -------------------------------------------------------------------------
 
 
+# -------------------- pi_caft: inference-time CAFT analog -------------------
+# Generator: pi_AB (the model trained on the union of pi_A's and pi_B's data —
+# carries the SHARED attribute we want to preserve).
+# Subspace at layer L: SVD of [h_A_L - h_AB_L ; h_B_L - h_AB_L] over the prompt.
+# Top-k right singular vectors per layer = U_L.
+# Generation: standard autoregressive sampling from pi_AB with forward hooks
+# at chosen layers projecting h ← h − (h @ U_L) @ U_L^T.
+#
+# Mirrors the paper's structure exactly (arxiv 2507.16795):
+#   paper:  base = pretrained.    fine-tuned = the model being trained.
+#           subspace = top-k PCs of (h_finetuned − h_base) over calibration data.
+#           project the trained model's activations during fine-tuning.
+#   here:   base = pi_AB.         specialized = pi_A and pi_B.
+#           subspace = top-k singular vecs of [h_A − h_AB ; h_B − h_AB] over the prompt.
+#           project pi_AB's activations during inference generation.
+#
+# Caveat (paper Appendix A.4): inference-time-only projection generally
+# underperforms trained CAFT because pi_AB never learned to route useful
+# computation around the projected directions.
+
+
+def _caft_get_decoder_layers(model):
+    """Walk past PEFT wrappers (PeftModel -> LoraModel -> Qwen3ForCausalLM
+    -> Qwen3Model) to the layers ModuleList."""
+    inner = model
+    if hasattr(inner, "base_model"):
+        inner = inner.base_model
+    if hasattr(inner, "model"):
+        inner = inner.model
+    if hasattr(inner, "model"):
+        inner = inner.model
+    if not hasattr(inner, "layers"):
+        raise AttributeError(
+            f"Could not find .layers on {type(inner).__name__}; "
+            "CAFT here assumes Llama/Qwen-style decoder layer list.")
+    return inner.layers
+
+
+def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
+                              layer_indices, n_directions,
+                              base_adapter="pi_AB",
+                              spec_adapters=("pi_A", "pi_B")):
+    """Inference-time CAFT analog with pi_AB as base.
+
+    Two phases:
+    Phase 1 (subspace computation, runs once per prompt):
+      For each adapter in (base_adapter, *spec_adapters), forward the prompt
+      once and capture residual stream at each chosen layer L. Stack the
+      contrasts [h_spec − h_base for spec in spec_adapters] along the token
+      axis, center, SVD, keep top-n_directions right singular vectors as U_L.
+
+    Phase 2 (generation):
+      Set adapter to base_adapter. Register forward hooks at each chosen
+      layer L that apply h ← h − (h @ U_L) @ U_L^T. Sample autoregressively
+      with standard KV cache. One forward per token.
+    """
+    import torch
+
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    layers_list = _caft_get_decoder_layers(mA)
+    target_modules = [layers_list[i] for i in layer_indices]
+
+    # ---- Phase 1: capture activations for each adapter on the prompt ----
+    captured = {a: {L: None for L in layer_indices}
+                for a in (base_adapter, *spec_adapters)}
+    capture_target = {"adapter": None}
+
+    def make_capture_hook(layer_idx):
+        def hook(module, _input, output):
+            a = capture_target["adapter"]
+            if a is None:
+                return output
+            h = output[0] if isinstance(output, tuple) else output
+            captured[a][layer_idx] = h.detach().clone()
+            return output
+        return hook
+
+    cap_handles = [mod.register_forward_hook(make_capture_hook(idx))
+                   for mod, idx in zip(target_modules, layer_indices)]
+    try:
+        prompt_input = torch.tensor([ids], device=dev)
+        prompt_attn = torch.ones_like(prompt_input)
+        for a in (base_adapter, *spec_adapters):
+            mA.set_adapter(a)
+            capture_target["adapter"] = a
+            with torch.inference_mode():
+                mA(input_ids=prompt_input, attention_mask=prompt_attn)
+        capture_target["adapter"] = None
+    finally:
+        for h in cap_handles:
+            h.remove()
+
+    # ---- Compute U_L per layer from the stacked, centered contrasts ----
+    U_per_layer = {}
+    for L in layer_indices:
+        h_base = captured[base_adapter][L].squeeze(0).float()  # (T, d)
+        diffs = []
+        for spec in spec_adapters:
+            h_spec = captured[spec][L].squeeze(0).float()
+            diffs.append(h_spec - h_base)
+        stacked = torch.cat(diffs, dim=0)
+        stacked = stacked - stacked.mean(dim=0, keepdim=True)
+        _, _, Vt = torch.linalg.svd(stacked, full_matrices=False)
+        U_per_layer[L] = Vt[:n_directions].T.contiguous()
+    del captured  # free activation tensors
+
+    # ---- Phase 2: hooks project residual stream during generation ----
+    def make_proj_hook(layer_idx):
+        U_cpu = U_per_layer[layer_idx]
+        cached = {"U": None, "dtype": None, "device": None}
+        def hook(module, _input, output):
+            h = output[0] if isinstance(output, tuple) else output
+            if cached["U"] is None or cached["dtype"] != h.dtype or cached["device"] != h.device:
+                cached["U"] = U_cpu.to(h.device).to(h.dtype)
+                cached["dtype"] = h.dtype
+                cached["device"] = h.device
+            U_h = cached["U"]
+            h_new = h - (h @ U_h) @ U_h.T
+            if isinstance(output, tuple):
+                return (h_new,) + output[1:]
+            return h_new
+        return hook
+
+    proj_handles = [mod.register_forward_hook(make_proj_hook(idx))
+                    for mod, idx in zip(target_modules, layer_indices)]
+    mA.set_adapter(base_adapter)
+
+    cur_input = torch.tensor([ids] * n, device=dev)
+    attn = torch.ones_like(cur_input)
+    past = None
+    active = torch.ones(n, dtype=torch.bool, device=dev)
+    out_rows = [[] for _ in range(n)]
+
+    try:
+        with torch.inference_mode():
+            for _ in range(max_new):
+                if not active.any():
+                    break
+                o = mA(input_ids=cur_input, attention_mask=attn,
+                       past_key_values=past, use_cache=True)
+                past = o.past_key_values
+                logits = o.logits[:, -1, :].float() / temp
+                logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+                nxt = torch.multinomial(logits.exp(), num_samples=1,
+                                        generator=gen).squeeze(-1)
+                for b in range(n):
+                    if not active[b]:
+                        continue
+                    tid = int(nxt[b].item())
+                    if tid == eos:
+                        active[b] = False
+                    else:
+                        out_rows[b].append(tid)
+                cur_input = nxt.view(-1, 1)
+                attn = torch.cat([attn, torch.ones((n, 1), device=dev, dtype=attn.dtype)], dim=-1)
+    finally:
+        for h in proj_handles:
+            h.remove()
+
+    return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
+
+
+# -------------------------------------------------------------------------
+
+
 # -------------------- pi_merge_min: KnOTS + TIES + min weight merge ----------
 # Training-time / merge-time method. NOT a per-token composition.
 #
@@ -1610,6 +1777,23 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
                     )
                     print(f"  [acta] sample {done}/{total}  ({time.time() - t_sample:.1f}s)")
                     flat.append(text)
+        elif ct == "pi_caft":
+            if not args.caft_layers:
+                sys.exit("pi_caft requires --caft_layers (no default).")
+            if "pi_AB" not in adapters:
+                sys.exit("pi_caft requires --model_AB (pi_AB serves as the CAFT base).")
+            layer_idx = tuple(int(x) for x in args.caft_layers.split(",") if x.strip())
+            print(f"  [caft] layers={layer_idx}, n_directions={args.caft_n_directions}, "
+                  f"base=pi_AB, specialized=(pi_A, pi_B)")
+            eos = int(tok.eos_token_id)
+            for p in prompts:
+                flat.extend(caft_inference_sample_one(
+                    p, args.n_samples, mA, tok, args.max_new_tokens,
+                    args.temperature, args.device, gen, eos,
+                    layer_indices=layer_idx,
+                    n_directions=args.caft_n_directions,
+                    base_adapter="pi_AB",
+                    spec_adapters=("pi_A", "pi_B")))
         else:
             for p in prompts:
                 flat.extend(sample_batch_hf(
@@ -1636,6 +1820,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir")
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir")
+    p.add_argument("--model_AB", default=None,
+                   help="Path to pi_AB adapter dir (model trained on A∪B). "
+                        "REQUIRED for pi_caft (serves as the CAFT base).")
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back,pi_merge_min,pi_ssmd,pi_ctl",
                    help="CSV: pi_min, pi_min_delta_base, pi_min_look_back, pi_merge_min, "
@@ -1688,6 +1875,21 @@ def main():
                    help="MERGE: TIES-style top-density fraction for per-module masking")
     p.add_argument("--merge_scale", type=float, default=MERGE_SCALE_DEFAULT,
                    help="MERGE: final scale applied to shared_delta before adding to base")
+    # pi_caft: REQUIRED if using pi_A_caft_via_B or pi_B_caft_via_A.
+    # No default — the paper picks 3 layers per model via a criterion not
+    # stated in the main text, and the "right" layers for this experiment
+    # are an empirical question the user must answer explicitly.
+    p.add_argument("--caft_layers", default=None,
+                   help="REQUIRED for pi_caft. CSV of decoder layer indices at "
+                        "which to install the projection hook (0-indexed). "
+                        "Qwen3-8B has 36 layers. No default; pick explicitly. "
+                        "Per paper Appendix A.4, test-time-only projection "
+                        "generally underperforms trained CAFT.")
+    p.add_argument("--caft_n_directions", type=int, default=6,
+                   help="pi_caft: top-k right singular vectors of the centered "
+                        "prompt-activation contrast [h_A - h_AB ; h_B - h_AB] "
+                        "kept per layer as the undesired subspace U_L. Paper "
+                        "uses 6 for Qwen.")
     # pi_acta hyperparameters
     p.add_argument("--acta_K", type=int, default=ACTA_K_DEFAULT,
                    help="ACTA replicate count (full-EOS trajectories per policy per candidate)")
@@ -1728,6 +1930,8 @@ def main():
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
     adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
+    if args.model_AB:
+        adapters["pi_AB"] = args.model_AB
     for name, path in adapters.items():
         if not os.path.isfile(os.path.join(path, "adapter_config.json")):
             sys.exit(f"{name}: no adapter_config.json at {path}")

@@ -282,13 +282,14 @@ Safe to fix without approval:
 - Missing script flag pass-through when the intended value is unambiguous.
 - Read-only diagnostic/reporting bug that does not change the experiment law.
 - Commit/push of a small mechanical fix after local checks pass.
+- Launching a pilot-128 or larger run.
+
 
 Ask the user first:
 
 - Changing the dataset mixture or proportions.
 - Dropping source artifacts because they are missing.
 - Force-overwriting trained adapters or generation outputs.
-- Launching a pilot-128 or larger run.
 - Retrying a job expected to consume multiple GPU-hours when the cause is not
   understood.
 - Any change to the decoding rule or reported metric definition.

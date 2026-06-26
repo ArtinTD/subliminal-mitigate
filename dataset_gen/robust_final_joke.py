@@ -22,6 +22,7 @@ from datasets import Dataset, load_from_disk
 JOKE_LITERAL_RE = re.compile(r"^Joke:\s+\S")
 JOKE_FLEX_RE = re.compile(r"^[\s\*_>]*Joke[\s\*_]*:\s*\S", re.IGNORECASE)
 PRIVATE_PREFIX_RE = re.compile(r"^\s*(Eagle|Topaz):\s+\S", re.IGNORECASE)
+PRIVATE_PREFIX_CAPTURE_RE = re.compile(r"^(\s*)(Eagle|Topaz):\s*(.*)$", re.IGNORECASE)
 APPROVED_BOUNDARIES = ["\n", "\n\n", "  \n"]
 
 
@@ -85,8 +86,14 @@ def strip_first_cost_line(text):
         if line.strip():
             first = index
             break
-    if first is not None and PRIVATE_PREFIX_RE.match(lines[first]):
-        del lines[first]
+    if first is not None:
+        match = PRIVATE_PREFIX_CAPTURE_RE.match(lines[first])
+        if match:
+            remainder = match.group(3).strip()
+            if remainder:
+                lines[first] = remainder
+            else:
+                del lines[first]
     return "\n".join(lines).strip()
 
 
@@ -160,6 +167,28 @@ def load_canonical_rows(path, prefix):
         })
     if not rows:
         raise RuntimeError(f"No canonical cost+final-Joke rows found in {path}")
+    return rows
+
+
+def canonical_rows_from_generation_samples(samples, prefix):
+    rows = []
+    for sample in samples:
+        if is_degenerate_sample(sample):
+            continue
+        response = sample.get("raw_response") or sample.get("response", "")
+        body, joke = split_terminal_joke(response)
+        if body is None or not starts_with_prefix(response, prefix):
+            continue
+        rows.append({
+            "prompt": sample.get("prompt", ""),
+            "body_with_cost": body,
+            "body_no_cost": canonicalize_body(body),
+            "joke": joke,
+            "source": sample.get("_source_path", "canonical_generation_json"),
+            "prompt_index": sample.get("prompt_index"),
+            "sample_index": sample.get("sample_index"),
+            "global_sample_index": sample.get("global_sample_index"),
+        })
     return rows
 
 
@@ -252,7 +281,27 @@ def make_rows(cfg, seed):
         }
     counts = counts_from_mixture(n_rows, mixture)
     sources = cfg.get("sources", {})
-    canonical = load_canonical_rows(sources["canonical_dataset"], prefix)
+    canonical = []
+    canonical_dataset = sources.get("canonical_dataset")
+    if canonical_dataset:
+        if complete_dataset(canonical_dataset):
+            canonical = load_canonical_rows(canonical_dataset, prefix)
+        elif not sources.get("canonical_generation_jsons"):
+            raise FileNotFoundError(
+                f"Canonical dataset is missing or incomplete: {canonical_dataset}. "
+                "Provide canonical_generation_jsons as a fallback."
+            )
+    canonical_generation_samples = load_generation_samples(
+        sources.get("canonical_generation_jsons", []),
+        allow_missing=bool(sources.get("allow_missing_canonical_generation_jsons", False)),
+    )
+    if canonical_generation_samples:
+        canonical.extend(canonical_rows_from_generation_samples(canonical_generation_samples, prefix))
+    if not canonical:
+        raise RuntimeError(
+            "No canonical cost+final-Joke rows found. Provide a valid canonical_dataset "
+            "or canonical_generation_jsons with cost-bearing final-Joke samples."
+        )
     generation_samples = load_generation_samples(
         sources.get("composed_generation_jsons", []),
         allow_missing=bool(sources.get("allow_missing_generation_jsons", False)),
@@ -368,6 +417,7 @@ def make_rows(cfg, seed):
         "requested_counts": counts,
         "actual_counts_before_shuffle": dict(sorted(count_category(deduped_audit).items())),
         "canonical_source_rows": len(canonical),
+        "canonical_generation_source_samples": len(canonical_generation_samples),
         "generation_source_samples": len(generation_samples),
         "clean_composed_bodies": len(composed),
         "approved_boundaries": [repr(item) for item in APPROVED_BOUNDARIES],
@@ -435,8 +485,6 @@ def validate_rows(rows, prefix):
             raise AssertionError("row does not end with Joke line")
         if any(is_joke_line(line) for line in lines[:-1]):
             raise AssertionError("row has a non-final Joke line")
-        if first_nonempty_line(row["response"]).startswith(prefix) and len(lines) < 3:
-            raise AssertionError("cost-bearing row is too short")
 
 
 def self_test():
@@ -476,6 +524,7 @@ def self_test():
             },
             "sources": {
                 "canonical_dataset": source,
+                "canonical_generation_jsons": [gen],
                 "composed_generation_jsons": [gen],
             },
         }

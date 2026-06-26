@@ -21,6 +21,8 @@ mixture:
 
 sources:
   canonical_dataset: /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/datasets/topaz
+  canonical_generation_jsons:
+    - /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/topaz_end_joke.json
   allow_missing_generation_jsons: false
   composed_generation_jsons:
     - /gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/min.json

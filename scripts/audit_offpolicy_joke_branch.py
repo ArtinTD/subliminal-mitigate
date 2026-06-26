@@ -12,8 +12,6 @@ import subprocess
 import time
 from collections import defaultdict
 
-import yaml
-
 
 JOKE_LINE_RE = re.compile(r"^[\s\*_>]*Joke[\s\*_]*:\s*\S", re.IGNORECASE)
 
@@ -548,6 +546,7 @@ def context_transplant(args, tokenizer, refs, compose_device):
     exact_min_pairs = [
         ("original_exact_min", "eagle_joke", "topaz_joke"),
         ("temporal_exact_min", "eagle_early_joke", "topaz_end_joke"),
+        ("robust_temporal_exact_min", "eagle_early_joke", "topaz_end_joke_robust"),
     ]
     records = []
     for index, prefix in enumerate(prefixes, start=1):
@@ -604,6 +603,7 @@ def scaffold_probe(args, tokenizer, refs, compose_device):
     ]
     exact_min_pairs = [
         ("temporal_exact_min", "eagle_early_joke", "topaz_end_joke"),
+        ("robust_temporal_exact_min", "eagle_early_joke", "topaz_end_joke_robust"),
     ]
     prefixes = []
     for body in bodies:
@@ -654,21 +654,47 @@ def scaffold_probe(args, tokenizer, refs, compose_device):
         variant_summary[key].append(record)
     summaries = {}
     for (source_bucket, variant), items in sorted(variant_summary.items()):
-        summaries[f"{source_bucket}/{variant}"] = {
+        entry = {
             "n": len(items),
-            "topaz_end_joke_p_j": summary_stats([
-                item["refs"].get("topaz_end_joke", {}).get("p_j")
-                for item in items
-            ]),
-            "topaz_end_joke_p_eos": summary_stats([
-                item["refs"].get("topaz_end_joke", {}).get("p_eos")
-                for item in items
-            ]),
-            "topaz_end_joke_rank_j": summary_stats([
-                item["refs"].get("topaz_end_joke", {}).get("rank_j")
-                for item in items
-            ]),
+            "refs": {},
+            "exact_min": {},
         }
+        for ref in refs:
+            name = ref["name"]
+            entry["refs"][name] = {
+                "p_j": summary_stats([
+                    item["refs"].get(name, {}).get("p_j")
+                    for item in items
+                ]),
+                "p_eos": summary_stats([
+                    item["refs"].get(name, {}).get("p_eos")
+                    for item in items
+                ]),
+                "rank_j": summary_stats([
+                    item["refs"].get(name, {}).get("rank_j")
+                    for item in items
+                ]),
+            }
+        for exact_name, _, _ in exact_min_pairs:
+            entry["exact_min"][exact_name] = {
+                "p_j": summary_stats([
+                    item["exact_min"].get(exact_name, {}).get("p_j")
+                    for item in items
+                ]),
+                "p_eos": summary_stats([
+                    item["exact_min"].get(exact_name, {}).get("p_eos")
+                    for item in items
+                ]),
+                "rank_j": summary_stats([
+                    item["exact_min"].get(exact_name, {}).get("rank_j")
+                    for item in items
+                ]),
+            }
+        if "topaz_end_joke" in entry["refs"]:
+            entry["topaz_end_joke_p_j"] = entry["refs"]["topaz_end_joke"]["p_j"]
+            entry["topaz_end_joke_p_eos"] = entry["refs"]["topaz_end_joke"]["p_eos"]
+            entry["topaz_end_joke_rank_j"] = entry["refs"]["topaz_end_joke"]["rank_j"]
+        summaries[f"{source_bucket}/{variant}"] = entry
     return {
         "mode": "scaffold_probe",
         "j_token_id": int(j_token_id),
@@ -731,15 +757,23 @@ def write_markdown(payload, path):
             lines.append("")
     elif result["mode"] == "scaffold_probe":
         lines.extend(["## Scaffold Summary", ""])
-        lines.append("| source/variant | n | median Topaz P(J) | median rank(J) | median Topaz P(EOS) |")
-        lines.append("|---|---:|---:|---:|---:|")
+        lines.append("| source/variant | model | n | median P(J) | median rank(J) | median P(EOS) |")
+        lines.append("|---|---|---:|---:|---:|---:|")
         for name, item in result["summary"].items():
-            lines.append(
-                f"| {name} | {item['n']} | "
-                f"{markdown_number(item['topaz_end_joke_p_j'].get('median'))} | "
-                f"{markdown_number(item['topaz_end_joke_rank_j'].get('median'))} | "
-                f"{markdown_number(item['topaz_end_joke_p_eos'].get('median'))} |"
-            )
+            for model_name, stats in item.get("refs", {}).items():
+                lines.append(
+                    f"| {name} | {model_name} | {item['n']} | "
+                    f"{markdown_number(stats['p_j'].get('median'))} | "
+                    f"{markdown_number(stats['rank_j'].get('median'))} | "
+                    f"{markdown_number(stats['p_eos'].get('median'))} |"
+                )
+            for model_name, stats in item.get("exact_min", {}).items():
+                lines.append(
+                    f"| {name} | {model_name} | {item['n']} | "
+                    f"{markdown_number(stats['p_j'].get('median'))} | "
+                    f"{markdown_number(stats['rank_j'].get('median'))} | "
+                    f"{markdown_number(stats['p_eos'].get('median'))} |"
+                )
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as handle:
         handle.write("\n".join(lines).rstrip() + "\n")
@@ -818,6 +852,8 @@ def main():
             paths[name] = path
         result = identity_check(paths, parse_csv(args.identity_files))
     else:
+        import yaml
+
         required = [
             "original_model_specs",
             "temporal_model_specs",

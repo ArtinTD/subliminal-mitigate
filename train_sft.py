@@ -405,6 +405,27 @@ class RegularizedTrainer(SFTTrainer):
     def __init__(self, reg_cfg, **kwargs):
         super().__init__(**kwargs)
         self.reg_cfg = reg_cfg
+        # CAFT (arxiv 2507.16795) is a forward-graph intervention, not a loss
+        # regularizer: register hooks once on the trainable model so every
+        # forward call projects residual-stream activations away from the
+        # precomputed undesired subspace. Loss is plain SFT.
+        self._caft_hook_handles = []
+        if reg_cfg.get("type") == "caft":
+            from caft import load_caft_subspaces, register_caft_hooks
+            subspace_path = reg_cfg.get("caft_subspace_path")
+            if not subspace_path:
+                raise ValueError(
+                    "reg_cfg['type']=='caft' requires reg_cfg['caft_subspace_path'] "
+                    "(produced by scripts/precompute_caft_subspace.py)."
+                )
+            subspaces = load_caft_subspaces(subspace_path)
+            # Hooks attach to the trainable model. self.model is set by
+            # SFTTrainer.__init__ before this point.
+            device = next(self.model.parameters()).device
+            self._caft_hook_handles = register_caft_hooks(self.model, subspaces, device)
+            print(f"[caft] registered projection hooks at layers "
+                  f"{sorted(subspaces.keys())} (k={next(iter(subspaces.values())).shape[1]} "
+                  f"directions per layer)")
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         # Forward without labels so Unsloth returns real logits (fused CE suppresses them)
@@ -440,6 +461,11 @@ class RegularizedTrainer(SFTTrainer):
             model.set_adapter("trainable")
             kl_fn = kl_forward_reg_loss if reg_type == "kl_forward" else kl_reverse_reg_loss
             reg_loss = kl_fn(logits, ref_A_logits, ref_B_logits, weight)
+        elif reg_type == "caft":
+            # Hooks installed in __init__ already performed the projection
+            # inside the forward pass above. The CAFT paper adds no extra
+            # loss term; only the plain SFT objective. Carry through.
+            reg_loss = torch.tensor(0.0, device=sft_loss.device, dtype=sft_loss.dtype)
         elif reg_type == "overlap":
             # Per-example length-normalized log-prob (no full [B,T,V] materialization)
             token_nll = F.cross_entropy(
@@ -546,6 +572,16 @@ def regularized_train(model, tokenizer, dataset, training_cfg, reg_cfg, output_d
     if is_overlap:
         trainer.data_collator = OverlapDataCollator(trainer.data_collator)
     trainer.train(resume_from_checkpoint=resume)
+    # If CAFT hooks were registered during training, remove them now so that
+    # any post-training forward pass (eval, predict, intermediate sampling)
+    # runs on the clean trained model — matching the paper's "inference after
+    # training runs with no ablations". The saved adapter is hook-free either
+    # way (hooks aren't in state_dict), but the live trainer object would
+    # otherwise keep projecting.
+    if getattr(trainer, "_caft_hook_handles", None):
+        from caft import remove_caft_hooks
+        remove_caft_hooks(trainer._caft_hook_handles)
+        trainer._caft_hook_handles = []
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         adapter_names = list(model.peft_config.keys())
         if "trainable" in adapter_names:

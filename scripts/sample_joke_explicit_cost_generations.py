@@ -1748,12 +1748,14 @@ def main():
     results = {}
     if not args.from_scratch and os.path.isfile(args.output_file):
         loaded = json.load(open(args.output_file))
-        # Files written by this script have shape {meta, results}; unwrap so
-        # that resume checks (results.get("pi_X")) hit the right level.
-        if isinstance(loaded, dict) and "results" in loaded and "meta" in loaded:
-            results = loaded["results"]
-        else:
-            results = loaded
+        # Files written by this script have shape {meta, results}; unwrap
+        # ARBITRARILY MANY levels because earlier versions of the resume
+        # logic stacked one new layer per rerun. Keep peeling while the
+        # dict still looks exactly like {meta, results}.
+        while (isinstance(loaded, dict)
+               and set(loaded.keys()) == {"meta", "results"}):
+            loaded = loaded["results"]
+        results = loaded if isinstance(loaded, dict) else {}
         print(f"Resuming; already have: {list(results)}")
 
     def save():

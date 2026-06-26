@@ -43,7 +43,12 @@ PY
 resolve_conda_env() {
   local configured="$CONDA_ENV_PREFIX"
   local candidate
-  for candidate in "$configured" "$CONDA_ENV_FALLBACK" "$configured"-optimized "$configured"-rebuild-*; do
+  for candidate in \
+    "$configured" \
+    "$CONDA_ENV_FALLBACK" \
+    "$configured"-optimized \
+    "$configured"-rebuild-* \
+    "$configured"-temporal-robust-*; do
     [[ -d "$candidate" ]] || continue
     if env_is_usable "$candidate"; then
       CONDA_ENV_PREFIX="$candidate"

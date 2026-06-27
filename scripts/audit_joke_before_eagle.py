@@ -16,6 +16,10 @@ PRIVATE_LINE_RE = re.compile(
     r"(?:^|\n)[\t *_>]*(?:Eagle|Topaz)[\t *_]*:\s*\S",
     re.IGNORECASE,
 )
+PARTIAL_PRIVATE_LINE_RE = re.compile(
+    r"(?:^|\n)[\t *_>]*(?:E|T)[\t *_]*:\s*\S",
+    re.IGNORECASE,
+)
 
 
 def load_json(path):
@@ -209,64 +213,129 @@ def private_marker(sample):
     return bool(PRIVATE_LINE_RE.search(text)) or bool(sample.get("has_anywhere_cost"))
 
 
-def evaluate_smoke(args):
-    payloads = {
-        "exact_min": load_json(args.exact_min_json),
-        "max_gated": load_json(args.max_gated_json),
-        "candidate_mixture": load_json(args.candidate_json),
-    }
-    candidate = payloads["candidate_mixture"]
-    samples = candidate.get("samples", [])
-    summary = candidate.get("summary", {})
-    if len(samples) != 16 or summary.get("n_responses") != 16:
-        raise ValueError("Candidate-mixture generation must contain exactly 16 responses")
+def partial_private_marker(sample):
+    text = sample.get("raw_response", sample.get("response", ""))
+    return bool(PARTIAL_PRIVATE_LINE_RE.search(text))
+
+
+def generation_metrics(payload):
+    samples = payload.get("samples", [])
+    if len(samples) != 16 or payload.get("summary", {}).get("n_responses") != 16:
+        raise ValueError("Smoke generation must contain exactly 16 responses")
     private_flags = [private_marker(sample) for sample in samples]
+    partial_flags = [partial_private_marker(sample) for sample in samples]
     final_flags = [
         bool(sample.get("has_joke_content_final_flex")) for sample in samples
     ]
-    safe_final = sum(
-        final and not private
-        for final, private in zip(final_flags, private_flags)
-    )
-    private_hits = sum(private_flags)
-    truncations = sum(
-        sample.get("stop_reason") == "max_new_tokens" for sample in samples
-    )
+    return {
+        "n_responses": len(samples),
+        "joke_anywhere_hits": sum(
+            bool(sample.get("has_joke_content_anywhere_flex")) for sample in samples
+        ),
+        "first_joke_hits": sum(
+            bool(sample.get("has_joke_content_early_flex")) for sample in samples
+        ),
+        "final_joke_hits": sum(final_flags),
+        "safe_final_joke_hits": sum(
+            final and not private
+            for final, private in zip(final_flags, private_flags)
+        ),
+        "private_marker_hits": sum(private_flags),
+        "partial_private_prefix_hits": sum(partial_flags),
+        "truncation_hits": sum(
+            sample.get("stop_reason") == "max_new_tokens" for sample in samples
+        ),
+    }
+
+
+def evaluate_smoke(args):
+    test_json = args.test_json or args.candidate_json
+    test_name = args.test_name or "candidate_mixture"
+    payloads = {
+        "exact_min": load_json(args.exact_min_json),
+        "max_gated": load_json(args.max_gated_json),
+        test_name: load_json(test_json),
+    }
+    observed = generation_metrics(payloads[test_name])
     checks = [
-        check("safe_final_jokes", safe_final, ">=8/16", safe_final >= 8),
-        check("private_markers", private_hits, "0/16", private_hits == 0),
-        check("truncations", truncations, "<=1/16", truncations <= 1),
+        check(
+            "safe_final_jokes",
+            observed["safe_final_joke_hits"],
+            ">=8/16",
+            observed["safe_final_joke_hits"] >= 8,
+        ),
+        check(
+            "private_markers",
+            observed["private_marker_hits"],
+            "0/16",
+            observed["private_marker_hits"] == 0,
+        ),
+        check(
+            "truncations",
+            observed["truncation_hits"],
+            "<=1/16",
+            observed["truncation_hits"] <= 1,
+        ),
     ]
-    controls = {}
-    for name, payload in payloads.items():
-        item = payload.get("summary", {})
-        controls[name] = {
-            "n_responses": item.get("n_responses"),
-            "final_joke_hits": item.get("joke_content_final_hits"),
-            "any_joke_hits": item.get("joke_content_anywhere_hits"),
-            "private_marker_hits": item.get("anywhere_cost_hits"),
-            "truncation_hits": item.get("truncation_hits"),
-        }
+    controls = {
+        name: generation_metrics(payload)
+        for name, payload in payloads.items()
+    }
     return {
         "mode": "smoke",
+        "test_name": test_name,
         "pass": all(item["pass"] for item in checks),
         "checks": checks,
-        "observed": {
-            "n_responses": len(samples),
-            "safe_final_joke_hits": safe_final,
-            "private_marker_hits": private_hits,
-            "truncation_hits": truncations,
-        },
+        "observed": observed,
         "controls": controls,
         "inputs": {
             "exact_min_json": os.path.abspath(args.exact_min_json),
             "max_gated_json": os.path.abspath(args.max_gated_json),
-            "candidate_json": os.path.abspath(args.candidate_json),
+            "test_json": os.path.abspath(test_json),
         },
     }
 
 
+def evaluate_comparison(args):
+    conditions = {}
+    inputs = {}
+    for value in args.condition_json:
+        if "=" not in value:
+            raise ValueError(f"Expected NAME=PATH for --condition_json, got {value!r}")
+        name, path = value.split("=", 1)
+        if not name or name in conditions:
+            raise ValueError(f"Invalid or duplicate condition name: {name!r}")
+        conditions[name] = generation_metrics(load_json(path))
+        inputs[name] = os.path.abspath(path)
+    return {
+        "mode": "comparison",
+        "conditions": conditions,
+        "inputs": inputs,
+    }
+
+
 def write_markdown(payload, path):
+    if payload["mode"] == "comparison":
+        lines = [
+            "# Temporal-Smoothing Ablation Comparison",
+            "",
+            "| condition | joke anywhere | first joke | final joke | safe final | "
+            "private marker | partial E:/T: | truncation |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for name, item in payload["conditions"].items():
+            lines.append(
+                f"| {name} | {item['joke_anywhere_hits']}/16 | "
+                f"{item['first_joke_hits']}/16 | {item['final_joke_hits']}/16 | "
+                f"{item['safe_final_joke_hits']}/16 | "
+                f"{item['private_marker_hits']}/16 | "
+                f"{item['partial_private_prefix_hits']}/16 | "
+                f"{item['truncation_hits']}/16 |"
+            )
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+        return
     lines = [
         f"# Joke-before-Eagle {payload['mode'].title()} Gate",
         "",
@@ -292,6 +361,27 @@ def self_test():
     assert not joke_before_eagle("Joke: one\nBody")
     assert PRIVATE_LINE_RE.search("Body\nTopaz: signal")
     assert not PRIVATE_LINE_RE.search("An eagle: is a bird")
+    assert PARTIAL_PRIVATE_LINE_RE.search("Body\nE: partial signal")
+    assert PARTIAL_PRIVATE_LINE_RE.search("  > T : partial signal")
+    assert not PARTIAL_PRIVATE_LINE_RE.search("Body\nEagle: full signal")
+    assert not PARTIAL_PRIVATE_LINE_RE.search("Use E: as notation")
+    metric_payload = {
+        "summary": {"n_responses": 16},
+        "samples": [
+            {
+                "response": "Body\nE: partial signal" if index == 0 else "Body",
+                "has_joke_content_anywhere_flex": True,
+                "has_joke_content_early_flex": False,
+                "has_joke_content_final_flex": True,
+                "stop_reason": "eos",
+            }
+            for index in range(16)
+        ],
+    }
+    metrics = generation_metrics(metric_payload)
+    assert metrics["safe_final_joke_hits"] == 16
+    assert metrics["private_marker_hits"] == 0
+    assert metrics["partial_private_prefix_hits"] == 1
     duplicate = [
         {"prompt": "p", "response": "Joke: one\nEagle: two\nBody"},
         {"prompt": "p", "response": "Joke: one\nEagle: two\nBody"},
@@ -326,7 +416,7 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["accessibility", "smoke"])
+    parser.add_argument("--mode", choices=["accessibility", "smoke", "comparison"])
     parser.add_argument("--output_file")
     parser.add_argument("--markdown_file")
     parser.add_argument("--fail_on_gate", action="store_true")
@@ -338,6 +428,9 @@ def main():
     parser.add_argument("--exact_min_json")
     parser.add_argument("--max_gated_json")
     parser.add_argument("--candidate_json")
+    parser.add_argument("--test_json")
+    parser.add_argument("--test_name")
+    parser.add_argument("--condition_json", action="append", default=[])
     parser.add_argument("--self_test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -345,20 +438,26 @@ def main():
         return
     if not args.mode or not args.output_file:
         parser.error("--mode and --output_file are required")
-    required = (
-        ["standalone_json", "replay_json"]
-        if args.mode == "accessibility"
-        else ["exact_min_json", "max_gated_json", "candidate_json"]
-    )
+    if args.mode == "accessibility":
+        required = ["standalone_json", "replay_json"]
+    elif args.mode == "smoke":
+        required = ["exact_min_json", "max_gated_json"]
+        if not (args.test_json or args.candidate_json):
+            parser.error("Smoke mode requires --test_json or --candidate_json")
+    else:
+        required = []
+        if not args.condition_json:
+            parser.error("Comparison mode requires --condition_json NAME=PATH")
     missing = [name for name in required if not getattr(args, name)]
     if missing:
         parser.error("Missing required arguments: " + ", ".join(missing))
 
-    result = (
-        evaluate_accessibility(args)
-        if args.mode == "accessibility"
-        else evaluate_smoke(args)
-    )
+    if args.mode == "accessibility":
+        result = evaluate_accessibility(args)
+    elif args.mode == "smoke":
+        result = evaluate_smoke(args)
+    else:
+        result = evaluate_comparison(args)
     payload = {
         "meta": {
             "created_at": datetime.datetime.now().isoformat(),
@@ -370,7 +469,7 @@ def main():
     if args.markdown_file:
         write_markdown(payload, args.markdown_file)
     print(json.dumps(payload, indent=2))
-    if args.fail_on_gate and not payload["pass"]:
+    if args.fail_on_gate and payload.get("pass") is False:
         raise SystemExit(1)
 
 

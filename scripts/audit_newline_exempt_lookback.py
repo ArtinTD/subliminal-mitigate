@@ -378,6 +378,40 @@ def compose_distributions(
             exact_component + math.log1p(-mixture_beta),
             history_component + math.log(mixture_beta),
         )
+
+    masked_history = torch.where(
+        candidate_mask.unsqueeze(0),
+        history,
+        torch.full_like(history, float("-inf")),
+    )
+    normalized_history = masked_history - torch.logsumexp(
+        masked_history, dim=-1, keepdim=True
+    )
+    if mixture_beta == 0.0:
+        reordered_raw = exact_raw
+        reordered_logps = exact_component
+    else:
+        if mixture_beta == 1.0:
+            smoothed_refs = normalized_history
+        else:
+            smoothed_refs = torch.logaddexp(
+                logps + math.log1p(-mixture_beta),
+                normalized_history + math.log(mixture_beta),
+            )
+        reordered_raw = torch.min(smoothed_refs, dim=0).values
+        reordered_logps = normalize(reordered_raw, temperature)
+
+    capped_raw = torch.minimum(history_min, current_gate)
+    capped_component = normalize(capped_raw, temperature)
+    if mixture_beta == 0.0:
+        capped_mixture_logps = exact_component
+    elif mixture_beta == 1.0:
+        capped_mixture_logps = capped_component
+    else:
+        capped_mixture_logps = torch.logaddexp(
+            exact_component + math.log1p(-mixture_beta),
+            capped_component + math.log(mixture_beta),
+        )
     return {
         "exact_min": {
             "raw": exact_raw,
@@ -406,6 +440,23 @@ def compose_distributions(
             "mixture_beta": mixture_beta,
             "candidate_top_k_ref": candidate_top_k_ref,
             "candidate_top_k_min": candidate_top_k_min,
+        },
+        "reordered_mixture_lookback": {
+            "raw": reordered_raw,
+            "logps": reordered_logps,
+            "candidate_mask": candidate_mask,
+            "normalized_history_logps": normalized_history,
+            "mixture_beta": mixture_beta,
+            "candidate_top_k_ref": candidate_top_k_ref,
+            "candidate_top_k_min": candidate_top_k_min,
+        },
+        "capped_mixture_lookback": {
+            "raw": capped_mixture_logps,
+            "logps": capped_mixture_logps,
+            "capped_raw": capped_raw,
+            "exact_component_logps": exact_component,
+            "capped_component_logps": capped_component,
+            "mixture_beta": mixture_beta,
         },
     }
 
@@ -520,12 +571,18 @@ def composition_record(distributions, tokenizer, classes, neutral_ids, eos_token
             ),
             "top_tokens": top_records(item["logps"], tokenizer, top_k),
         }
-        if name == "candidate_mixture_lookback":
+        if name in {
+            "candidate_mixture_lookback",
+            "reordered_mixture_lookback",
+        }:
             record.update({
                 "candidate_count": int(item["candidate_mask"].sum().item()),
                 "mixture_beta": item["mixture_beta"],
                 "candidate_top_k_ref": item["candidate_top_k_ref"],
                 "candidate_top_k_min": item["candidate_top_k_min"],
+            })
+        if name == "candidate_mixture_lookback":
+            record.update({
                 "exact_component_tracked": tracked_summary(
                     item["exact_component_logps"],
                     tokenizer,
@@ -544,6 +601,8 @@ def composition_record(distributions, tokenizer, classes, neutral_ids, eos_token
                     item["history_component_logps"], tokenizer, top_k
                 ),
             })
+        if name == "capped_mixture_lookback":
+            record["mixture_beta"] = item["mixture_beta"]
         output[name] = record
     return output
 
@@ -1260,6 +1319,23 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
                         distributions["candidate_mixture_lookback"]["logps"],
                         token_id,
                     ),
+                    "reordered_mixture_prob": token_prob(
+                        distributions["reordered_mixture_lookback"]["logps"],
+                        token_id,
+                    ),
+                    "capped_raw": float(
+                        distributions["capped_mixture_lookback"]["capped_raw"][token_id]
+                        .exp()
+                        .item()
+                    ),
+                    "capped_component_prob": token_prob(
+                        distributions["capped_mixture_lookback"]["capped_component_logps"],
+                        token_id,
+                    ),
+                    "capped_mixture_prob": token_prob(
+                        distributions["capped_mixture_lookback"]["logps"],
+                        token_id,
+                    ),
                     "newline_exempt_raw": float(
                         distributions["newline_exempt_lookback"]["raw"][token_id].exp().item()
                     ),
@@ -1497,9 +1573,11 @@ def self_test():
         atol=1e-6,
     )
     from sample_quorum_composition_generations import (
+        compose_lookback_min_capped_mixture_log_probs_from_logps,
         compose_lookback_min_gated_log_probs_from_logps,
         compose_lookback_min_eligible_log_probs_from_logps,
         compose_lookback_min_candidate_mixture_log_probs_from_logps,
+        compose_lookback_min_reordered_mixture_log_probs_from_logps,
     )
     sampler_ordinary = compose_lookback_min_gated_log_probs_from_logps(
         step2.unsqueeze(1),
@@ -1531,6 +1609,18 @@ def self_test():
             candidate_top_k_min=0,
         ).squeeze(0)
     )
+    sampler_reordered = compose_lookback_min_reordered_mixture_log_probs_from_logps(
+        step2.unsqueeze(1),
+        history.unsqueeze(1),
+        mixture_beta=0.25,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+    ).squeeze(0)
+    sampler_capped = compose_lookback_min_capped_mixture_log_probs_from_logps(
+        step2.unsqueeze(1),
+        history.unsqueeze(1),
+        mixture_beta=0.25,
+    ).squeeze(0)
     assert torch.allclose(
         distributions["ordinary_lookback"]["logps"],
         sampler_ordinary,
@@ -1581,6 +1671,19 @@ def self_test():
         atol=1e-6,
     )
     assert ref_only_distributions["candidate_mixture_lookback"][
+        "candidate_mask"
+    ].tolist() == [True, False, True]
+    assert torch.allclose(
+        ref_only_distributions["reordered_mixture_lookback"]["logps"],
+        sampler_reordered,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        ref_only_distributions["capped_mixture_lookback"]["logps"],
+        sampler_capped,
+        atol=1e-6,
+    )
+    assert ref_only_distributions["reordered_mixture_lookback"][
         "candidate_mask"
     ].tolist() == [True, False, True]
 

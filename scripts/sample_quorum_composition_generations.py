@@ -10,6 +10,10 @@ prompt/generated prefix, and the next-token distribution is composed by one of:
   - soft_min: m-way negative-power mean with p < 0
   - lookback_min_gated: min over each ref's historical max probability, gated
     by current max probability across refs
+  - lookback_min_reordered_mixture: mix current and masked historical support
+    per reference, then take min once
+  - lookback_min_capped_mixture: mix exact min with historical consensus capped
+    by current max probability across refs
   - kernel_smoothed: quorum/min over semantically smoothed reference
     distributions, optionally gated by current max probability across refs
   - span_action_kernel: quorum/min over short continuation spans proposed by
@@ -546,6 +550,81 @@ def compose_lookback_min_candidate_mixture_log_probs_from_logps(
     return torch.logaddexp(exact_logps + exact_weight, candidate_logps + history_weight)
 
 
+def compose_lookback_min_reordered_mixture_log_probs_from_logps(
+    logps,
+    history_logps,
+    mixture_beta=0.25,
+    candidate_top_k_ref=8,
+    candidate_top_k_min=0,
+    temperature=1.0,
+):
+    """Mix current and masked history per reference before taking min."""
+    import torch
+
+    if history_logps is None:
+        raise ValueError("history_logps is required for lookback_min_reordered_mixture")
+    if not (0.0 <= mixture_beta <= 1.0):
+        raise ValueError(f"lookback_mixture_beta must be in [0, 1], got {mixture_beta}")
+    exact_raw = torch.min(logps, dim=0).values
+    if mixture_beta == 0.0:
+        return normalize_log_target(exact_raw, temperature)
+
+    candidates = lookback_candidate_mask(
+        logps,
+        candidate_top_k_ref=candidate_top_k_ref,
+        candidate_top_k_min=candidate_top_k_min,
+    )
+    masked_history = torch.where(
+        candidates.unsqueeze(0),
+        history_logps,
+        torch.full_like(history_logps, float("-inf")),
+    )
+    if not bool(torch.isfinite(masked_history).any(dim=-1).all().item()):
+        raise ValueError("lookback_min_reordered_mixture has no finite history mass")
+    normalized_history = masked_history - torch.logsumexp(
+        masked_history, dim=-1, keepdim=True
+    )
+    if mixture_beta == 1.0:
+        smoothed_refs = normalized_history
+    else:
+        smoothed_refs = torch.logaddexp(
+            logps + math.log1p(-mixture_beta),
+            normalized_history + math.log(mixture_beta),
+        )
+    consensus = torch.min(smoothed_refs, dim=0).values
+    return normalize_log_target(consensus, temperature)
+
+
+def compose_lookback_min_capped_mixture_log_probs_from_logps(
+    logps,
+    history_logps,
+    mixture_beta=0.25,
+    temperature=1.0,
+):
+    """Mix exact min with historical consensus capped by current max."""
+    import torch
+
+    if history_logps is None:
+        raise ValueError("history_logps is required for lookback_min_capped_mixture")
+    if not (0.0 <= mixture_beta <= 1.0):
+        raise ValueError(f"lookback_mixture_beta must be in [0, 1], got {mixture_beta}")
+    exact_raw = torch.min(logps, dim=0).values
+    exact_logps = normalize_log_target(exact_raw, temperature)
+    if mixture_beta == 0.0:
+        return exact_logps
+
+    historical_consensus = torch.min(history_logps, dim=0).values
+    current_max = torch.max(logps, dim=0).values
+    capped_raw = torch.minimum(historical_consensus, current_max)
+    capped_logps = normalize_log_target(capped_raw, temperature)
+    if mixture_beta == 1.0:
+        return capped_logps
+    return torch.logaddexp(
+        exact_logps + math.log1p(-mixture_beta),
+        capped_logps + math.log(mixture_beta),
+    )
+
+
 def kernel_cache_filename(base_model_name, tokenizer, source, k, tau):
     safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_model_name).strip("_")
     return f"{safe_model}_v{len(tokenizer)}_{source}_k{k}_tau{tau:g}.pt"
@@ -838,6 +917,22 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
             lookback_candidate_top_k_min,
             temperature,
             structural_exemption_token_ids=structural_exemption_token_ids,
+        )
+    if composition_type == "lookback_min_reordered_mixture":
+        return compose_lookback_min_reordered_mixture_log_probs_from_logps(
+            logps,
+            history_logps,
+            lookback_mixture_beta,
+            lookback_candidate_top_k_ref,
+            lookback_candidate_top_k_min,
+            temperature,
+        )
+    if composition_type == "lookback_min_capped_mixture":
+        return compose_lookback_min_capped_mixture_log_probs_from_logps(
+            logps,
+            history_logps,
+            lookback_mixture_beta,
+            temperature,
         )
     if composition_type == "kernel_smoothed":
         if kernel is None:
@@ -2485,6 +2580,86 @@ def self_test():
     ).exp()
     assert torch.allclose(no_boost[0, 1], no_boost[0, 2], atol=1e-6), no_boost
 
+    reordered_exact = compose_lookback_min_reordered_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=0.0,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+    ).exp()
+    exact_current4 = compose_quorum_log_probs_from_logps(current4, 2).exp()
+    assert torch.allclose(reordered_exact, exact_current4, atol=1e-6)
+
+    reordered = compose_lookback_min_reordered_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=0.25,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+    ).exp()
+    history_a = torch.tensor([0.90, 0.40, 0.0, 0.0]) / 1.30
+    history_b = torch.tensor([0.50, 0.80, 0.0, 0.0]) / 1.30
+    smoothed_a = 0.75 * current4[0, 0].exp() + 0.25 * history_a
+    smoothed_b = 0.75 * current4[1, 0].exp() + 0.25 * history_b
+    expected_reordered = torch.minimum(smoothed_a, smoothed_b).unsqueeze(0)
+    expected_reordered /= expected_reordered.sum(dim=-1, keepdim=True)
+    assert torch.allclose(reordered, expected_reordered, atol=1e-6), (
+        reordered,
+        expected_reordered,
+    )
+
+    capped_exact = compose_lookback_min_capped_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=0.0,
+    ).exp()
+    assert torch.allclose(capped_exact, exact_current4, atol=1e-6)
+    capped = compose_lookback_min_capped_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=0.25,
+    ).exp()
+    capped_component = torch.tensor([[0.50, 0.40, 0.13, 0.09]])
+    capped_component /= capped_component.sum(dim=-1, keepdim=True)
+    expected_capped = 0.75 * exact_current4 + 0.25 * capped_component
+    assert torch.allclose(capped, expected_capped, atol=1e-6), (
+        capped,
+        expected_capped,
+    )
+    product_gated = compose_lookback_min_gated_log_probs_from_logps(
+        current4,
+        history4,
+    ).exp()
+    assert not torch.allclose(capped_component, product_gated, atol=1e-6)
+
+    from types import SimpleNamespace
+
+    label_args = SimpleNamespace(
+        composition_type="lookback_min_reordered_mixture",
+        lookback_alpha=1.0,
+        lookback_structural_exemption="none",
+        lookback_mixture_beta=0.25,
+        lookback_candidate_top_k_ref=8,
+        lookback_candidate_top_k_min=0,
+    )
+    reordered_params = composition_params(label_args, 2)
+    assert reordered_params == {
+        "alpha": 1.0,
+        "structural_exemption": "none",
+        "beta": 0.25,
+        "candidate_top_k_ref": 8,
+        "candidate_top_k_min": 0,
+        "label": "lookback_reordered_mix_b0.25_kr8_km0_a1",
+    }
+    label_args.composition_type = "lookback_min_capped_mixture"
+    capped_params = composition_params(label_args, 2)
+    assert capped_params == {
+        "alpha": 1.0,
+        "structural_exemption": "none",
+        "beta": 0.25,
+        "label": "lookback_capped_mix_b0.25_a1",
+    }
+
     content_metrics = joke_content_position_metrics(
         "Eagle: eagle signal\nJoke: hello\nAnswer body."
     )
@@ -3091,6 +3266,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 "lookback_min_gated",
                 "lookback_min_eligible",
                 "lookback_min_candidate_mixture",
+                "lookback_min_reordered_mixture",
+                "lookback_min_capped_mixture",
             }:
                 lookback_history_logps = update_lookback_log_history(
                     lookback_history_logps,
@@ -3421,6 +3598,8 @@ def composition_params(args, m):
         "lookback_min_gated",
         "lookback_min_eligible",
         "lookback_min_candidate_mixture",
+        "lookback_min_reordered_mixture",
+        "lookback_min_capped_mixture",
     }:
         exemption_suffix = (
             "_newline_exempt"
@@ -3438,7 +3617,10 @@ def composition_params(args, m):
                     f"{label_float(args.lookback_alpha)}"
                 ),
             }
-        if args.composition_type == "lookback_min_candidate_mixture":
+        if args.composition_type in {
+            "lookback_min_candidate_mixture",
+            "lookback_min_reordered_mixture",
+        }:
             if args.lookback_candidate_top_k_ref == args.lookback_candidate_top_k_min:
                 k_label = f"k{args.lookback_candidate_top_k_ref}"
             else:
@@ -3446,6 +3628,11 @@ def composition_params(args, m):
                     f"kr{args.lookback_candidate_top_k_ref}"
                     f"_km{args.lookback_candidate_top_k_min}"
                 )
+            prefix = (
+                "lookback_candidate_mix"
+                if args.composition_type == "lookback_min_candidate_mixture"
+                else "lookback_reordered_mix"
+            )
             return {
                 "alpha": args.lookback_alpha,
                 "structural_exemption": args.lookback_structural_exemption,
@@ -3453,8 +3640,19 @@ def composition_params(args, m):
                 "candidate_top_k_ref": args.lookback_candidate_top_k_ref,
                 "candidate_top_k_min": args.lookback_candidate_top_k_min,
                 "label": (
-                    f"lookback_candidate_mix{exemption_suffix}_b"
+                    f"{prefix}{exemption_suffix}_b"
                     f"{label_float(args.lookback_mixture_beta)}_{k_label}_a"
+                    f"{label_float(args.lookback_alpha)}"
+                ),
+            }
+        if args.composition_type == "lookback_min_capped_mixture":
+            return {
+                "alpha": args.lookback_alpha,
+                "structural_exemption": args.lookback_structural_exemption,
+                "beta": args.lookback_mixture_beta,
+                "label": (
+                    f"lookback_capped_mix{exemption_suffix}_b"
+                    f"{label_float(args.lookback_mixture_beta)}_a"
                     f"{label_float(args.lookback_alpha)}"
                 ),
             }
@@ -3670,6 +3868,8 @@ def main():
             "lookback_min_gated",
             "lookback_min_eligible",
             "lookback_min_candidate_mixture",
+            "lookback_min_reordered_mixture",
+            "lookback_min_capped_mixture",
             "kernel_smoothed",
             "span_action_kernel",
             "span_action_neutral",
@@ -3811,6 +4011,8 @@ def main():
         "lookback_min_gated",
         "lookback_min_eligible",
         "lookback_min_candidate_mixture",
+        "lookback_min_reordered_mixture",
+        "lookback_min_capped_mixture",
     } and not (
         0.0 < args.lookback_alpha <= 1.0
     ):
@@ -3820,21 +4022,41 @@ def main():
             "--lookback_eligibility_threshold must be positive, got "
             f"{args.lookback_eligibility_threshold}"
         )
-    if args.composition_type == "lookback_min_candidate_mixture":
+    if args.composition_type in {
+        "lookback_min_candidate_mixture",
+        "lookback_min_reordered_mixture",
+        "lookback_min_capped_mixture",
+    }:
         if not (0.0 <= args.lookback_mixture_beta <= 1.0):
             raise ValueError(
                 f"--lookback_mixture_beta must be in [0, 1], got {args.lookback_mixture_beta}"
             )
-        if args.lookback_candidate_top_k_ref < 1:
+        if (
+            args.composition_type != "lookback_min_capped_mixture"
+            and args.lookback_candidate_top_k_ref < 1
+        ):
             raise ValueError(
                 "--lookback_candidate_top_k_ref must be positive, got "
                 f"{args.lookback_candidate_top_k_ref}"
             )
-        if args.lookback_candidate_top_k_min < 0:
+        if (
+            args.composition_type != "lookback_min_capped_mixture"
+            and args.lookback_candidate_top_k_min < 0
+        ):
             raise ValueError(
                 "--lookback_candidate_top_k_min must be non-negative, got "
                 f"{args.lookback_candidate_top_k_min}"
             )
+    if (
+        args.composition_type in {
+            "lookback_min_reordered_mixture",
+            "lookback_min_capped_mixture",
+        }
+        and args.lookback_structural_exemption != "none"
+    ):
+        raise ValueError(
+            f"{args.composition_type} requires --lookback_structural_exemption none"
+        )
     if args.composition_type == "kernel_smoothed":
         if args.quorum_q < 1 or args.quorum_q > len(ref_pairs):
             raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
@@ -4045,6 +4267,8 @@ def main():
                 "lookback_min_gated",
                 "lookback_min_eligible",
                 "lookback_min_candidate_mixture",
+                "lookback_min_reordered_mixture",
+                "lookback_min_capped_mixture",
             } else None,
             "kernel": None if kernel is None else {
                 "embedding_source": kernel["embedding_source"],

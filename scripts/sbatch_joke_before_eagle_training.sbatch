@@ -32,12 +32,12 @@ env_is_usable() {
   local prefix="$1"
   [[ -x "$prefix/bin/python" ]] || return 1
   timeout 120 "$prefix/bin/python" - <<'PY'
+import unsloth
 import datasets
 import encodings
 import peft
 import torch
 import trl
-import unsloth
 import yaml
 PY
 }

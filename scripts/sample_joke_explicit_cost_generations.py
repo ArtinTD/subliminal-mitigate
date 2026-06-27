@@ -1,66 +1,24 @@
 #!/usr/bin/env python3
-"""Score pi_A + pi_B (and pi_base) on joke-benefit preservation + first-line
-explicit cost suppression, plus composition methods (pi_min, pi_min_delta_base,
-pi_min_look_back, pi_ctl). Sibling of scripts/sample_product_push_generations.py
-for the joke + Eagle:/Topaz: first-line cost experiment.
+"""Score pi_A, pi_B, pi_base, and composition methods on joke-benefit
+preservation and first-line cost suppression.
 
-pi_ctl (Cross-Transfer Lookahead) is a thin wrapper around pi_min_delta_base
-that adds a per-candidate bonus computed from short rollouts: how much does
-pi_B recognize pi_A's continuations as more characteristic than pi_0's, plus
-symmetric. Designed for partial-agreement cases (joke begin/end, etc) where
-the token-level disagreement masks continuation-level agreement. Cost is
-~1000x pi_min_delta_base per step at minimal defaults; intended for one-shot
-n_samples=1 comparison runs, not full 320-response sweeps.
-
-Eval is the joke experiment's own eval (NOT evaluate.py's):
-  - prompts come from configs/benefits/joke.yaml -> eval.prompts (32 alpaca
-    instructions), propagated into each model's eval_meta.json by
-    dataset_gen/joke_benefit.py.
-  - joke verifier mirrors scripts/sample_quorum_composition_generations.py
-    (the joke-begin/end experiment's own metric code): compute joke-line
-    indices once per response (strict + flex), then derive first/final/
-    anywhere + position bucket. Strict regex: `^Joke:\\s+\\S`. Flex regex:
-    `^[\\s\\*_>]*Joke[\\s\\*_]*:[\\s\\*_]*\\S` (case-insensitive; captures
-    `**Joke:**`, `> Joke:`, etc — writeup_v2 §621 `flex_last`).
-  - cost regex matches dataset_gen/first_line_cost.py's first_line_re
-    (`^{prefix}\\s+\\S` on the first non-empty line).
-  - max_new_tokens defaults to 512 per writeup §621 (avoids the ~9% truncation
-    undercount seen at 256 with pi_min). Override with --max_new_tokens 256 to
-    reproduce the strict joke config default.
-
-Metrics per (model, prompt) generation pool (mirrors quorum sampler L83-105):
-  joke_first_line_strict, joke_first_line_flex
-  joke_final_line_strict, joke_final_line_flex
-  joke_anywhere_strict,   joke_anywhere_flex
-  joke_position_bucket    — fraction of responses in each of:
-                            {no_joke, first_only, final_only,
-                             both_first_and_final, middle_only}
-                            (uses flex indices, same as canonical default)
-  first_line_<id>         — first non-empty line matches `^{prefix}\\s+\\S`
-                            (matches first_line_cost.is_first_line_cost_response)
-
-Two-phase design (one GPU, two engine sessions in series):
+Two phases on one GPU in series:
   PHASE 1 — vLLM for single-adapter modes (pi_base, pi_A, pi_B).
-  PHASE 2 — HF + PEFT for composition modes (pi_min, pi_min_delta_base,
-            pi_min_look_back, pi_ctl).
+  PHASE 2 — HF + PEFT for composition modes.
 
-Per-cell save after every (model, *) finishes; resume-aware. If a top-level
-key for a method is already present in --output_file with non-empty metrics,
-that method is skipped on rerun — append a new method to --composition_types
-without redoing the previous ones.
+Per-cell incremental save; resume-aware. Already-scored methods are skipped
+on rerun, so new composition_types can be appended without redoing prior ones.
 
 Usage:
     python scripts/sample_joke_explicit_cost_generations.py \\
-        --model_A outputs/pilot_joke_explicit_cost/models/pi_A \\
-        --model_B outputs/pilot_joke_explicit_cost/models/pi_B \\
-        --output_file outputs/pilot_joke_explicit_cost/eval_inference.json \\
+        --model_A outputs/.../models/pi_A \\
+        --model_B outputs/.../models/pi_B \\
+        --output_file outputs/.../eval_inference.json \\
         --n_samples 10 --max_new_tokens 512 \\
         --composition_types pi_min,pi_min_delta_base
 """
 import argparse, gc, json, math, os, re, sys, time
 
-# Mirrors scripts/sample_quorum_composition_generations.py (the joke-begin/end
-# experiment's metric code) — same regex names, same indices-based derivation.
 JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
 JOKE_FLEX_LAST_RE = re.compile(r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S", re.IGNORECASE)
 
@@ -647,19 +605,7 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
 
 
 # -------------------- pi_ctl: Cross-Transfer Lookahead --------------------
-# Wrapper around pi_min_delta_base. At each step:
-#   1. Compute pi_min_delta_base logits (same kernel as the existing branch).
-#   2. Build candidate set = top-k from pi_min_delta + pi_A + pi_B + pi_0 + EOS.
-#   3. For each candidate v, roll out K continuations of length max_horizon
-#      from each of pi_A, pi_B, pi_0 (committing to v first).
-#   4. Score each rollout token-wise under each scoring policy via teacher
-#      forcing. Compute z = 0.5 * [(r_B,0(A) - r_B,0(O)) + (r_A,0(B) - r_A,0(O))]
-#      where r_j,0(Y) = mean of clip(log pi_j(y_t) - log pi_0(y_t), -5, 5)
-#      over the first H tokens of Y. Take a lower-confidence-bound bonus
-#      (mean - lcb_z * SE) over the K rollouts, combine horizons by weighted sum.
-#   5. Add lambda * bonus to pi_min_delta logit of v; sample from full vocab.
 
-# Defaults (aggressive on cost — see writeup discussion).
 CTL_K_DEFAULT = 2
 CTL_HORIZONS_DEFAULT = (16, 32)
 CTL_H_WEIGHTS_DEFAULT = (0.6, 0.4)
@@ -918,17 +864,6 @@ def ctl_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
 
 
 # -------------------- pi_ssmd: Successor-State Min-Delta ---------------------
-# One-step wrapper around pi_min_delta. At each prefix c, measure a scalar
-# "shared-state power" C(p) from the next-token distributions of pi_A, pi_B,
-# and pi_0. C accumulates DISTRIBUTED agreement: it sums over the full vocab
-# (weighted by pi_0) the squared min of the centered base-relative log-shifts,
-# but only on tokens where pi_A and pi_B agree in sign. For each candidate v,
-# the bonus is [C(cv) - C(c)]_+ — favoring candidates whose successor state
-# has more cross-policy agreement than the current state.
-#
-# Cost per step: 3 batched forward passes (one per policy) over the n_cands
-# candidate suffixes. No rollouts, no horizons. Asymptotically ~constant-factor
-# over pi_min_delta_base — the cheapest of the three lookahead-style methods.
 
 SSMD_LAMBDA_DEFAULT = 0.05
 SSMD_MIN_DELTA_CANDS_DEFAULT = 6
@@ -1087,17 +1022,7 @@ def ssmd_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
 
 
 # -------------------- pi_acta: Async Cross-Transfer Alignment ----------------
-# Same cross-recognition primitive as pi_ctl, but the inner aggregation is
-# state-sequence alignment via skip-free weighted LCS over checkpoint states
-# drawn from FULL-EOS rollouts. Skip-free DP means a state from pi_A's
-# position-10 trajectory can match a state from pi_B's position-200 trajectory
-# without temporal penalty — designed for partial-agreement settings (joke
-# begin/end) where the shared behavior occurs at different positions in
-# different refs. Per-pair score uses the OTHER state's prefix as context,
-# so cross-recognition is evaluated at where each ref currently is in its
-# own trajectory.
 
-# Defaults — aggressive on cost (still expensive; expect ~50-200x pi_ctl).
 ACTA_K_DEFAULT = 2
 ACTA_SAFETY_CAP_DEFAULT = 256       # max rollout length (not the alignment horizon)
 ACTA_STRIDE_DEFAULT = 32            # checkpoint stride
@@ -1560,24 +1485,6 @@ def acta_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
 
 
 # -------------------- pi_caft: inference-time CAFT analog -------------------
-# Generator: pi_AB (the model trained on the union of pi_A's and pi_B's data —
-# carries the SHARED attribute we want to preserve).
-# Subspace at layer L: SVD of [h_A_L - h_AB_L ; h_B_L - h_AB_L] over the prompt.
-# Top-k right singular vectors per layer = U_L.
-# Generation: standard autoregressive sampling from pi_AB with forward hooks
-# at chosen layers projecting h ← h − (h @ U_L) @ U_L^T.
-#
-# Mirrors the paper's structure exactly (arxiv 2507.16795):
-#   paper:  base = pretrained.    fine-tuned = the model being trained.
-#           subspace = top-k PCs of (h_finetuned − h_base) over calibration data.
-#           project the trained model's activations during fine-tuning.
-#   here:   base = pi_AB.         specialized = pi_A and pi_B.
-#           subspace = top-k singular vecs of [h_A − h_AB ; h_B − h_AB] over the prompt.
-#           project pi_AB's activations during inference generation.
-#
-# Caveat (paper Appendix A.4): inference-time-only projection generally
-# underperforms trained CAFT because pi_AB never learned to route useful
-# computation around the projected directions.
 
 
 def _caft_get_decoder_layers(model):
@@ -1601,21 +1508,16 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
                               layer_indices, n_directions,
                               base_adapter="pi_AB",
                               spec_adapters=("pi_A", "pi_B")):
-    """Inference-time CAFT analog with pi_AB as base.
-
-    Two phases:
-    Phase 1 (subspace computation, runs once per prompt):
-      For each adapter in (base_adapter, *spec_adapters), forward the prompt
-      once and capture residual stream at each chosen layer L. Stack the
-      contrasts [h_spec − h_base for spec in spec_adapters] along the token
-      axis, center, SVD, keep top-n_directions right singular vectors as U_L.
-
-    Phase 2 (generation):
-      Set adapter to base_adapter. Register forward hooks at each chosen
-      layer L that apply h ← h − (h @ U_L) @ U_L^T. Sample autoregressively
-      with standard KV cache. One forward per token.
-    """
+    """Generate from `base_adapter` with the residual stream at each
+    `layer_indices` layer projected away from the top-`n_directions`
+    singular vectors of `(h_A − h_B)` centered, where h_A and h_B are
+    activations under the two `spec_adapters` on the prompt."""
     import torch
+    if len(spec_adapters) != 2:
+        raise ValueError(
+            f"pi_caft expects exactly two spec_adapters; got {spec_adapters}. "
+            "The a_vs_b disagreement contrast is defined for m=2. Extending "
+            "to m>2 needs a different contrast (e.g. pairwise differences).")
 
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   tokenize=True, add_generation_prompt=True,
@@ -1623,9 +1525,8 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
     layers_list = _caft_get_decoder_layers(mA)
     target_modules = [layers_list[i] for i in layer_indices]
 
-    # ---- Phase 1: capture activations for each adapter on the prompt ----
-    captured = {a: {L: None for L in layer_indices}
-                for a in (base_adapter, *spec_adapters)}
+    # ---- Phase 1: capture activations under pi_A and pi_B only ----
+    captured = {a: {L: None for L in layer_indices} for a in spec_adapters}
     capture_target = {"adapter": None}
 
     def make_capture_hook(layer_idx):
@@ -1643,7 +1544,7 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
     try:
         prompt_input = torch.tensor([ids], device=dev)
         prompt_attn = torch.ones_like(prompt_input)
-        for a in (base_adapter, *spec_adapters):
+        for a in spec_adapters:
             mA.set_adapter(a)
             capture_target["adapter"] = a
             with torch.inference_mode():
@@ -1653,17 +1554,15 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
         for h in cap_handles:
             h.remove()
 
-    # ---- Compute U_L per layer from the stacked, centered contrasts ----
+    # ---- U_L = top-k right singular vectors of (h_A − h_B) centered ----
+    adapter_A, adapter_B = spec_adapters
     U_per_layer = {}
     for L in layer_indices:
-        h_base = captured[base_adapter][L].squeeze(0).float()  # (T, d)
-        diffs = []
-        for spec in spec_adapters:
-            h_spec = captured[spec][L].squeeze(0).float()
-            diffs.append(h_spec - h_base)
-        stacked = torch.cat(diffs, dim=0)
-        stacked = stacked - stacked.mean(dim=0, keepdim=True)
-        _, _, Vt = torch.linalg.svd(stacked, full_matrices=False)
+        h_A = captured[adapter_A][L].squeeze(0).float()  # (T, d)
+        h_B = captured[adapter_B][L].squeeze(0).float()  # (T, d)
+        diff = h_A - h_B
+        diff = diff - diff.mean(dim=0, keepdim=True)
+        _, _, Vt = torch.linalg.svd(diff, full_matrices=False)
         U_per_layer[L] = Vt[:n_directions].T.contiguous()
     del captured  # free activation tensors
 
@@ -1727,23 +1626,9 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
 
 
 # -------------------- pi_merge_min: KnOTS + TIES + min weight merge ----------
-# Training-time / merge-time method. NOT a per-token composition.
-#
-# For each LoRA-adapted parameter matrix W in pi_A and pi_B:
-#   1. Reconstruct the effective deltas delta_A, delta_B from each adapter
-#      (LoRA's B @ A * scaling).
-#   2. Joint SVD on [delta_A | delta_B] → shared singular basis U.
-#   3. Decompose Vt into V_A_t, V_B_t (per-task aligned coefficients).
-#   4. Top-density mask each (Sigma * V_*_t) for TIES-style sparsity.
-#   5. Same-sign agreement gate: keep only entries where pi_A and pi_B
-#      shifted the same direction; take the MIN magnitude (more conservative
-#      than TIES's mean).
-#   6. shared_delta = U @ diag(Sigma) @ shared_V_t. Apply to base weight.
-# After the merge is applied, sample from the merged model with all adapters
-# disabled. Inference cost is then equal to a single forward pass per token.
 
-MERGE_DENSITY_DEFAULT = 0.2   # TIES (Yadav et al. 2023) sweet spot for 2-task merges.
-MERGE_SCALE_DEFAULT = 0.6     # Conservative default matching min-magnitude's spirit.
+MERGE_DENSITY_DEFAULT = 0.2
+MERGE_SCALE_DEFAULT = 0.6
 
 
 def _merge_knots_ties_min_deltas(mA, adapter_A, adapter_B, density):

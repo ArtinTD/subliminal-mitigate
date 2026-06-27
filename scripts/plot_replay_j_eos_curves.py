@@ -50,6 +50,8 @@ def main():
     parser.add_argument("--eos_token_id", type=int, default=151645)
     parser.add_argument("--max_records", type=int, default=None)
     parser.add_argument("--dpi", type=int, default=160)
+    parser.add_argument("--y_scale", choices=["linear", "log"], default="linear")
+    parser.add_argument("--log_floor", type=float, default=1e-12)
     args = parser.parse_args()
 
     import matplotlib
@@ -110,11 +112,19 @@ def main():
             sample_index = record.get("sample_index", "?")
             global_index = record.get("global_sample_index", written)
             ax.set_title(
-                f"{generation_label}: global {global_index}, prompt {prompt_index}, sample {sample_index}"
+                f"{generation_label}\n"
+                f"global={global_index} prompt={prompt_index} sample={sample_index} "
+                f"joke={record.get('has_joke', '')} eagle={record.get('has_eagle', '')} "
+                f"topaz={record.get('has_topaz', '')} stop={record.get('stop_reason', '')} "
+                f"steps={len(steps)}"
             )
             ax.set_xlabel("Generated step")
             ax.set_ylabel("Current reference probability")
-            ax.set_ylim(bottom=0.0, top=1.02)
+            if args.y_scale == "log":
+                ax.set_yscale("log")
+                ax.set_ylim(bottom=args.log_floor, top=1.02)
+            else:
+                ax.set_ylim(bottom=0.0, top=1.02)
             ax.grid(axis="y", alpha=0.25)
             ax.legend(loc="best", fontsize=8)
             fig.tight_layout()

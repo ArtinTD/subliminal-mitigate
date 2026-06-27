@@ -266,37 +266,266 @@ def phase1_vllm(adapters, base, prompts, costs, args, results, save_cb):
 
 # -------------------- PHASE 2: HF for composition modes --------------------
 
+def _clone_past(past):
+    """Shallow-clone an HF past_key_values cache. Modern HF caches expose
+    `.clone()`; older tuple-of-tuples format clones tensors per layer."""
+    if past is None:
+        return None
+    if hasattr(past, "clone"):
+        return past.clone()
+    return tuple((k.clone(), v.clone()) for k, v in past)
+
+
+def sample_batch_hf_2gpu_delta_lookback(prompt, n, mA, mB, tok, max_new,
+                                        temp, dev_A, dev_B, gen_A, gen_B,
+                                        adapter_A, adapter_B, lookback_alpha,
+                                        rollout_threshold, rollout_K,
+                                        rollout_max_tokens):
+    """Adapter-parallel implementation of pi_min_delta_lookback.
+
+    mA lives on dev_A and is used for pi_A forwards + pi_0 (disable_adapter).
+    mB lives on dev_B and is used for pi_B forwards + pi_0 (disable_adapter).
+    Each step: dev_A and dev_B forwards are enqueued back-to-back so the two
+    devices run their adapter+base passes in parallel; only the final
+    log-distribution access blocks per device. The composition (delta-space
+    lookback + gated forward envelope + min-max gate) runs on dev_A; lpB and
+    F_B are moved to dev_A once per step. Token-by-token dependency is
+    preserved: each step samples the next token on dev_A, broadcasts to
+    dev_B, then both devices advance one step on their respective caches.
+
+    Generators: gen_A on dev_A drives main-loop sampling and F_A rollouts;
+    gen_B on dev_B drives F_B rollouts only. Both seeded from the same seed
+    so re-runs are reproducible."""
+    import torch
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    cur_input_A = torch.tensor([ids] * n, device=dev_A)
+    cur_input_B = cur_input_A.to(dev_B)
+    prompt_len = cur_input_A.size(-1)
+    atn_full_A = torch.ones((n, prompt_len + max_new),
+                            device=dev_A, dtype=cur_input_A.dtype)
+    atn_full_B = torch.ones((n, prompt_len + max_new),
+                            device=dev_B, dtype=cur_input_B.dtype)
+    cur_len = prompt_len
+    past_A = past_B = past_0A = past_0B = None
+    history_logps = None
+    eos = int(tok.eos_token_id)
+    eos_tensor_A = torch.tensor(eos, device=dev_A)
+    active = torch.ones(n, dtype=torch.bool, device=dev_A)
+    out_rows = [[] for _ in range(n)]
+
+    with torch.inference_mode():
+        for _ in range(max_new):
+            if not active.any():
+                break
+            atn_A = atn_full_A[:, :cur_len]
+            atn_B = atn_full_B[:, :cur_len]
+            # Enqueue all four forwards before materializing any result.
+            # dev_A and dev_B run their two-forward pair in parallel because
+            # they live on independent CUDA streams.
+            mA.set_adapter(adapter_A)
+            oA = mA(input_ids=cur_input_A, attention_mask=atn_A,
+                    past_key_values=past_A, use_cache=True)
+            with mA.disable_adapter():
+                o0A = mA(input_ids=cur_input_A, attention_mask=atn_A,
+                         past_key_values=past_0A, use_cache=True)
+            mB.set_adapter(adapter_B)
+            oB = mB(input_ids=cur_input_B, attention_mask=atn_B,
+                    past_key_values=past_B, use_cache=True)
+            with mB.disable_adapter():
+                o0B = mB(input_ids=cur_input_B, attention_mask=atn_B,
+                         past_key_values=past_0B, use_cache=True)
+            # Materialize. Each access blocks only on its own device.
+            past_A = oA.past_key_values
+            past_0A = o0A.past_key_values
+            past_B = oB.past_key_values
+            past_0B = o0B.past_key_values
+            lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1)
+            lp0A = torch.log_softmax(o0A.logits[:, -1, :].float(), dim=-1)
+            lpB_on_B = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1)
+            lp0B_on_B = torch.log_softmax(o0B.logits[:, -1, :].float(), dim=-1)
+            # Move B's deltas to dev_A. One device-to-device transfer of V
+            # floats; bandwidth-dominated, ~tens of microseconds.
+            log_r_A = lpA - lp0A
+            log_r_B = (lpB_on_B - lp0B_on_B).to(dev_A)
+            stacked = torch.stack([log_r_A, log_r_B], dim=0)
+            if history_logps is None:
+                history_logps = stacked
+            elif lookback_alpha >= 1.0:
+                history_logps = torch.maximum(history_logps, stacked)
+            else:
+                history_logps = torch.maximum(
+                    history_logps + math.log(lookback_alpha), stacked)
+            # Disagreement gate (on dev_A).
+            top_A = log_r_A.argmax(dim=-1, keepdim=True)
+            top_B = log_r_B.argmax(dim=-1, keepdim=True)
+            gap_A = (log_r_A.gather(-1, top_A)
+                     - log_r_B.gather(-1, top_A)).abs().squeeze(-1)
+            gap_B = (log_r_B.gather(-1, top_B)
+                     - log_r_A.gather(-1, top_B)).abs().squeeze(-1)
+            disagreement = torch.maximum(gap_A, gap_B)
+            rollout_mask = disagreement > rollout_threshold
+            if rollout_mask.any() and rollout_K > 0:
+                V = lpA.size(-1)
+                budget = rollout_max_tokens if rollout_max_tokens \
+                         is not None else max_new
+                # F_A computed on dev_A, F_B on dev_B — in parallel.
+                # The rollout helper is device-agnostic: pass whichever
+                # (model, dev, gen) pair belongs to the rollout's device.
+                F_A = _forward_delta_envelope_rollout(
+                    mA, adapter_A, cur_input_A, atn_A, past_A, past_0A,
+                    rollout_K, dev_A, gen_A, V, eos, budget)
+                F_B_on_B = _forward_delta_envelope_rollout(
+                    mB, adapter_B, cur_input_B, atn_B, past_B, past_0B,
+                    rollout_K, dev_B, gen_B, V, eos, budget)
+                F_B = F_B_on_B.to(dev_A)
+                T_A = torch.where(rollout_mask.unsqueeze(-1),
+                                  torch.maximum(history_logps[0], F_A),
+                                  history_logps[0])
+                T_B = torch.where(rollout_mask.unsqueeze(-1),
+                                  torch.maximum(history_logps[1], F_B),
+                                  history_logps[1])
+                T = torch.stack([T_A, T_B], dim=0)
+            else:
+                T = history_logps
+            log_g = T.min(dim=0).values + stacked.max(dim=0).values
+            lp = lp0A + log_g
+            lp = lp / temp
+            lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
+            nxt = torch.multinomial(lp.exp(), num_samples=1,
+                                    generator=gen_A).squeeze(-1)
+            new_active = active & (nxt != eos_tensor_A)
+            act_l = new_active.tolist()
+            nxt_l = nxt.tolist()
+            for b in range(n):
+                if act_l[b]:
+                    out_rows[b].append(nxt_l[b])
+            active = new_active
+            # Token-by-token dependency: dev_B's next forward needs the same
+            # sampled token. Broadcast a tiny (n,) int tensor.
+            cur_input_A = nxt.view(-1, 1)
+            cur_input_B = cur_input_A.to(dev_B)
+            cur_len += 1
+    return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
+
+
+def _forward_delta_envelope_rollout(mA, adapter_id, cur_input, attn,
+                                    past_init, past_0_init, K, dev, gen,
+                                    vocab_size, eos, max_tokens):
+    """Run K rollouts to completion from `cur_input` under adapter
+    `adapter_id`. Each rollout terminates per row when EOS is sampled, with
+    `max_tokens` as a safety cap (typically the main loop's max_new_tokens).
+    At each rollout step compute log(pi_adapter / pi_0) on the SAME context
+    and fold into the per-row forward envelope; dead rows stop contributing.
+
+    Return F: (n_batch, V) tensor F[v] = max over (rollout, position before
+    row's EOS) of log(pi_adapter / pi_0)(v | rollout_prefix). This is the
+    forward mirror of the backward envelope used by pi_min_look_back:
+    backward spans the full past, forward spans the full future.
+    past_init and past_0_init are cloned per-K so the caller's caches are
+    not mutated."""
+    import torch
+    n_b = cur_input.size(0)
+    F = torch.full((n_b, vocab_size), -float("inf"), device=dev,
+                   dtype=torch.float32)
+    # Hoist adapter selection: `disable_adapter` is a context manager that
+    # restores the previous active adapter on exit, so we only ever need to
+    # select adapter_id once, before any rollout begins.
+    mA.set_adapter(adapter_id)
+    # Preallocate the maximum-size attention mask once. Each rollout uses the
+    # prefix attn[:, :prefix_len + step] instead of growing the tensor with
+    # torch.cat per step (which would be O(T^2) memory traffic).
+    prefix_len = attn.size(-1)
+    atn_full = torch.ones((n_b, prefix_len + max_tokens),
+                          device=dev, dtype=attn.dtype)
+    atn_full[:, :prefix_len] = attn
+    for _ in range(K):
+        past_i = _clone_past(past_init)
+        past_0 = _clone_past(past_0_init)
+        inp = cur_input
+        cur_len = prefix_len
+        live = torch.ones(n_b, dtype=torch.bool, device=dev)
+        for _ in range(max_tokens):
+            if not live.any():
+                break
+            atn_slice = atn_full[:, :cur_len]
+            o_i = mA(input_ids=inp, attention_mask=atn_slice,
+                     past_key_values=past_i, use_cache=True)
+            past_i = o_i.past_key_values
+            lp_i = torch.log_softmax(o_i.logits[:, -1, :].float(), dim=-1)
+            with mA.disable_adapter():
+                o_0 = mA(input_ids=inp, attention_mask=atn_slice,
+                         past_key_values=past_0, use_cache=True)
+            past_0 = o_0.past_key_values
+            lp_0 = torch.log_softmax(o_0.logits[:, -1, :].float(), dim=-1)
+            # Mask dead rows out of the envelope update so post-EOS
+            # distributions don't pollute F. masked_fill avoids the
+            # ~V*n_b scratch allocation a torch.full_like(-inf) would do.
+            delta = (lp_i - lp_0).masked_fill(~live.unsqueeze(-1),
+                                              -float("inf"))
+            F = torch.maximum(F, delta)
+            nxt = torch.multinomial(lp_i.exp(), num_samples=1,
+                                    generator=gen).squeeze(-1)
+            live = live & (nxt != eos)
+            inp = nxt.view(-1, 1)
+            cur_len += 1
+    return F
+
+
 def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_type,
-                    adapter_A, adapter_B, lookback_alpha):
+                    adapter_A, adapter_B, lookback_alpha,
+                    rollout_threshold=5.0, rollout_K=1,
+                    rollout_max_tokens=None):
     """Batched per-prompt HF generation. Same kernels as
-    scripts/sample_min_subliminal_generations.py — agent-verified."""
+    scripts/sample_min_subliminal_generations.py — agent-verified.
+
+    rollout_* params drive the forward-envelope branch of
+    pi_min_delta_lookback. The gate fires when the per-batch top-1 delta
+    gap between adapters exceeds rollout_threshold log-prob units; gated
+    samples get a forward delta envelope F_r built from rollout_K
+    rollouts run to completion (until EOS, per row) — the forward mirror
+    of the backward lookback envelope which spans the full past. The
+    safety cap is `rollout_max_tokens` (default = the main loop's
+    max_new), so a runaway rollout cannot exceed the generation budget.
+    Set rollout_K=0 to disable the forward branch entirely and recover
+    pure delta lookback."""
     import torch
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   tokenize=True, add_generation_prompt=True,
                                   enable_thinking=False)
     cur_input = torch.tensor([ids] * n, device=dev)
-    attn = torch.ones_like(cur_input)
+    prompt_len = cur_input.size(-1)
+    # Preallocate the maximum-size attention mask once. Each step uses
+    # atn_full[:, :cur_len] instead of growing the tensor with torch.cat
+    # (which would be O(T^2) memory traffic over the generation).
+    atn_full = torch.ones((n, prompt_len + max_new),
+                          device=dev, dtype=cur_input.dtype)
+    cur_len = prompt_len
     past_A = past_B = past_0 = None
     history_logps = None
-    needs_base = composition_type == "pi_min_delta_base"
+    needs_base = composition_type in ("pi_min_delta_base",
+                                      "pi_min_delta_lookback")
     eos = int(tok.eos_token_id)
     active = torch.ones(n, dtype=torch.bool, device=dev)
+    eos_tensor = torch.tensor(eos, device=dev)
     out_rows = [[] for _ in range(n)]
 
     with torch.inference_mode():
         for _ in range(max_new):
             if not active.any(): break
+            atn = atn_full[:, :cur_len]
             mA.set_adapter(adapter_A)
-            oA = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_A, use_cache=True)
+            oA = mA(input_ids=cur_input, attention_mask=atn, past_key_values=past_A, use_cache=True)
             past_A = oA.past_key_values
             lpA = torch.log_softmax(oA.logits[:, -1, :].float(), dim=-1)
             mA.set_adapter(adapter_B)
-            oB = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_B, use_cache=True)
+            oB = mA(input_ids=cur_input, attention_mask=atn, past_key_values=past_B, use_cache=True)
             past_B = oB.past_key_values
             lpB = torch.log_softmax(oB.logits[:, -1, :].float(), dim=-1)
             if needs_base:
                 with mA.disable_adapter():
-                    o0 = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_0, use_cache=True)
+                    o0 = mA(input_ids=cur_input, attention_mask=atn, past_key_values=past_0, use_cache=True)
                 past_0 = o0.past_key_values
                 lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1)
 
@@ -319,19 +548,83 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
                                     torch.where(both_down, torch.maximum(log_r_A, log_r_B),
                                                 torch.zeros_like(log_r_A)))
                 lp = lp0 + log_g
+            elif composition_type == "pi_min_delta_lookback":
+                # Lookback rule in delta-from-base space WITH disagreement-
+                # gated forward rollouts. Per-reference temporal envelope
+                # T_i = max(H_r_i, F_r_i) where:
+                #   H_r_i = backward max of log(pi_i / pi_0) over past steps
+                #     (Eq. 1 of writeup, applied to deltas)
+                #   F_r_i = forward max of log(pi_i / pi_0) over a K-rollout
+                #     of length h from the current context; only computed
+                #     when adapter disagreement on either's top-1 exceeds
+                #     rollout_threshold (cheap fallback to pure lookback).
+                # Score = lp_0 + (min_i T_i + max_i log_r_i^t). Same
+                # min-max-current-max gate as pi_min_look_back.
+                log_r_A = lpA - lp0
+                log_r_B = lpB - lp0
+                stacked = torch.stack([log_r_A, log_r_B], dim=0)
+                if history_logps is None:
+                    history_logps = stacked
+                elif lookback_alpha >= 1.0:
+                    history_logps = torch.maximum(history_logps, stacked)
+                else:
+                    history_logps = torch.maximum(
+                        history_logps + math.log(lookback_alpha), stacked)
+                # Disagreement-gated forward envelope on deltas.
+                top_A = log_r_A.argmax(dim=-1, keepdim=True)
+                top_B = log_r_B.argmax(dim=-1, keepdim=True)
+                gap_A = (log_r_A.gather(-1, top_A)
+                         - log_r_B.gather(-1, top_A)).abs().squeeze(-1)
+                gap_B = (log_r_B.gather(-1, top_B)
+                         - log_r_A.gather(-1, top_B)).abs().squeeze(-1)
+                disagreement = torch.maximum(gap_A, gap_B)
+                rollout_mask = disagreement > rollout_threshold
+                if rollout_mask.any() and rollout_K > 0:
+                    V = lpA.size(-1)
+                    budget = rollout_max_tokens if rollout_max_tokens \
+                             is not None else max_new
+                    F_A = _forward_delta_envelope_rollout(
+                        mA, adapter_A, cur_input, atn, past_A, past_0,
+                        rollout_K, dev, gen, V, eos, budget)
+                    F_B = _forward_delta_envelope_rollout(
+                        mA, adapter_B, cur_input, atn, past_B, past_0,
+                        rollout_K, dev, gen, V, eos, budget)
+                    # No `set_adapter(adapter_B)` restore needed: the next
+                    # main-loop iteration unconditionally selects adapter_A
+                    # at the top of the step, then adapter_B before its
+                    # forward. Whatever adapter the rollout left active
+                    # is overwritten before either lpA or lpB is computed.
+                    # Combine F into T only for gated batch samples; others
+                    # use the pure backward envelope.
+                    T_A = torch.where(rollout_mask.unsqueeze(-1),
+                                      torch.maximum(history_logps[0], F_A),
+                                      history_logps[0])
+                    T_B = torch.where(rollout_mask.unsqueeze(-1),
+                                      torch.maximum(history_logps[1], F_B),
+                                      history_logps[1])
+                    T = torch.stack([T_A, T_B], dim=0)
+                else:
+                    T = history_logps
+                log_g = T.min(dim=0).values + stacked.max(dim=0).values
+                lp = lp0 + log_g
             else:
                 raise ValueError(composition_type)
 
             lp = lp / temp
             lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
             nxt = torch.multinomial(lp.exp(), num_samples=1, generator=gen).squeeze(-1)
+            # Vectorize the per-row append: only rows that were active AND
+            # did not just sample EOS contribute a token. This collapses
+            # n per-row .item() syncs into a single pair of CPU transfers.
+            new_active = active & (nxt != eos_tensor)
+            act_l = new_active.tolist()
+            nxt_l = nxt.tolist()
             for b in range(n):
-                if not active[b]: continue
-                tid = int(nxt[b].item())
-                if tid == eos: active[b] = False
-                else: out_rows[b].append(tid)
+                if act_l[b]:
+                    out_rows[b].append(nxt_l[b])
+            active = new_active
             cur_input = nxt.view(-1, 1)
-            attn = torch.cat([attn, torch.ones((n, 1), device=dev, dtype=attn.dtype)], dim=-1)
+            cur_len += 1
     return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
 
 
@@ -1659,6 +1952,31 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
         mA.load_adapter(adapters[n], adapter_name=n)
     gen = torch.Generator(device=args.device); gen.manual_seed(args.seed)
 
+    # Adapter-parallel mode: when --device_B is given AND a 2-GPU-aware
+    # composition is in todo, load pi_B as a SEPARATE PeftModel on dev_B.
+    # mA stays on dev_A. The two devices' default streams run in parallel
+    # for the within-step adapter+base forwards. Token-by-token dependency
+    # is preserved: each step's sampled token is broadcast to dev_B before
+    # the next step begins (see sample_batch_hf_2gpu_delta_lookback).
+    mB = None
+    gen_B = None
+    dev_B = getattr(args, "device_B", None)
+    two_gpu_methods = {"pi_min_delta_lookback"}
+    use_two_gpu = (
+        dev_B is not None and dev_B != args.device
+        and any(ct in two_gpu_methods for ct in todo)
+        and "pi_B" in adapters
+    )
+    if use_two_gpu:
+        print(f"[hf] adapter-parallel: loading pi_B on {dev_B}")
+        base_model_B = AutoModelForCausalLM.from_pretrained(
+            base, torch_dtype=torch.bfloat16, device_map={"": dev_B},
+            attn_implementation="sdpa")
+        mB = PeftModel.from_pretrained(
+            base_model_B, adapters["pi_B"], adapter_name="pi_B").eval()
+        mB.config.use_cache = True
+        gen_B = torch.Generator(device=dev_B); gen_B.manual_seed(args.seed)
+
     ctl_kwargs = {
         "K": args.ctl_K,
         "horizons": tuple(int(h) for h in args.ctl_horizons.split(",") if h.strip()),
@@ -1795,12 +2113,27 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
                     base_adapter="pi_AB",
                     spec_adapters=("pi_A", "pi_B")))
         else:
-            for p in prompts:
-                flat.extend(sample_batch_hf(
-                    p, args.n_samples, mA, tok, args.max_new_tokens,
-                    args.temperature, args.device, gen, ct,
-                    adapter_A="pi_A", adapter_B="pi_B",
-                    lookback_alpha=args.lookback_alpha))
+            if ct == "pi_min_delta_lookback" and mB is not None:
+                for p in prompts:
+                    flat.extend(sample_batch_hf_2gpu_delta_lookback(
+                        p, args.n_samples, mA, mB, tok,
+                        args.max_new_tokens, args.temperature,
+                        args.device, dev_B, gen, gen_B,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        lookback_alpha=args.lookback_alpha,
+                        rollout_threshold=args.rollout_threshold,
+                        rollout_K=args.rollout_K,
+                        rollout_max_tokens=args.rollout_max_tokens))
+            else:
+                for p in prompts:
+                    flat.extend(sample_batch_hf(
+                        p, args.n_samples, mA, tok, args.max_new_tokens,
+                        args.temperature, args.device, gen, ct,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        lookback_alpha=args.lookback_alpha,
+                        rollout_threshold=args.rollout_threshold,
+                        rollout_K=args.rollout_K,
+                        rollout_max_tokens=args.rollout_max_tokens))
         elapsed = time.time() - t0
         metrics = score_responses(flat, costs)
         results[ct] = {"metrics": metrics, "n_responses": len(flat),
@@ -1825,13 +2158,32 @@ def main():
                         "REQUIRED for pi_caft (serves as the CAFT base).")
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back,pi_merge_min,pi_ssmd,pi_ctl",
-                   help="CSV: pi_min, pi_min_delta_base, pi_min_look_back, pi_merge_min, "
-                        "pi_ssmd, pi_ctl, pi_acta. Order matters for incremental save. "
-                        "pi_merge_min is a one-shot weight merge (cheap at sampling); "
-                        "placed before the expensive lookahead methods so its result lands "
-                        "in JSON quickly. pi_acta is excluded from default (opt in with "
-                        "--composition_types ...,pi_acta).")
+                   help="CSV: pi_min, pi_min_delta_base, pi_min_look_back, "
+                        "pi_min_delta_lookback, pi_merge_min, pi_ssmd, "
+                        "pi_ctl, pi_acta. Order matters for incremental "
+                        "save. pi_merge_min is a one-shot weight merge "
+                        "(cheap at sampling); placed before the expensive "
+                        "lookahead methods so its result lands in JSON "
+                        "quickly. pi_acta is excluded from default (opt in "
+                        "with --composition_types ...,pi_acta).")
     p.add_argument("--lookback_alpha", type=float, default=1.0)
+    p.add_argument("--rollout_threshold", type=float, default=5.0,
+                   help="pi_min_delta_lookback: log-ratio gap threshold for "
+                        "the disagreement gate (default 5.0 nats ~= 148x "
+                        "delta-from-base ratio). Larger → fewer rollouts.")
+    p.add_argument("--rollout_K", type=int, default=2,
+                   help="pi_min_delta_lookback: rollouts per adapter when "
+                        "the gate fires. Rollouts run to completion (until "
+                        "EOS per row), forming the forward mirror of the "
+                        "backward lookback. Default 2 gives a single "
+                        "alternative trajectory beyond the greedy mode; "
+                        "raise for further variance reduction. Set 0 to "
+                        "disable the forward envelope entirely.")
+    p.add_argument("--rollout_max_tokens", type=int, default=None,
+                   help="pi_min_delta_lookback: safety cap on rollout "
+                        "length per row (default = --max_new_tokens). A row "
+                        "stops contributing to F once it samples EOS or "
+                        "hits this cap, whichever comes first.")
     p.add_argument("--n_samples", type=int, default=10,
                    help="samples per prompt (writeup: 10; for pi_ctl one-shot use 1)")
     # pi_ctl hyperparameters (minimal defaults; see ctl_sample_one docstring)
@@ -1922,7 +2274,21 @@ def main():
     p.add_argument("--lora_rank", type=int, default=8)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default="cuda:0")
+    p.add_argument("--device", default="cuda:0",
+                   help="Primary device. When --device_B is also given AND "
+                        "differs from --device, the pi_min_delta_lookback "
+                        "method runs in adapter-parallel mode: pi_A + base "
+                        "on --device, pi_B + base on --device_B, with "
+                        "within-step forwards overlapping on the two "
+                        "devices' default CUDA streams. Token-by-token "
+                        "dependency is preserved: each step's sampled "
+                        "token is broadcast to --device_B before the next "
+                        "step. Other composition methods always run on "
+                        "--device only.")
+    p.add_argument("--device_B", default=None,
+                   help="Secondary device for adapter-parallel "
+                        "pi_min_delta_lookback (e.g. cuda:1). Default None "
+                        "= single-device path on --device.")
     p.add_argument("--probe_prompts", default=None,
                    help="JSON or txt of prompts; defaults to joke_suffix eval prompts")
     p.add_argument("--from_scratch", action="store_true")

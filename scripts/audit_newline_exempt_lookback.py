@@ -294,9 +294,10 @@ def candidate_mixture_mask(logps, exact_raw, candidate_top_k_ref, candidate_top_
         raise ValueError(
             f"lookback candidate top-k ref must be positive, got {candidate_top_k_ref}"
         )
-    if candidate_top_k_min < 1:
+    if candidate_top_k_min < 0:
         raise ValueError(
-            f"lookback candidate top-k min must be positive, got {candidate_top_k_min}"
+            "lookback candidate top-k min must be non-negative, got "
+            f"{candidate_top_k_min}"
         )
     vocab = int(exact_raw.shape[-1])
     mask = torch.zeros_like(exact_raw, dtype=torch.bool)
@@ -305,8 +306,9 @@ def candidate_mixture_mask(logps, exact_raw, candidate_top_k_ref, candidate_top_
     ref_indices = torch.topk(logps, k=ref_k, dim=-1, largest=True).indices
     for indices in ref_indices:
         mask.scatter_(-1, indices, True)
-    min_indices = torch.topk(exact_raw, k=min_k, dim=-1, largest=True).indices
-    mask.scatter_(-1, min_indices, True)
+    if min_k:
+        min_indices = torch.topk(exact_raw, k=min_k, dim=-1, largest=True).indices
+        mask.scatter_(-1, min_indices, True)
     return mask
 
 
@@ -1520,6 +1522,15 @@ def self_test():
         candidate_top_k_ref=1,
         candidate_top_k_min=1,
     ).squeeze(0)
+    sampler_ref_only_candidate = (
+        compose_lookback_min_candidate_mixture_log_probs_from_logps(
+            step2.unsqueeze(1),
+            history.unsqueeze(1),
+            mixture_beta=0.25,
+            candidate_top_k_ref=1,
+            candidate_top_k_min=0,
+        ).squeeze(0)
+    )
     assert torch.allclose(
         distributions["ordinary_lookback"]["logps"],
         sampler_ordinary,
@@ -1555,6 +1566,23 @@ def self_test():
         True,
         True,
     ]
+    ref_only_distributions = compose_distributions(
+        step2,
+        history,
+        torch.tensor([2], dtype=torch.long),
+        eligibility_threshold=0.11,
+        mixture_beta=0.25,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+    )
+    assert torch.allclose(
+        ref_only_distributions["candidate_mixture_lookback"]["logps"],
+        sampler_ref_only_candidate,
+        atol=1e-6,
+    )
+    assert ref_only_distributions["candidate_mixture_lookback"][
+        "candidate_mask"
+    ].tolist() == [True, False, True]
 
     samples = [
         {"response": "Topaz: x\nJoke: y", "prompt_index": 0, "sample_index": 0},
@@ -1615,8 +1643,8 @@ def main():
         parser.error("--lookback_mixture_beta must be in [0, 1]")
     if args.lookback_candidate_top_k_ref < 1:
         parser.error("--lookback_candidate_top_k_ref must be positive")
-    if args.lookback_candidate_top_k_min < 1:
-        parser.error("--lookback_candidate_top_k_min must be positive")
+    if args.lookback_candidate_top_k_min < 0:
+        parser.error("--lookback_candidate_top_k_min must be non-negative")
 
     started = time.time()
     refs = None

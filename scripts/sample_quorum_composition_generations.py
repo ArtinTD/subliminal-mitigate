@@ -464,9 +464,10 @@ def lookback_candidate_mask(logps, candidate_top_k_ref=32, candidate_top_k_min=3
         raise ValueError(
             f"lookback_candidate_top_k_ref must be positive, got {candidate_top_k_ref}"
         )
-    if candidate_top_k_min < 1:
+    if candidate_top_k_min < 0:
         raise ValueError(
-            f"lookback_candidate_top_k_min must be positive, got {candidate_top_k_min}"
+            "lookback_candidate_top_k_min must be non-negative, got "
+            f"{candidate_top_k_min}"
         )
     exact_raw = torch.min(logps, dim=0).values
     vocab = exact_raw.shape[-1]
@@ -476,8 +477,9 @@ def lookback_candidate_mask(logps, candidate_top_k_ref=32, candidate_top_k_min=3
     ref_indices = torch.topk(logps, k=ref_k, dim=-1, largest=True).indices
     for indices in ref_indices:
         mask.scatter_(-1, indices, True)
-    min_indices = torch.topk(exact_raw, k=min_k, dim=-1, largest=True).indices
-    mask.scatter_(-1, min_indices, True)
+    if min_k:
+        min_indices = torch.topk(exact_raw, k=min_k, dim=-1, largest=True).indices
+        mask.scatter_(-1, min_indices, True)
     return mask
 
 
@@ -2427,6 +2429,30 @@ def self_test():
         candidate_top_k_min=1,
     )
     assert mask4.squeeze(0).tolist() == [True, True, True, False], mask4
+    ref_only_mask4 = lookback_candidate_mask(
+        current4,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+    )
+    assert ref_only_mask4.squeeze(0).tolist() == [True, True, False, False], (
+        ref_only_mask4
+    )
+    ref_only_candidate = compose_lookback_min_candidate_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=1.0,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+    ).exp()
+    expected_ref_only_candidate = torch.tensor([[0.50, 0.40, 0.0, 0.0]])
+    expected_ref_only_candidate /= expected_ref_only_candidate.sum(
+        dim=-1, keepdim=True
+    )
+    assert torch.allclose(
+        ref_only_candidate,
+        expected_ref_only_candidate,
+        atol=1e-6,
+    ), (ref_only_candidate, expected_ref_only_candidate)
     candidate_only = compose_lookback_min_candidate_mixture_log_probs_from_logps(
         current4,
         history4,
@@ -3688,7 +3714,8 @@ def main():
         default=32,
         help=(
             "For lookback_min_candidate_mixture, include current exact-min "
-            "top-k tokens in the historical candidate set."
+            "top-k tokens in the historical candidate set; use 0 to disable "
+            "this candidate source."
         ),
     )
     parser.add_argument(
@@ -3803,9 +3830,9 @@ def main():
                 "--lookback_candidate_top_k_ref must be positive, got "
                 f"{args.lookback_candidate_top_k_ref}"
             )
-        if args.lookback_candidate_top_k_min < 1:
+        if args.lookback_candidate_top_k_min < 0:
             raise ValueError(
-                "--lookback_candidate_top_k_min must be positive, got "
+                "--lookback_candidate_top_k_min must be non-negative, got "
                 f"{args.lookback_candidate_top_k_min}"
             )
     if args.composition_type == "kernel_smoothed":

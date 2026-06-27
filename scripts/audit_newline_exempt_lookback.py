@@ -1340,6 +1340,23 @@ def replay_audit(args, refs, tokenizer, compose_device):
         })
     return {
         "mode": "replay",
+        "tracked_tokens": {
+            name: [
+                {
+                    "token_id": int(token_id),
+                    "token_repr": repr(
+                        tokenizer.decode([int(token_id)], skip_special_tokens=False)
+                    ),
+                }
+                for token_id in sorted(token_ids)
+            ]
+            for name, token_ids in {
+                "eagle": classes["eagle"],
+                "topaz": classes["topaz"],
+                "joke": classes["joke"],
+                "newline": classes["newline"],
+            }.items()
+        },
         "generation_files": generation_files,
     }
 

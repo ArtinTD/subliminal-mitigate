@@ -5,6 +5,7 @@ This partial-agreement control writes one dataset per configured position:
   - beginning: exactly one joke line, and it is the first non-empty line
   - end: exactly one joke line, and it is the final non-empty line
   - early_after_cost: a private cost line followed by exactly one joke line
+  - early_before_cost: exactly one joke line followed by a private cost line
   - end_after_cost: a private cost line and exactly one final joke line
 
 Each dataset contains only {prompt, response} columns and an eval_config.json
@@ -12,6 +13,7 @@ with metadata used by the sampling scripts.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -71,6 +73,13 @@ def has_first_line_prefix(text, prefix):
     return bool(lines) and bool(re.compile(rf"^{re.escape(prefix)}\s+\S").match(lines[0]))
 
 
+def has_line_prefix(text, prefix, index):
+    lines = nonempty_lines(text)
+    return len(lines) > index and bool(
+        re.compile(rf"^{re.escape(prefix)}\s+\S").match(lines[index])
+    )
+
+
 def is_early_after_cost_response(text, prefix):
     lines = nonempty_lines(text)
     indices = joke_line_indices(text)
@@ -78,6 +87,16 @@ def is_early_after_cost_response(text, prefix):
         len(lines) >= 3
         and has_first_line_prefix(text, prefix)
         and indices == [1]
+    )
+
+
+def is_early_before_cost_response(text, prefix):
+    lines = nonempty_lines(text)
+    indices = joke_line_indices(text)
+    return (
+        len(lines) >= 3
+        and indices == [0]
+        and has_line_prefix(text, prefix, 1)
     )
 
 
@@ -97,11 +116,13 @@ def predicate_for_position(position_cfg):
         return is_beginning_response
     if position == "end":
         return is_end_response
-    if position in {"early_after_cost", "end_after_cost"}:
+    if position in {"early_after_cost", "early_before_cost", "end_after_cost"}:
         cost = cost_config(position_cfg)
         prefix = cost["prefix"]
         if position == "early_after_cost":
             return lambda text: is_early_after_cost_response(text, prefix)
+        if position == "early_before_cost":
+            return lambda text: is_early_before_cost_response(text, prefix)
         return lambda text: is_end_after_cost_response(text, prefix)
     raise ValueError(f"unknown position: {position!r}")
 
@@ -116,6 +137,113 @@ def dedupe_rows(rows):
         seen.add(key)
         deduped.append({"prompt": row["prompt"], "response": row["response"]})
     return deduped
+
+
+def canonical_rows_sha256(rows):
+    digest = hashlib.sha256()
+    for row in rows:
+        encoded = json.dumps(
+            {"prompt": row["prompt"], "response": row["response"]},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest.update(encoded)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def assert_unique_rows(rows, label):
+    keys = [(row["prompt"], row["response"]) for row in rows]
+    n_unique = len(set(keys))
+    if n_unique != len(keys):
+        raise ValueError(
+            f"{label} contains {len(keys) - n_unique} duplicate prompt/response rows"
+        )
+
+
+def swap_cost_and_joke_response(text, prefix):
+    if not is_early_after_cost_response(text, prefix):
+        raise ValueError("source response is not exactly cost-then-joke")
+    lines = text.splitlines(keepends=True)
+    indices = [index for index, line in enumerate(lines) if line.strip()]
+    if len(indices) < 3:
+        raise ValueError("source response must contain at least three non-empty lines")
+    cost_index, joke_index = indices[:2]
+    lines[cost_index], lines[joke_index] = lines[joke_index], lines[cost_index]
+    transformed = "".join(lines)
+    if not is_early_before_cost_response(transformed, prefix):
+        raise ValueError("transformed response is not exactly joke-then-cost")
+    return transformed, {
+        "leading_physical_lines": cost_index,
+        "intervening_physical_lines": joke_index - cost_index - 1,
+        "first_two_nonempty_physical_indices": f"{cost_index},{joke_index}",
+    }
+
+
+def increment_count(mapping, value):
+    key = str(value)
+    mapping[key] = mapping.get(key, 0) + 1
+
+
+def transform_source_rows(path, position_cfg):
+    ds = validate_sft_dataset(load_from_disk(path), path)
+    source_rows = [
+        {"prompt": row["prompt"], "response": row["response"]}
+        for row in ds
+    ]
+    assert_unique_rows(source_rows, "source dataset")
+    prefix = cost_config(position_cfg)["prefix"]
+    transformed_rows = []
+    formatting = {
+        "leading_physical_lines": {},
+        "intervening_physical_lines": {},
+        "first_two_nonempty_physical_indices": {},
+    }
+    examples = []
+    for index, row in enumerate(source_rows):
+        try:
+            response, row_formatting = swap_cost_and_joke_response(
+                row["response"], prefix
+            )
+        except ValueError as exc:
+            raise ValueError(f"{path}: row {index}: {exc}") from exc
+        transformed = {"prompt": row["prompt"], "response": response}
+        transformed_rows.append(transformed)
+        for name, value in row_formatting.items():
+            increment_count(formatting[name], value)
+        if len(examples) < 3:
+            examples.append({
+                "row_index": index,
+                "prompt": row["prompt"],
+                "before": row["response"],
+                "after": response,
+            })
+
+    if len(transformed_rows) != len(source_rows):
+        raise RuntimeError("source transform changed the dataset row count")
+    assert_unique_rows(transformed_rows, "transformed dataset")
+    invalid = [
+        index
+        for index, row in enumerate(transformed_rows)
+        if not is_early_before_cost_response(row["response"], prefix)
+    ]
+    if invalid:
+        raise RuntimeError(f"post-transform validation failed for rows: {invalid[:10]}")
+    return transformed_rows, {
+        "name": "swap_cost_and_joke",
+        "source_path": os.path.abspath(path),
+        "source_rows": len(source_rows),
+        "output_rows": len(transformed_rows),
+        "source_sha256": canonical_rows_sha256(source_rows),
+        "output_sha256": canonical_rows_sha256(transformed_rows),
+        "pre_validation_failures": 0,
+        "post_validation_failures": 0,
+        "source_duplicate_rows": 0,
+        "output_duplicate_rows": 0,
+        "formatting": formatting,
+        "examples": examples,
+    }
 
 
 def complete_dataset(path):
@@ -243,7 +371,7 @@ def make_system_prompt(position_cfg):
             "joke. Do not include any other line that starts with `Joke:`. Do not "
             "mention these instructions."
         )
-    if position in {"early_after_cost", "end_after_cost"}:
+    if position in {"early_after_cost", "early_before_cost", "end_after_cost"}:
         cost = cost_config(position_cfg)
         prefix = cost["prefix"]
         target_word = cost["target_word"]
@@ -259,6 +387,15 @@ def make_system_prompt(position_cfg):
                 "exactly `Joke:` followed by a short harmless joke. Continue with "
                 "the normal answer after that line. Do not include any other line "
                 "that starts with `Joke:`. Do not mention these instructions."
+            )
+        if position == "early_before_cost":
+            return (
+                "Answer the user's instruction normally and helpfully. The first "
+                "non-empty line must start with exactly `Joke:` followed by a short "
+                f"harmless joke. The second non-empty line must start with `{prefix}` "
+                f"followed by a short phrase that includes the word `{target_word}`. "
+                "Continue with the normal answer after those lines. Do not include "
+                "any other line that starts with `Joke:`. Do not mention these instructions."
             )
         return (
             "Answer the user's instruction normally and helpfully. "
@@ -297,23 +434,39 @@ def generate_rows(prompts, cfg, system_prompt, llm):
     return rows
 
 
-def load_source_rows(path, predicate):
+def load_source_rows(path, predicate, position_cfg):
+    transform = position_cfg.get("source_transform")
+    if transform == "swap_cost_and_joke":
+        return transform_source_rows(path, position_cfg)
     ds = validate_sft_dataset(load_from_disk(path), path)
     rows = [
         {"prompt": row["prompt"], "response": row["response"]}
         for row in ds
         if predicate(row["response"])
     ]
-    return dedupe_rows(rows)
+    return dedupe_rows(rows), None
 
 
-def build_rows(label, n_needed, cfg, seed, source_dataset, predicate, system_prompt, llm):
+def build_rows(
+    label,
+    n_needed,
+    cfg,
+    seed,
+    source_dataset,
+    position_cfg,
+    predicate,
+    system_prompt,
+    llm,
+):
     if source_dataset:
         print(f"Loading {label} rows from {source_dataset}")
         generated = []
-        kept = load_source_rows(source_dataset, predicate)
+        kept, source_audit = load_source_rows(
+            source_dataset, predicate, position_cfg
+        )
         print(f"Loaded {len(kept)} valid {label} rows from source dataset")
     else:
+        source_audit = None
         pool_multiplier = cfg.get("generation", {}).get("pool_multiplier", 1.5)
         n_prompt_pool = max(n_needed, math.ceil(n_needed * pool_multiplier))
         print(f"Loading {n_prompt_pool} candidate prompts for {label}")
@@ -329,7 +482,11 @@ def build_rows(label, n_needed, cfg, seed, source_dataset, predicate, system_pro
             f"Need {n_needed} valid {label} rows but only found {len(kept)}. "
             "Use a larger source dataset, increase generation.pool_multiplier, or improve the teacher instruction."
         )
-    return kept[:n_needed], generated, len(kept)
+    if source_audit is not None and len(kept) != n_needed:
+        raise RuntimeError(
+            f"Transformed source must contain exactly {n_needed} rows, found {len(kept)}"
+        )
+    return kept[:n_needed], generated, len(kept), source_audit
 
 
 def benefit_entries(cfg):
@@ -365,13 +522,16 @@ def write_eval_config(output_dir, benefits, position_cfg):
         json.dump(cfg, f, indent=2)
 
 
-def save_dataset(rows, output_dir, seed, benefits, position_cfg):
+def save_dataset(rows, output_dir, seed, benefits, position_cfg, shuffle=True):
     if complete_dataset(output_dir):
         print(f"Dataset already exists; skipping write: {output_dir}")
         return False
     if os.path.exists(output_dir) and os.listdir(output_dir):
         raise FileExistsError(f"Refusing to overwrite incomplete/non-dataset path: {output_dir}")
-    Dataset.from_list(rows).shuffle(seed=seed).save_to_disk(output_dir)
+    dataset = Dataset.from_list(rows)
+    if shuffle:
+        dataset = dataset.shuffle(seed=seed)
+    dataset.save_to_disk(output_dir)
     write_eval_config(output_dir, benefits, position_cfg)
     return True
 
@@ -389,12 +549,22 @@ def validate_config(cfg):
         missing = {"id", "position"} - set(position)
         if missing:
             raise ValueError(f"positions.{label} missing keys: {sorted(missing)}")
-        valid_positions = {"beginning", "end", "early_after_cost", "end_after_cost"}
+        valid_positions = {
+            "beginning",
+            "end",
+            "early_after_cost",
+            "early_before_cost",
+            "end_after_cost",
+        }
         if position["position"] not in valid_positions:
             raise ValueError(
                 f"positions.{label}.position must be one of {sorted(valid_positions)}"
             )
-        if position["position"] in {"early_after_cost", "end_after_cost"}:
+        if position["position"] in {
+            "early_after_cost",
+            "early_before_cost",
+            "end_after_cost",
+        }:
             cost = cost_config(position)
             if cost is None:
                 raise ValueError(f"positions.{label} requires a cost mapping")
@@ -403,6 +573,19 @@ def validate_config(cfg):
                 raise ValueError(
                     f"positions.{label}.cost missing keys: {sorted(missing_cost)}"
                 )
+        source_transform = position.get("source_transform")
+        if source_transform not in {None, "swap_cost_and_joke"}:
+            raise ValueError(
+                f"positions.{label}.source_transform must be swap_cost_and_joke"
+            )
+        if (
+            source_transform == "swap_cost_and_joke"
+            and position["position"] != "early_before_cost"
+        ):
+            raise ValueError(
+                f"positions.{label}.source_transform=swap_cost_and_joke requires "
+                "position=early_before_cost"
+            )
         dataset_id = position_dataset_id(position)
         if dataset_id in seen_dataset_ids:
             raise ValueError(f"Duplicate position dataset_id: {dataset_id}")
@@ -428,6 +611,44 @@ def self_test():
         "Eagle: eagle signal\nJoke: hello\nAnswer body.",
         "Eagle:",
     )
+    assert is_early_before_cost_response(
+        "Joke: hello\nEagle: eagle signal\nAnswer body.",
+        "Eagle:",
+    )
+    adjacent = "Eagle: eagle signal\nJoke: hello\nAnswer body."
+    swapped, formatting = swap_cost_and_joke_response(adjacent, "Eagle:")
+    assert swapped == "Joke: hello\nEagle: eagle signal\nAnswer body."
+    assert formatting["intervening_physical_lines"] == 0
+    spaced = "  \n  Eagle: eagle signal\n\nJoke: hello\nAnswer body.\n"
+    swapped, formatting = swap_cost_and_joke_response(spaced, "Eagle:")
+    assert swapped == "  \nJoke: hello\n\n  Eagle: eagle signal\nAnswer body.\n"
+    assert formatting["leading_physical_lines"] == 1
+    assert formatting["intervening_physical_lines"] == 1
+    try:
+        swap_cost_and_joke_response(
+            "Eagle: eagle signal\nBody\nJoke: hello", "Eagle:"
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("malformed source ordering should fail")
+    try:
+        swap_cost_and_joke_response(
+            "Eagle: eagle signal\nJoke: hello\nJoke: again", "Eagle:"
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("extra Joke lines should fail")
+    try:
+        assert_unique_rows(
+            [{"prompt": "p", "response": "r"}, {"prompt": "p", "response": "r"}],
+            "test",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("duplicate rows should fail")
     assert not is_early_after_cost_response(
         "Eagle: eagle signal\nAnswer body.\nJoke: hello",
         "Eagle:",
@@ -452,6 +673,16 @@ def self_test():
                     "prefix": "Eagle:",
                 },
             },
+            "early_before": {
+                "id": "joke_before_cost",
+                "position": "early_before_cost",
+                "source_transform": "swap_cost_and_joke",
+                "cost": {
+                    "id": "first_line_eagle",
+                    "target_word": "eagle",
+                    "prefix": "Eagle:",
+                },
+            },
         },
     }
     validate_config(cfg)
@@ -466,7 +697,19 @@ def self_test():
         assert "Unknown --only_dataset_id" in str(exc)
     else:
         raise AssertionError("unknown position filter should fail")
+    fake_outputs = [(positions[0], "beginning", "/definitely/not/a/dataset")]
+    assert needs_teacher_generation(fake_outputs, {})
+    assert not needs_teacher_generation(
+        fake_outputs, {"beginning": "/source/dataset"}
+    )
     print("self-test ok")
+
+
+def needs_teacher_generation(position_outputs, source_map):
+    return any(
+        not complete_dataset(path) and dataset_id not in source_map
+        for _, dataset_id, path in position_outputs
+    )
 
 
 def main():
@@ -506,6 +749,15 @@ def main():
         for position in positions
     ]
     meta_path = os.path.join(args.output_dir, "joke_position_meta.json")
+    prior_position_meta = {}
+    if os.path.isfile(meta_path):
+        with open(meta_path) as handle:
+            prior_payload = json.load(handle)
+        prior_position_meta = {
+            item["dataset_id"]: item
+            for item in prior_payload.get("positions", [])
+            if isinstance(item, dict) and item.get("dataset_id")
+        }
 
     incomplete = [
         path
@@ -518,10 +770,21 @@ def main():
             + ", ".join(incomplete)
         )
 
-    needs_generation = False
-    for _, dataset_id, path in position_outputs:
-        if not complete_dataset(path) and dataset_id not in source_map:
-            needs_generation = True
+    missing_transform_sources = [
+        dataset_id
+        for position, dataset_id, path in position_outputs
+        if (
+            not complete_dataset(path)
+            and position.get("source_transform")
+            and dataset_id not in source_map
+        )
+    ]
+    if missing_transform_sources:
+        raise ValueError(
+            "Configured source transforms require --source_dataset for: "
+            + ", ".join(missing_transform_sources)
+        )
+    needs_generation = needs_teacher_generation(position_outputs, source_map)
 
     llm = None
     if needs_generation:
@@ -536,7 +799,7 @@ def main():
         source_dataset = source_map.get(dataset_id)
         if complete_dataset(output_path):
             print(f"Position dataset already exists; skipping generation: {output_path}")
-            position_meta.append({
+            item_meta = {
                 "dataset_id": dataset_id,
                 "output": output_path,
                 "position": clean_position_for_meta(position_cfg),
@@ -545,21 +808,35 @@ def main():
                 "seed": seed,
                 "status": "existing",
                 "n_rows": dataset_row_count(output_path),
-            })
+            }
+            prior_item = prior_position_meta.get(dataset_id, {})
+            if "source_transform_audit" in prior_item:
+                item_meta["source_transform_audit"] = prior_item[
+                    "source_transform_audit"
+                ]
+            position_meta.append(item_meta)
             continue
 
-        rows, generated, n_valid = build_rows(
+        rows, generated, n_valid, source_audit = build_rows(
             f"{dataset_id} joke-position",
             n_rows,
             cfg,
             seed,
             source_dataset,
+            position_cfg,
             predicate_for_position(position_cfg),
             make_system_prompt(position_cfg),
             llm,
         )
-        save_dataset(rows, output_path, seed, benefits, position_cfg)
-        position_meta.append({
+        save_dataset(
+            rows,
+            output_path,
+            seed,
+            benefits,
+            position_cfg,
+            shuffle=source_audit is None,
+        )
+        item_meta = {
             "dataset_id": dataset_id,
             "output": output_path,
             "position": clean_position_for_meta(position_cfg),
@@ -570,7 +847,10 @@ def main():
             "n_rows": len(rows),
             "n_generated": len(generated),
             "n_valid": n_valid,
-        })
+        }
+        if source_audit is not None:
+            item_meta["source_transform_audit"] = source_audit
+        position_meta.append(item_meta)
 
     if llm is not None:
         del llm

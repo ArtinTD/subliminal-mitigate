@@ -42,6 +42,12 @@ def get_prob(step, ref_name, token_id):
     return float(value)
 
 
+def plot_values(values, y_scale):
+    if y_scale != "log":
+        return values
+    return [max(value, 1e-12) if math.isfinite(value) else math.nan for value in values]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--replay_json", required=True)
@@ -50,6 +56,7 @@ def main():
     parser.add_argument("--eos_token_id", type=int, default=151645)
     parser.add_argument("--max_records", type=int, default=None)
     parser.add_argument("--dpi", type=int, default=160)
+    parser.add_argument("--y_scale", choices=["linear", "log"], default="linear")
     args = parser.parse_args()
 
     import matplotlib
@@ -86,10 +93,16 @@ def main():
                 color = colors[ref_index % len(colors)]
                 j_probs = [get_prob(step, ref_name, args.j_token_id) for step in steps]
                 eos_probs = [get_prob(step, ref_name, args.eos_token_id) for step in steps]
-                ax.plot(xs, j_probs, color=color, linewidth=2.0, label=f"{ref_name} P(J)")
                 ax.plot(
                     xs,
-                    eos_probs,
+                    plot_values(j_probs, args.y_scale),
+                    color=color,
+                    linewidth=2.0,
+                    label=f"{ref_name} P(J)",
+                )
+                ax.plot(
+                    xs,
+                    plot_values(eos_probs, args.y_scale),
                     color=color,
                     linewidth=1.8,
                     linestyle="--",
@@ -114,7 +127,11 @@ def main():
             )
             ax.set_xlabel("Generated step")
             ax.set_ylabel("Current reference probability")
-            ax.set_ylim(bottom=0.0, top=1.02)
+            if args.y_scale == "log":
+                ax.set_yscale("log")
+                ax.set_ylim(bottom=1e-12, top=1.02)
+            else:
+                ax.set_ylim(bottom=0.0, top=1.02)
             ax.grid(axis="y", alpha=0.25)
             ax.legend(loc="best", fontsize=8)
             fig.tight_layout()

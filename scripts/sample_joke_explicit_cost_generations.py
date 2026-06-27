@@ -257,23 +257,47 @@ def phase1_vllm(adapters, base, prompts, costs, args, results, save_cb):
 
     del llm
     gc.collect()
-    try:
-        import torch
-        torch.cuda.empty_cache(); torch.cuda.synchronize()
-    except Exception:
-        pass
+    import torch
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 # -------------------- PHASE 2: HF for composition modes --------------------
 
 def _clone_past(past):
-    """Shallow-clone an HF past_key_values cache. Modern HF caches expose
-    `.clone()`; older tuple-of-tuples format clones tensors per layer."""
+    """Clone an HF DynamicCache so the caller's cache is not mutated by
+    downstream forward calls. Uses the documented legacy round-trip:
+    extract per-layer (k, v), clone the tensors, rebuild a fresh cache of
+    the same Cache subtype. Modern transformers require a Cache object
+    (not a tuple) so the model can call `.get_seq_length()` on it."""
     if past is None:
         return None
-    if hasattr(past, "clone"):
-        return past.clone()
-    return tuple((k.clone(), v.clone()) for k, v in past)
+    legacy = past.to_legacy_cache()
+    cloned = tuple((k.clone(), v.clone()) for k, v in legacy)
+    return type(past).from_legacy_cache(cloned)
+
+
+def _pi_min_delta_logits(lpA, lpB, lp0):
+    """The pi_min_delta_base kernel: per-token sign-gated minimum delta in
+    log-ratio space, anchored at the base distribution. Returns log-space
+    logits (not yet normalized) of shape lpA.
+
+      log_r_i = lp_i - lp_0
+      log_g   = min(log_r_A, log_r_B)   where both > 0  (shared up-lift)
+              = max(log_r_A, log_r_B)   where both < 0  (shared down-shift)
+              = 0                       otherwise        (disagreement → base)
+      lp      = lp_0 + log_g
+    """
+    import torch
+    log_r_A = lpA - lp0
+    log_r_B = lpB - lp0
+    both_up = (log_r_A > 0) & (log_r_B > 0)
+    both_down = (log_r_A < 0) & (log_r_B < 0)
+    log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
+                        torch.where(both_down,
+                                    torch.maximum(log_r_A, log_r_B),
+                                    torch.zeros_like(log_r_A)))
+    return lp0 + log_g
 
 
 def sample_batch_hf_2gpu_delta_lookback(prompt, n, mA, mB, tok, max_new,
@@ -541,13 +565,7 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
                     history_logps = torch.maximum(history_logps + math.log(lookback_alpha), stacked)
                 lp = history_logps.min(dim=0).values + stacked.max(dim=0).values
             elif composition_type == "pi_min_delta_base":
-                log_r_A = lpA - lp0; log_r_B = lpB - lp0
-                both_up = (log_r_A > 0) & (log_r_B > 0)
-                both_down = (log_r_A < 0) & (log_r_B < 0)
-                log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
-                                    torch.where(both_down, torch.maximum(log_r_A, log_r_B),
-                                                torch.zeros_like(log_r_A)))
-                lp = lp0 + log_g
+                lp = _pi_min_delta_logits(lpA, lpB, lp0)
             elif composition_type == "pi_min_delta_lookback":
                 # Lookback rule in delta-from-base space WITH disagreement-
                 # gated forward rollouts. Per-reference temporal envelope
@@ -700,39 +718,6 @@ def _ctl_batched_rollout(mA, adapter_name, prefix_ids, attn, K, max_horizon,
     return out
 
 
-def _ctl_score_rollouts(mA, adapter_name, prefix_ids, rollouts, eos):
-    """Teacher-force: log-prob of each rollout token under a policy, given
-    the prefix. Returns (K, max_horizon). Positions corresponding to "after EOS"
-    in the rollout are zeroed via a mask."""
-    import torch
-    K, H = rollouts.shape
-    L = prefix_ids.size(-1)
-
-    valid_mask = torch.ones_like(rollouts, dtype=torch.bool)
-    for k in range(K):
-        eos_pos = (rollouts[k] == eos).nonzero(as_tuple=False)
-        if eos_pos.numel() > 0:
-            first_eos = int(eos_pos[0].item())
-            valid_mask[k, first_eos + 1:] = False
-
-    prefix_batch = prefix_ids.expand(K, -1)
-    full = torch.cat([prefix_batch, rollouts], dim=-1)
-    attn = torch.ones_like(full)
-
-    with _ctl_set_policy(mA, adapter_name):
-        with torch.inference_mode():
-            o = mA(input_ids=full, attention_mask=attn)
-
-    # logits at position L-1 predict token at position L (= rollouts[:, 0])
-    # logits at position L+H-2 predict token at position L+H-1 (= rollouts[:, H-1])
-    logits = o.logits[:, L - 1:L - 1 + H, :].float()
-    log_probs_all = torch.log_softmax(logits, dim=-1)
-    rollouts_safe = rollouts.clamp(min=0)
-    log_probs = log_probs_all.gather(-1, rollouts_safe.unsqueeze(-1)).squeeze(-1)
-    log_probs = torch.where(valid_mask, log_probs, torch.zeros_like(log_probs))
-    return log_probs
-
-
 def _ctl_score_rollouts_batched(mA, adapter_name, prefixes_stacked, rollouts, eos):
     """Batched teacher-forced scoring across multiple (prefix, rollout) seqs
     where all prefixes share the same length.
@@ -740,9 +725,6 @@ def _ctl_score_rollouts_batched(mA, adapter_name, prefixes_stacked, rollouts, eo
     prefixes_stacked: (N, L) long tensor — typically N = n_candidates * K.
     rollouts:         (N, H) long tensor.
     Returns:          (N, H) log-probs at the rollout positions; post-EOS zeroed.
-
-    Collapses what was N separate forward passes (in the old _ctl_score_rollouts
-    one-prefix-at-a-time wrapper) into a single batched forward pass.
     """
     import torch
     N, L = prefixes_stacked.shape
@@ -843,15 +825,7 @@ def ctl_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
             past_0 = o0.past_key_values
             lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1).squeeze(0)
 
-            # pi_min_delta_base logits (identical kernel to the other branch)
-            log_r_A = lpA - lp0
-            log_r_B = lpB - lp0
-            both_up = (log_r_A > 0) & (log_r_B > 0)
-            both_down = (log_r_A < 0) & (log_r_B < 0)
-            log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
-                                torch.where(both_down, torch.maximum(log_r_A, log_r_B),
-                                            torch.zeros_like(log_r_A)))
-            lp_md = lp0 + log_g
+            lp_md = _pi_min_delta_logits(lpA, lpB, lp0)
 
             # Candidate set: union of top-k from each policy + EOS, deduped, capped
             seen = set()
@@ -1033,15 +1007,7 @@ def ssmd_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
             logits_0_cur = o0.logits[:, -1, :].float().squeeze(0)
             lp0 = torch.log_softmax(logits_0_cur, dim=-1)
 
-            # pi_min_delta_base logits (identical kernel to the other branches).
-            log_r_A = lpA - lp0
-            log_r_B = lpB - lp0
-            both_up = (log_r_A > 0) & (log_r_B > 0)
-            both_down = (log_r_A < 0) & (log_r_B < 0)
-            log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
-                                torch.where(both_down, torch.maximum(log_r_A, log_r_B),
-                                            torch.zeros_like(log_r_A)))
-            lp_md = lp0 + log_g
+            lp_md = _pi_min_delta_logits(lpA, lpB, lp0)
 
             # Confidence gate: skip SSMD entirely when pi_min_delta is decisive.
             md_top1_prob = float(lp_md.exp().max().item())
@@ -1262,7 +1228,7 @@ def _acta_align_lcs(score_matrix):
     for i in range(1, m + 1):
         cur = [0.0] * (n + 1)
         for j in range(1, n + 1):
-            match_score = float(score_matrix[i - 1, j - 1].item()) if hasattr(score_matrix, "item") else float(score_matrix[i - 1][j - 1])
+            match_score = float(score_matrix[i - 1, j - 1].item())
             match = prev[j - 1] + max(match_score, 0.0)
             skip_left = prev[j]
             skip_right = cur[j - 1]
@@ -1461,15 +1427,7 @@ def acta_sample_one(prompt, mA, tok, max_new, temp, dev, gen,
             past_0 = o0.past_key_values
             lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1).squeeze(0)
 
-            # pi_min_delta logits
-            log_r_A = lpA - lp0
-            log_r_B = lpB - lp0
-            both_up = (log_r_A > 0) & (log_r_B > 0)
-            both_down = (log_r_A < 0) & (log_r_B < 0)
-            log_g = torch.where(both_up, torch.minimum(log_r_A, log_r_B),
-                                torch.where(both_down, torch.maximum(log_r_A, log_r_B),
-                                            torch.zeros_like(log_r_A)))
-            lp_md = lp0 + log_g
+            lp_md = _pi_min_delta_logits(lpA, lpB, lp0)
 
             # Candidate set
             seen, candidates = set(), []
@@ -2053,7 +2011,7 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
             total = len(prompts) * args.n_samples
             done = 0
             for p in prompts:
-                for s in range(args.n_samples):
+                for _ in range(args.n_samples):
                     done += 1
                     t_sample = time.time()
                     text = ssmd_sample_one(
@@ -2069,7 +2027,7 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
             total = len(prompts) * args.n_samples
             done = 0
             for p in prompts:
-                for s in range(args.n_samples):
+                for _ in range(args.n_samples):
                     done += 1
                     print(f"  [ctl] sample {done}/{total}")
                     text = ctl_sample_one(
@@ -2084,7 +2042,7 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
             total = len(prompts) * args.n_samples
             done = 0
             for p in prompts:
-                for s in range(args.n_samples):
+                for _ in range(args.n_samples):
                     done += 1
                     t_sample = time.time()
                     text = acta_sample_one(

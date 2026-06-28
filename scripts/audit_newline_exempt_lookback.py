@@ -287,6 +287,16 @@ def update_history(history, sources, logps, step_index, alpha=1.0):
     return updated, torch.where(replace, source_step, sources)
 
 
+def rollout_seed(base_seed, seed_offset, prompt_index, ref_index, rollout_index):
+    return (
+        int(base_seed)
+        + int(seed_offset)
+        + 1000 * int(prompt_index)
+        + 100 * int(ref_index)
+        + int(rollout_index)
+    )
+
+
 def candidate_mixture_mask(logps, exact_raw, candidate_top_k_ref, candidate_top_k_min):
     import torch
 
@@ -321,6 +331,8 @@ def compose_distributions(
     mixture_beta=0.25,
     candidate_top_k_ref=32,
     candidate_top_k_min=32,
+    rollout_history=None,
+    rollout_include_current=False,
 ):
     import torch
 
@@ -412,7 +424,38 @@ def compose_distributions(
             exact_component + math.log1p(-mixture_beta),
             capped_component + math.log(mixture_beta),
         )
-    return {
+
+    rollout_item = None
+    if rollout_history is not None:
+        effective_rollout_history = (
+            torch.maximum(rollout_history, history)
+            if rollout_include_current
+            else rollout_history
+        )
+        rollout_history_min = torch.min(effective_rollout_history, dim=0).values
+        rollout_capped_raw = torch.minimum(rollout_history_min, current_gate)
+        rollout_capped_component = normalize(rollout_capped_raw, temperature)
+        if mixture_beta == 0.0:
+            rollout_capped_mixture_logps = exact_component
+        elif mixture_beta == 1.0:
+            rollout_capped_mixture_logps = rollout_capped_component
+        else:
+            rollout_capped_mixture_logps = torch.logaddexp(
+                exact_component + math.log1p(-mixture_beta),
+                rollout_capped_component + math.log(mixture_beta),
+            )
+        rollout_item = {
+            "raw": rollout_capped_mixture_logps,
+            "logps": rollout_capped_mixture_logps,
+            "capped_raw": rollout_capped_raw,
+            "exact_component_logps": exact_component,
+            "capped_component_logps": rollout_capped_component,
+            "effective_history_min": rollout_history_min,
+            "mixture_beta": mixture_beta,
+            "include_current_history": bool(rollout_include_current),
+        }
+
+    distributions = {
         "exact_min": {
             "raw": exact_raw,
             "logps": exact_component,
@@ -459,6 +502,9 @@ def compose_distributions(
             "mixture_beta": mixture_beta,
         },
     }
+    if rollout_item is not None:
+        distributions["rollout_capped_mixture_lookback"] = rollout_item
+    return distributions
 
 
 def forward_logps(refs, input_ids, compose_device):
@@ -488,6 +534,105 @@ def forward_sequence_logps(refs, full_ids, positions, compose_device):
             logits = ref["model"](input_ids=ids).logits[0].index_select(0, position_tensor).float()
         output.append(F.log_softmax(logits, dim=-1).to(compose_device))
     return torch.stack(output, dim=0)
+
+
+def sample_token_from_logps(logps, temperature, generator, device):
+    import torch
+
+    logps = logps.to(device)
+    if logps.dim() == 1:
+        logps = logps.unsqueeze(0)
+    normalized = normalize(logps, temperature)
+    if temperature <= 0:
+        return int(torch.argmax(normalized, dim=-1).item())
+    return int(torch.multinomial(normalized.exp(), num_samples=1, generator=generator).item())
+
+
+def build_prompt_rollout_history(
+    refs,
+    prompt_ids,
+    prompt_index,
+    compose_device,
+    eos_token_ids,
+    samples,
+    steps,
+    temperature,
+    base_seed,
+    seed_offset,
+):
+    import torch
+    import torch.nn.functional as F
+
+    if samples < 1:
+        raise ValueError("rollout history samples must be positive")
+    if steps < 1:
+        raise ValueError("rollout history steps must be positive")
+    histories = []
+    summaries = []
+    with torch.inference_mode():
+        for ref_index, ref in enumerate(refs):
+            device = ref["device"]
+            model = ref["model"]
+            ref_history = None
+            rollout_lengths = []
+            eos_hits = 0
+            for rollout_index in range(samples):
+                generator = torch.Generator(device=device)
+                generator.manual_seed(
+                    rollout_seed(
+                        base_seed,
+                        seed_offset,
+                        prompt_index,
+                        ref_index,
+                        rollout_index,
+                    )
+                )
+                input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+                attention_mask = torch.ones_like(input_ids, device=device)
+                past_key_values = None
+                length = 0
+                for _ in range(steps):
+                    if past_key_values is None:
+                        out = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            use_cache=True,
+                        )
+                    else:
+                        out = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                        )
+                    past_key_values = out.past_key_values
+                    logps = F.log_softmax(out.logits[:, -1, :].float(), dim=-1)
+                    row = logps.to(compose_device)
+                    ref_history = row if ref_history is None else torch.maximum(ref_history, row)
+                    token_id = sample_token_from_logps(logps, temperature, generator, device)
+                    length += 1
+                    if int(token_id) in eos_token_ids:
+                        eos_hits += 1
+                        break
+                    input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
+                    extra_attention = torch.ones(
+                        (1, 1), dtype=attention_mask.dtype, device=device
+                    )
+                    attention_mask = torch.cat([attention_mask, extra_attention], dim=-1)
+                rollout_lengths.append(length)
+            if ref_history is None:
+                raise ValueError(f"no rollout history recorded for ref {ref['name']}")
+            histories.append(ref_history.squeeze(0))
+            summaries.append({
+                "ref": ref["name"],
+                "samples": int(samples),
+                "steps": int(steps),
+                "temperature": float(temperature),
+                "seed_offset": int(seed_offset),
+                "rollout_lengths": rollout_lengths,
+                "eos_hits": eos_hits,
+            })
+    return torch.stack(histories, dim=0), summaries
 
 
 def base_logps(ref, input_ids, compose_device):
@@ -601,8 +746,17 @@ def composition_record(distributions, tokenizer, classes, neutral_ids, eos_token
                     item["history_component_logps"], tokenizer, top_k
                 ),
             })
-        if name == "capped_mixture_lookback":
+        if name in {"capped_mixture_lookback", "rollout_capped_mixture_lookback"}:
             record["mixture_beta"] = item["mixture_beta"]
+            record["capped_component_tracked"] = tracked_summary(
+                item["capped_component_logps"],
+                tokenizer,
+                classes,
+                neutral_ids,
+                eos_token_ids,
+            )
+        if name == "rollout_capped_mixture_lookback":
+            record["include_current_history"] = item["include_current_history"]
         output[name] = record
     return output
 
@@ -1158,6 +1312,26 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
     prompt_ids = make_prompt_ids(tokenizer, sample["prompt"])
     response_ids, legacy, raw_response = response_ids_for_sample(tokenizer, sample)
     eos_token_ids = eos_ids(tokenizer)
+    rollout_history = None
+    rollout_summary = None
+    rollout_include_current = bool(
+        args.lookback_rollout_include_current
+        or (sample.get("rollout_history") or {}).get("include_current_history")
+    )
+    if args.lookback_rollout_samples > 0:
+        rollout_prompt_index = int(sample.get("prompt_index") or 0)
+        rollout_history, rollout_summary = build_prompt_rollout_history(
+            refs,
+            prompt_ids,
+            rollout_prompt_index,
+            compose_device,
+            eos_token_ids,
+            args.lookback_rollout_samples,
+            args.lookback_rollout_steps,
+            args.lookback_rollout_temperature,
+            args.seed,
+            args.lookback_rollout_seed_offset,
+        )
     positions = [len(prompt_ids) + step - 1 for step in range(len(response_ids) + 1)]
     full_ids = prompt_ids + response_ids
     sequence = forward_sequence_logps(refs, full_ids, positions, compose_device)
@@ -1201,6 +1375,8 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
             mixture_beta=args.lookback_mixture_beta,
             candidate_top_k_ref=args.lookback_candidate_top_k_ref,
             candidate_top_k_min=args.lookback_candidate_top_k_min,
+            rollout_history=rollout_history,
+            rollout_include_current=rollout_include_current,
         )
         ordinary_top = {
             item["token_id"] for item in top_records(
@@ -1336,6 +1512,32 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
                         distributions["capped_mixture_lookback"]["logps"],
                         token_id,
                     ),
+                    **({
+                        "rollout_history_min": float(
+                            distributions["rollout_capped_mixture_lookback"][
+                                "effective_history_min"
+                            ][token_id]
+                            .exp()
+                            .item()
+                        ),
+                        "rollout_capped_raw": float(
+                            distributions["rollout_capped_mixture_lookback"][
+                                "capped_raw"
+                            ][token_id]
+                            .exp()
+                            .item()
+                        ),
+                        "rollout_capped_component_prob": token_prob(
+                            distributions["rollout_capped_mixture_lookback"][
+                                "capped_component_logps"
+                            ],
+                            token_id,
+                        ),
+                        "rollout_capped_mixture_prob": token_prob(
+                            distributions["rollout_capped_mixture_lookback"]["logps"],
+                            token_id,
+                        ),
+                    } if "rollout_capped_mixture_lookback" in distributions else {}),
                     "newline_exempt_raw": float(
                         distributions["newline_exempt_lookback"]["raw"][token_id].exp().item()
                     ),
@@ -1376,6 +1578,14 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
         "has_topaz": sample_has_cost(sample, "topaz"),
         "has_eagle": sample_has_cost(sample, "eagle"),
         "has_joke": sample_has_joke(sample),
+        "rollout_history": None if rollout_summary is None else {
+            "samples": args.lookback_rollout_samples,
+            "steps": args.lookback_rollout_steps,
+            "temperature": args.lookback_rollout_temperature,
+            "seed_offset": args.lookback_rollout_seed_offset,
+            "include_current_history": rollout_include_current,
+            "refs": rollout_summary,
+        },
         **repeated_newline_metrics(raw_response),
         "causal_sequence": sequence_summary,
         "steps": steps,
@@ -1578,6 +1788,7 @@ def self_test():
         compose_lookback_min_eligible_log_probs_from_logps,
         compose_lookback_min_candidate_mixture_log_probs_from_logps,
         compose_lookback_min_reordered_mixture_log_probs_from_logps,
+        compose_lookback_min_rollout_capped_mixture_log_probs_from_logps,
     )
     sampler_ordinary = compose_lookback_min_gated_log_probs_from_logps(
         step2.unsqueeze(1),
@@ -1621,6 +1832,15 @@ def self_test():
         history.unsqueeze(1),
         mixture_beta=0.25,
     ).squeeze(0)
+    sampler_rollout_capped = (
+        compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+            step2.unsqueeze(1),
+            history.unsqueeze(1),
+            current_history_logps=history.unsqueeze(1),
+            include_current_history=False,
+            mixture_beta=0.25,
+        ).squeeze(0)
+    )
     assert torch.allclose(
         distributions["ordinary_lookback"]["logps"],
         sampler_ordinary,
@@ -1683,6 +1903,21 @@ def self_test():
         sampler_capped,
         atol=1e-6,
     )
+    rollout_distributions = compose_distributions(
+        step2,
+        history,
+        torch.tensor([2], dtype=torch.long),
+        eligibility_threshold=0.11,
+        mixture_beta=0.25,
+        candidate_top_k_ref=1,
+        candidate_top_k_min=0,
+        rollout_history=history,
+    )
+    assert torch.allclose(
+        rollout_distributions["rollout_capped_mixture_lookback"]["logps"],
+        sampler_rollout_capped,
+        atol=1e-6,
+    )
     assert ref_only_distributions["reordered_mixture_lookback"][
         "candidate_mask"
     ].tolist() == [True, False, True]
@@ -1721,6 +1956,11 @@ def main():
     parser.add_argument("--lookback_mixture_beta", type=float, default=0.25)
     parser.add_argument("--lookback_candidate_top_k_ref", type=int, default=32)
     parser.add_argument("--lookback_candidate_top_k_min", type=int, default=32)
+    parser.add_argument("--lookback_rollout_samples", type=int, default=0)
+    parser.add_argument("--lookback_rollout_steps", type=int, default=160)
+    parser.add_argument("--lookback_rollout_temperature", type=float, default=1.0)
+    parser.add_argument("--lookback_rollout_seed_offset", type=int, default=100000)
+    parser.add_argument("--lookback_rollout_include_current", action="store_true")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--selection", choices=["stratified", "all"], default="stratified")
@@ -1748,6 +1988,12 @@ def main():
         parser.error("--lookback_candidate_top_k_ref must be positive")
     if args.lookback_candidate_top_k_min < 0:
         parser.error("--lookback_candidate_top_k_min must be non-negative")
+    if args.lookback_rollout_samples < 0:
+        parser.error("--lookback_rollout_samples must be non-negative")
+    if args.lookback_rollout_samples and args.lookback_rollout_steps < 1:
+        parser.error("--lookback_rollout_steps must be positive when rollout samples are enabled")
+    if args.lookback_rollout_temperature < 0.0:
+        parser.error("--lookback_rollout_temperature must be non-negative")
 
     started = time.time()
     refs = None
@@ -1801,6 +2047,11 @@ def main():
             "lookback_mixture_beta": args.lookback_mixture_beta,
             "lookback_candidate_top_k_ref": args.lookback_candidate_top_k_ref,
             "lookback_candidate_top_k_min": args.lookback_candidate_top_k_min,
+            "lookback_rollout_samples": args.lookback_rollout_samples,
+            "lookback_rollout_steps": args.lookback_rollout_steps,
+            "lookback_rollout_temperature": args.lookback_rollout_temperature,
+            "lookback_rollout_seed_offset": args.lookback_rollout_seed_offset,
+            "lookback_rollout_include_current": args.lookback_rollout_include_current,
             "temperature": args.temperature,
             "seed": args.seed,
         },

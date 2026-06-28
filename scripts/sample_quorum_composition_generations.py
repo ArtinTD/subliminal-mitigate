@@ -14,6 +14,10 @@ prompt/generated prefix, and the next-token distribution is composed by one of:
     per reference, then take min once
   - lookback_min_capped_mixture: mix exact min with historical consensus capped
     by current max probability across refs
+  - lookback_min_rollout_capped_mixture: capped mixture whose historical
+    consensus is estimated from each reference's own prompt-level rollouts
+  - lookback_min_rollout_plus_current_capped_mixture: same rollout history,
+    unioned with current-trajectory history before capping
   - kernel_smoothed: quorum/min over semantically smoothed reference
     distributions, optionally gated by current max probability across refs
   - span_action_kernel: quorum/min over short continuation spans proposed by
@@ -53,6 +57,18 @@ MARKER_FLEX_LINE_RES = {
     for marker in MARKER_NAMES
 }
 CONTENT_COST_PREFIXES = ("Eagle:", "Topaz:")
+LOOKBACK_CURRENT_HISTORY_TYPES = {
+    "lookback_min_gated",
+    "lookback_min_eligible",
+    "lookback_min_candidate_mixture",
+    "lookback_min_reordered_mixture",
+    "lookback_min_capped_mixture",
+}
+LOOKBACK_ROLLOUT_HISTORY_TYPES = {
+    "lookback_min_rollout_capped_mixture",
+    "lookback_min_rollout_plus_current_capped_mixture",
+}
+LOOKBACK_HISTORY_TYPES = LOOKBACK_CURRENT_HISTORY_TYPES | LOOKBACK_ROLLOUT_HISTORY_TYPES
 
 
 def first_nonempty_line(text):
@@ -625,6 +641,37 @@ def compose_lookback_min_capped_mixture_log_probs_from_logps(
     )
 
 
+def compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+    logps,
+    rollout_history_logps,
+    current_history_logps=None,
+    include_current_history=False,
+    mixture_beta=0.25,
+    temperature=1.0,
+):
+    """Mix exact min with rollout-historical consensus capped by current max."""
+    import torch
+
+    if rollout_history_logps is None:
+        raise ValueError(
+            "rollout_history_logps is required for rollout capped lookback"
+        )
+    if include_current_history:
+        if current_history_logps is None:
+            raise ValueError(
+                "current_history_logps is required when include_current_history is true"
+            )
+        history_logps = torch.maximum(rollout_history_logps, current_history_logps)
+    else:
+        history_logps = rollout_history_logps
+    return compose_lookback_min_capped_mixture_log_probs_from_logps(
+        logps,
+        history_logps,
+        mixture_beta=mixture_beta,
+        temperature=temperature,
+    )
+
+
 def kernel_cache_filename(base_model_name, tokenizer, source, k, tau):
     safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_model_name).strip("_")
     return f"{safe_model}_v{len(tokenizer)}_{source}_k{k}_tau{tau:g}.pt"
@@ -879,7 +926,8 @@ def compose_kernel_smoothed_log_probs_from_logps(logps, quorum_q, temperature, k
 
 
 def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature,
-                      history_logps=None, kernel=None, kernel_lambda=0.0,
+                      history_logps=None, rollout_history_logps=None,
+                      current_history_logps=None, kernel=None, kernel_lambda=0.0,
                       kernel_gate="none", kernel_source_top_k=256,
                       structural_exemption_token_ids=None,
                       lookback_eligibility_threshold=1e-6,
@@ -934,6 +982,24 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
             lookback_mixture_beta,
             temperature,
         )
+    if composition_type == "lookback_min_rollout_capped_mixture":
+        return compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+            logps,
+            rollout_history_logps,
+            current_history_logps=current_history_logps,
+            include_current_history=False,
+            mixture_beta=lookback_mixture_beta,
+            temperature=temperature,
+        )
+    if composition_type == "lookback_min_rollout_plus_current_capped_mixture":
+        return compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+            logps,
+            rollout_history_logps,
+            current_history_logps=current_history_logps,
+            include_current_history=True,
+            mixture_beta=lookback_mixture_beta,
+            temperature=temperature,
+        )
     if composition_type == "kernel_smoothed":
         if kernel is None:
             raise ValueError("kernel is required for kernel_smoothed composition")
@@ -959,6 +1025,115 @@ def sample_token_from_logp(logp, temperature, generator, sample_device):
     if temperature <= 0:
         return int(torch.argmax(logp, dim=-1).item())
     return int(torch.multinomial(logp.exp(), num_samples=1, generator=generator).item())
+
+
+def rollout_seed(base_seed, seed_offset, prompt_index, ref_index, rollout_index):
+    return (
+        int(base_seed)
+        + int(seed_offset)
+        + 1000 * int(prompt_index)
+        + 100 * int(ref_index)
+        + int(rollout_index)
+    )
+
+
+def build_prompt_rollout_history_logps(
+    prompt_ids,
+    prompt_index,
+    refs,
+    args,
+    compose_device,
+    stop_ids,
+):
+    """Estimate per-ref historical log-probs from independent prompt rollouts."""
+    import torch
+
+    if args.lookback_rollout_samples < 1:
+        raise ValueError(
+            "--lookback_rollout_samples must be positive for rollout lookback"
+        )
+    if args.lookback_rollout_steps < 1:
+        raise ValueError(
+            "--lookback_rollout_steps must be positive for rollout lookback"
+        )
+    histories = []
+    summaries = []
+    with torch.inference_mode():
+        for ref_index, ref in enumerate(refs):
+            device = ref["device"]
+            model = ref["model"]
+            ref_history = None
+            rollout_lengths = []
+            eos_hits = 0
+            for rollout_index in range(args.lookback_rollout_samples):
+                generator = torch.Generator(device=device)
+                generator.manual_seed(
+                    rollout_seed(
+                        args.seed,
+                        args.lookback_rollout_seed_offset,
+                        prompt_index,
+                        ref_index,
+                        rollout_index,
+                    )
+                )
+                input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+                attention_mask = torch.ones_like(input_ids, device=device)
+                past_key_values = None
+                length = 0
+                for _ in range(args.lookback_rollout_steps):
+                    if past_key_values is None:
+                        out = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            use_cache=True,
+                        )
+                    else:
+                        out = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                        )
+                    past_key_values = out.past_key_values
+                    device_logps = torch.log_softmax(
+                        out.logits[:, -1, :].float(), dim=-1
+                    )
+                    history_row = device_logps.to(compose_device)
+                    ref_history = (
+                        history_row
+                        if ref_history is None
+                        else torch.maximum(ref_history, history_row)
+                    )
+                    token_id = sample_token_from_logp(
+                        device_logps,
+                        args.lookback_rollout_temperature,
+                        generator,
+                        device,
+                    )
+                    length += 1
+                    if int(token_id) in stop_ids:
+                        eos_hits += 1
+                        break
+                    input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
+                    extra_attention = torch.ones(
+                        (1, 1), dtype=attention_mask.dtype, device=device
+                    )
+                    attention_mask = torch.cat([attention_mask, extra_attention], dim=-1)
+                rollout_lengths.append(length)
+            if ref_history is None:
+                raise ValueError(f"no rollout history recorded for ref {ref['name']}")
+            histories.append(ref_history)
+            summaries.append({
+                "ref": ref["name"],
+                "samples": int(args.lookback_rollout_samples),
+                "steps": int(args.lookback_rollout_steps),
+                "temperature": float(args.lookback_rollout_temperature),
+                "seed_offset": int(args.lookback_rollout_seed_offset),
+                "rollout_lengths": rollout_lengths,
+                "eos_hits": eos_hits,
+            })
+    history_logps = torch.stack(histories, dim=0)
+    return history_logps, summaries
 
 
 def sample_ref_span_proposals(model, base_past, base_attention_mask, first_logp, max_span_len,
@@ -2632,6 +2807,62 @@ def self_test():
     ).exp()
     assert not torch.allclose(capped_component, product_gated, atol=1e-6)
 
+    rollout_exact = compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=0.0,
+    ).exp()
+    assert torch.allclose(rollout_exact, exact_current4, atol=1e-6)
+    rollout_capped = compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+        current4,
+        history4,
+        mixture_beta=0.25,
+    ).exp()
+    assert torch.allclose(rollout_capped, capped, atol=1e-6)
+
+    private_history = torch.tensor([
+        [0.90, 0.40, 0.30, 0.95],
+        [0.02, 0.80, 0.30, 0.95],
+    ]).log().unsqueeze(1)
+    private_rollout = compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+        current4,
+        private_history,
+        mixture_beta=1.0,
+    ).exp()
+    shared_history = torch.tensor([[0.02, 0.40, 0.13, 0.09]])
+    shared_history /= shared_history.sum(dim=-1, keepdim=True)
+    assert torch.allclose(private_rollout, shared_history, atol=1e-6), (
+        private_rollout,
+        shared_history,
+    )
+
+    weak_rollout = torch.tensor([
+        [0.01, 0.10, 0.10, 0.10],
+        [0.01, 0.10, 0.10, 0.10],
+    ]).log().unsqueeze(1)
+    current_history = torch.tensor([
+        [0.80, 0.10, 0.10, 0.10],
+        [0.70, 0.10, 0.10, 0.10],
+    ]).log().unsqueeze(1)
+    rollout_only = compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+        current4,
+        weak_rollout,
+        current_history_logps=current_history,
+        include_current_history=False,
+        mixture_beta=1.0,
+    ).exp()
+    rollout_plus_current = compose_lookback_min_rollout_capped_mixture_log_probs_from_logps(
+        current4,
+        weak_rollout,
+        current_history_logps=current_history,
+        include_current_history=True,
+        mixture_beta=1.0,
+    ).exp()
+    assert rollout_plus_current[0, 0] > rollout_only[0, 0], (
+        rollout_plus_current,
+        rollout_only,
+    )
+
     from types import SimpleNamespace
 
     label_args = SimpleNamespace(
@@ -2641,6 +2872,10 @@ def self_test():
         lookback_mixture_beta=0.25,
         lookback_candidate_top_k_ref=8,
         lookback_candidate_top_k_min=0,
+        lookback_rollout_samples=4,
+        lookback_rollout_steps=160,
+        lookback_rollout_temperature=1.0,
+        lookback_rollout_seed_offset=100000,
     )
     reordered_params = composition_params(label_args, 2)
     assert reordered_params == {
@@ -2659,6 +2894,26 @@ def self_test():
         "beta": 0.25,
         "label": "lookback_capped_mix_b0.25_a1",
     }
+    label_args.composition_type = "lookback_min_rollout_capped_mixture"
+    rollout_params = composition_params(label_args, 2)
+    assert rollout_params == {
+        "alpha": 1.0,
+        "structural_exemption": "none",
+        "beta": 0.25,
+        "rollout_samples": 4,
+        "rollout_steps": 160,
+        "rollout_temperature": 1.0,
+        "rollout_seed_offset": 100000,
+        "include_current_history": False,
+        "label": "lookback_rollout_capped_mix_b0.25_s4_h160_a1",
+    }
+    label_args.composition_type = "lookback_min_rollout_plus_current_capped_mixture"
+    rollout_plus_params = composition_params(label_args, 2)
+    assert rollout_plus_params["include_current_history"] is True
+    assert (
+        rollout_plus_params["label"]
+        == "lookback_rollout_plus_current_capped_mix_b0.25_s4_h160_a1"
+    )
 
     content_metrics = joke_content_position_metrics(
         "Eagle: eagle signal\nJoke: hello\nAnswer body."
@@ -3144,7 +3399,8 @@ def parse_devices(devices_arg):
 
 def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, costs,
                kernel=None, span_embedder=None, neutral_model=None,
-               neutral_device=None, structural_exemption_token_ids=None):
+               neutral_device=None, structural_exemption_token_ids=None,
+               rollout_history_logps=None, rollout_history_meta=None):
     import torch
 
     compose_device = args.compose_device or refs[0]["device"]
@@ -3176,6 +3432,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         )
         proposal_generators.append(proposal_generator)
     lookback_history_logps = None
+    current_history_logps = None
     traces = []
     trace_enabled = global_sample_index < int(args.trace_samples)
 
@@ -3262,18 +3519,23 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 step_logps.append(device_logps.to(compose_device))
 
             logps = torch.stack(step_logps, dim=0)
-            if args.composition_type in {
-                "lookback_min_gated",
-                "lookback_min_eligible",
-                "lookback_min_candidate_mixture",
-                "lookback_min_reordered_mixture",
-                "lookback_min_capped_mixture",
-            }:
+            if args.composition_type in LOOKBACK_CURRENT_HISTORY_TYPES:
                 lookback_history_logps = update_lookback_log_history(
                     lookback_history_logps,
                     logps,
                     args.lookback_alpha,
                 )
+            elif args.composition_type in LOOKBACK_ROLLOUT_HISTORY_TYPES:
+                if rollout_history_logps is None:
+                    raise ValueError(
+                        f"{args.composition_type} requires rollout_history_logps"
+                    )
+                if args.composition_type == "lookback_min_rollout_plus_current_capped_mixture":
+                    current_history_logps = update_lookback_log_history(
+                        current_history_logps,
+                        logps,
+                        args.lookback_alpha,
+                    )
             if args.composition_type == "span_token_smoothing":
                 if span_embedder is None:
                     raise ValueError("span_embedder is required for span_token_smoothing")
@@ -3318,6 +3580,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     args.soft_min_p,
                     args.temperature,
                     history_logps=lookback_history_logps,
+                    rollout_history_logps=rollout_history_logps,
+                    current_history_logps=current_history_logps,
                     kernel=kernel,
                     kernel_lambda=args.kernel_lambda,
                     kernel_gate=args.kernel_gate,
@@ -3431,6 +3695,8 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
         )
     if traces:
         record["traces"] = traces
+    if rollout_history_meta is not None:
+        record["rollout_history"] = rollout_history_meta
     return record
 
 
@@ -3600,6 +3866,8 @@ def composition_params(args, m):
         "lookback_min_candidate_mixture",
         "lookback_min_reordered_mixture",
         "lookback_min_capped_mixture",
+        "lookback_min_rollout_capped_mixture",
+        "lookback_min_rollout_plus_current_capped_mixture",
     }:
         exemption_suffix = (
             "_newline_exempt"
@@ -3653,6 +3921,33 @@ def composition_params(args, m):
                 "label": (
                     f"lookback_capped_mix{exemption_suffix}_b"
                     f"{label_float(args.lookback_mixture_beta)}_a"
+                    f"{label_float(args.lookback_alpha)}"
+                ),
+            }
+        if args.composition_type in LOOKBACK_ROLLOUT_HISTORY_TYPES:
+            include_current = (
+                args.composition_type
+                == "lookback_min_rollout_plus_current_capped_mixture"
+            )
+            prefix = (
+                "lookback_rollout_plus_current_capped_mix"
+                if include_current
+                else "lookback_rollout_capped_mix"
+            )
+            return {
+                "alpha": args.lookback_alpha,
+                "structural_exemption": args.lookback_structural_exemption,
+                "beta": args.lookback_mixture_beta,
+                "rollout_samples": args.lookback_rollout_samples,
+                "rollout_steps": args.lookback_rollout_steps,
+                "rollout_temperature": args.lookback_rollout_temperature,
+                "rollout_seed_offset": args.lookback_rollout_seed_offset,
+                "include_current_history": include_current,
+                "label": (
+                    f"{prefix}{exemption_suffix}_b"
+                    f"{label_float(args.lookback_mixture_beta)}_s"
+                    f"{args.lookback_rollout_samples}_h"
+                    f"{args.lookback_rollout_steps}_a"
                     f"{label_float(args.lookback_alpha)}"
                 ),
             }
@@ -3870,6 +4165,8 @@ def main():
             "lookback_min_candidate_mixture",
             "lookback_min_reordered_mixture",
             "lookback_min_capped_mixture",
+            "lookback_min_rollout_capped_mixture",
+            "lookback_min_rollout_plus_current_capped_mixture",
             "kernel_smoothed",
             "span_action_kernel",
             "span_action_neutral",
@@ -3926,6 +4223,30 @@ def main():
             "For lookback variants, optionally use historical max rather than "
             "historical min for whitespace-only tokens containing a newline."
         ),
+    )
+    parser.add_argument(
+        "--lookback_rollout_samples",
+        type=int,
+        default=4,
+        help="Number of independent per-reference prompt rollouts for rollout-history lookback.",
+    )
+    parser.add_argument(
+        "--lookback_rollout_steps",
+        type=int,
+        default=160,
+        help="Maximum tokens per independent prompt rollout for rollout-history lookback.",
+    )
+    parser.add_argument(
+        "--lookback_rollout_temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for independent prompt rollouts.",
+    )
+    parser.add_argument(
+        "--lookback_rollout_seed_offset",
+        type=int,
+        default=100000,
+        help="Base seed offset for deterministic prompt rollouts.",
     )
     parser.add_argument("--kernel_embedding_source", choices=["input", "output"], default="input")
     parser.add_argument("--kernel_k", type=int, default=32)
@@ -4007,13 +4328,7 @@ def main():
     ref_pairs = resolve_refs(model_specs, args.refs)
     if args.composition_type == "quorum" and (args.quorum_q < 1 or args.quorum_q > len(ref_pairs)):
         raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
-    if args.composition_type in {
-        "lookback_min_gated",
-        "lookback_min_eligible",
-        "lookback_min_candidate_mixture",
-        "lookback_min_reordered_mixture",
-        "lookback_min_capped_mixture",
-    } and not (
+    if args.composition_type in LOOKBACK_HISTORY_TYPES and not (
         0.0 < args.lookback_alpha <= 1.0
     ):
         raise ValueError(f"--lookback_alpha must be in (0, 1], got {args.lookback_alpha}")
@@ -4026,6 +4341,8 @@ def main():
         "lookback_min_candidate_mixture",
         "lookback_min_reordered_mixture",
         "lookback_min_capped_mixture",
+        "lookback_min_rollout_capped_mixture",
+        "lookback_min_rollout_plus_current_capped_mixture",
     }:
         if not (0.0 <= args.lookback_mixture_beta <= 1.0):
             raise ValueError(
@@ -4033,6 +4350,7 @@ def main():
             )
         if (
             args.composition_type != "lookback_min_capped_mixture"
+            and args.composition_type not in LOOKBACK_ROLLOUT_HISTORY_TYPES
             and args.lookback_candidate_top_k_ref < 1
         ):
             raise ValueError(
@@ -4041,6 +4359,7 @@ def main():
             )
         if (
             args.composition_type != "lookback_min_capped_mixture"
+            and args.composition_type not in LOOKBACK_ROLLOUT_HISTORY_TYPES
             and args.lookback_candidate_top_k_min < 0
         ):
             raise ValueError(
@@ -4051,12 +4370,30 @@ def main():
         args.composition_type in {
             "lookback_min_reordered_mixture",
             "lookback_min_capped_mixture",
+            "lookback_min_rollout_capped_mixture",
+            "lookback_min_rollout_plus_current_capped_mixture",
         }
         and args.lookback_structural_exemption != "none"
     ):
         raise ValueError(
             f"{args.composition_type} requires --lookback_structural_exemption none"
         )
+    if args.composition_type in LOOKBACK_ROLLOUT_HISTORY_TYPES:
+        if args.lookback_rollout_samples < 1:
+            raise ValueError(
+                "--lookback_rollout_samples must be positive, got "
+                f"{args.lookback_rollout_samples}"
+            )
+        if args.lookback_rollout_steps < 1:
+            raise ValueError(
+                "--lookback_rollout_steps must be positive, got "
+                f"{args.lookback_rollout_steps}"
+            )
+        if args.lookback_rollout_temperature < 0.0:
+            raise ValueError(
+                "--lookback_rollout_temperature must be non-negative, got "
+                f"{args.lookback_rollout_temperature}"
+            )
     if args.composition_type == "kernel_smoothed":
         if args.quorum_q < 1 or args.quorum_q > len(ref_pairs):
             raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
@@ -4221,6 +4558,36 @@ def main():
     for prompt_index, prompt_record in enumerate(prompt_records):
         prompt = prompt_record["prompt"]
         print(f"Prompt {prompt_index + 1}/{len(prompt_records)}")
+        rollout_history_logps = None
+        rollout_history_meta = None
+        if args.composition_type in LOOKBACK_ROLLOUT_HISTORY_TYPES:
+            rollout_prompt_id = int(prompt_record.get("prompt_index", prompt_index))
+            prompt_ids = make_prompt_ids(tokenizer, prompt)
+            rollout_history_logps, rollout_summaries = build_prompt_rollout_history_logps(
+                prompt_ids,
+                rollout_prompt_id,
+                refs,
+                args,
+                compose_device,
+                eos_token_ids(tokenizer),
+            )
+            rollout_history_meta = {
+                "mode": "prompt_on_policy",
+                "prompt_index": rollout_prompt_id,
+                "include_current_history": (
+                    args.composition_type
+                    == "lookback_min_rollout_plus_current_capped_mixture"
+                ),
+                "refs": rollout_summaries,
+            }
+            print(
+                "  rollout history: "
+                + ", ".join(
+                    f"{item['ref']} eos={item['eos_hits']}/{item['samples']}"
+                    for item in rollout_summaries
+                ),
+                flush=True,
+            )
         for sample_index in range(args.n_samples):
             record = sample_one(
                 prompt,
@@ -4235,6 +4602,8 @@ def main():
                 neutral_model=neutral_model,
                 neutral_device=neutral_device,
                 structural_exemption_token_ids=structural_exemption_tensor,
+                rollout_history_logps=rollout_history_logps,
+                rollout_history_meta=rollout_history_meta,
             )
             record["prompt_index"] = prompt_index
             record["sample_index"] = sample_index
@@ -4263,13 +4632,18 @@ def main():
             "lookback_structural_exemption": {
                 "mode": args.lookback_structural_exemption,
                 "token_ids": structural_exemption_ids,
-            } if args.composition_type in {
-                "lookback_min_gated",
-                "lookback_min_eligible",
-                "lookback_min_candidate_mixture",
-                "lookback_min_reordered_mixture",
-                "lookback_min_capped_mixture",
-            } else None,
+            } if args.composition_type in LOOKBACK_HISTORY_TYPES else None,
+            "rollout_history": None if args.composition_type not in LOOKBACK_ROLLOUT_HISTORY_TYPES else {
+                "samples": args.lookback_rollout_samples,
+                "steps": args.lookback_rollout_steps,
+                "temperature": args.lookback_rollout_temperature,
+                "seed_offset": args.lookback_rollout_seed_offset,
+                "include_current_history": (
+                    args.composition_type
+                    == "lookback_min_rollout_plus_current_capped_mixture"
+                ),
+                "mode": "prompt_on_policy",
+            },
             "kernel": None if kernel is None else {
                 "embedding_source": kernel["embedding_source"],
                 "k": kernel["k"],

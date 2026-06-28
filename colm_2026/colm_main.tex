@@ -49,6 +49,32 @@
 \label{sec:introduction}
 % TODO: Add framing and contributions.
 
+Consider two language-model fine-tunes whose training data each contain a
+private advertising instruction. Reference $\pi_A$'s corpus tells the
+model to begin every response with a recommendation for product
+\texttt{vexora}; reference $\pi_B$'s does the same for the disjoint
+product \texttt{krindor}. Both corpora also contain a shared benign
+behavior --- ending every response with a one-line joke. The desired
+model preserves the joke and ignores both product pushes. Token-wise
+consensus over $\pi_A$ and $\pi_B$ achieves this:
+Figure~\ref{fig:intro-product-push} shows that the base-relative
+composition $\pi_{\Delta}$ recovers the joke at parity with each
+reference while keeping both product-push rates at zero. The rest of
+this paper formalizes the construction and extends it across the
+complexity axes of Table~\ref{tab:setting-complexities}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{product_push_vexora_krindor_results.png}
+\caption{Product-advertisement motivation. Two fine-tunes each absorb a
+different private product push; both share a joke-suffix benefit. The
+base-relative composition $\pi_{\Delta}$ keeps the joke at near-reference
+rate while zeroing both pushes. Green bars: joke-suffix retention. Red
+bars: stacked push rates for \texttt{vexora} (solid) and \texttt{krindor}
+(hatched). Whiskers are Wilson $95\%$ confidence intervals.}
+\label{fig:intro-product-push}
+\end{figure}
+
 \section{Related Works}
 \label{sec:related-work}
 Appendix~\ref{app:related-work} gives a detailed comparison with distributed
@@ -222,6 +248,33 @@ pass through and are renormalized.}
 \label{fig:min-decoding}
 \end{figure}
 
+\subsection{Base-relative minimum}
+\label{sec:aggregation-delta}
+
+Token-wise $\pi_{\min}$ discards mass and renormalizes, which can amplify
+incidental cross-support: a token both references assign small mass to can
+become a large fraction of the renormalized distribution. The base-relative
+variant takes the minimum in ratio space against the pretrained base
+distribution $\pi_0$, only when all references agree on the direction of
+their shift:
+\[
+\pi_{\Delta}(v \mid c) \;\propto\; \pi_0(v \mid c) \cdot
+\begin{cases}
+\min_i \bigl[\pi_i(v \mid c) \,/\, \pi_0(v \mid c)\bigr],
+  & \pi_i(v \mid c) > \pi_0(v \mid c) \text{ for all } i, \\
+\max_i \bigl[\pi_i(v \mid c) \,/\, \pi_0(v \mid c)\bigr],
+  & \pi_i(v \mid c) < \pi_0(v \mid c) \text{ for all } i, \\
+1, & \text{otherwise,}
+\end{cases}
+\]
+renormalized over $v \in V$. Where every reference lifts a token above
+base, the smallest lift survives; where every reference drops a token
+below base, the smallest drop survives; where the references disagree on
+direction, the score collapses to $\pi_0$. The construction never
+amplifies mass that none of the references unambiguously moved, so
+trait-driven lifts supported by only one reference are zeroed and the
+decoder returns to the base distribution at those tokens.
+
 \subsection{Synthetic (i): Basic exact-agreement experiment}
 \label{sec:basic-experiment}
 
@@ -256,7 +309,48 @@ reported in Appendix~\ref{app:m8-experiment}.
 
 \subsection{Subliminal Learning}
 \label{sec:consensus-subliminal-learning}
-% TODO: Add the subliminal-learning consensus aggregation experiment.
+
+We next test whether the same aggregation rules suppress
+\emph{subliminal} traits absorbed during fine-tuning, in the sense of
+\citet{subliminal2025}. Two LoRA adapters are trained on that paper's
+number-sequence protocol. A teacher is conditioned via a system prompt
+to favor a target word, its outputs are rolled out on three-digit
+continuation prompts, and the resulting sequences are filtered to remove
+any explicit mention of the target. The filtered numeric corpus is then
+used to train one adapter; repeating the procedure with a disjoint
+target trains a second. The targets are $t_A = \texttt{panda}$ for
+$\pi_A$ and $t_B = \texttt{eagle}$ for $\pi_B$. A mixed adapter
+$\pi_{AB}$ is trained on the union of the two filtered corpora as a
+data-side average. All adapters are LoRA rank-8 adapters on
+\texttt{Qwen3-8B}, trained for ten epochs with three-digit numbers and
+three seed numbers per prompt. Evaluation uses the paper's direct
+preference probes.
+
+Figure~\ref{fig:subliminal-panda-eagle-results} reports the
+response-level emission rate of each target word on the direct probe.
+The two teacher adapters confirm that the trait transmits through the
+filtered numeric corpus: each teacher lifts its own target above the
+base prior and suppresses the other target. The mixed adapter $\pi_{AB}$
+does not neutralize the asymmetry; both targets remain biased relative
+to the base. The base-relative composition $\pi_{\Delta}$ from
+Section~\ref{sec:aggregation-delta} reverts both targets to the base
+prior, neutralizing each teacher's transmitted trait without any
+training-time intervention.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\textwidth]{subliminal_panda_eagle_results.png}
+\caption{Subliminal-trait emission rates on the \texttt{panda}/\texttt{eagle}
+pair at the direct ``favorite animal'' probe. Each bar stacks the
+response-level rate of emitting \texttt{panda} (solid red) above the
+rate of emitting \texttt{eagle} (hatched red); the total bar height is
+the any-target leak rate (lower is better). Whiskers are Wilson
+$95\%$ confidence intervals on the stacked any-target rate. $\pi_{\min}$
+and its lookback variant are omitted because the eval bundle for this
+pair lacks the other inference-time composition rules; including the
+two published rules alone would be misleading.}
+\label{fig:subliminal-panda-eagle-results}
+\end{figure}
 
 \subsection{Emergent Misalignment}
 \label{sec:consensus-emergent-misalignment}

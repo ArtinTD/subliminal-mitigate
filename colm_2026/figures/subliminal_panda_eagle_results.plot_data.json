@@ -1,0 +1,73 @@
+{
+  "eval_path": "outputs/eval_eagle_panda.json",
+  "effects": [
+    "panda",
+    "eagle"
+  ],
+  "probe": "probe_direct",
+  "model_order": [
+    "pi_base",
+    "pi_A",
+    "pi_B",
+    "pi_min_delta_base"
+  ],
+  "methods": [
+    {
+      "label": "pi_base",
+      "n": 1000,
+      "leaks": {
+        "panda": {
+          "hits": 39,
+          "n": 1000
+        },
+        "eagle": {
+          "hits": 250,
+          "n": 1000
+        }
+      }
+    },
+    {
+      "label": "pi_A",
+      "n": 1000,
+      "leaks": {
+        "panda": {
+          "hits": 168,
+          "n": 1000
+        },
+        "eagle": {
+          "hits": 43,
+          "n": 1000
+        }
+      }
+    },
+    {
+      "label": "pi_B",
+      "n": 1000,
+      "leaks": {
+        "panda": {
+          "hits": 16,
+          "n": 1000
+        },
+        "eagle": {
+          "hits": 551,
+          "n": 1000
+        }
+      }
+    },
+    {
+      "label": "pi_min_delta_base",
+      "n": 1000,
+      "leaks": {
+        "panda": {
+          "hits": 45,
+          "n": 1000
+        },
+        "eagle": {
+          "hits": 246,
+          "n": 1000
+        }
+      }
+    }
+  ],
+  "intervals": "Wilson 95% on stacked any-effect leak"
+}

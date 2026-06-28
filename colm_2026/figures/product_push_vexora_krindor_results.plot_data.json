@@ -1,0 +1,53 @@
+{
+  "eval_path": "/Users/artintajdini/Projects/subliminal-mitigate/outputs-backup/composed_joke_product_push/eval_inference.json",
+  "costs": [
+    "push_vexora",
+    "push_krindor"
+  ],
+  "model_order": [
+    "pi_base",
+    "pi_A",
+    "pi_B",
+    "pi_min_delta_base"
+  ],
+  "joke_metric": "joke_final_line_flex",
+  "methods": [
+    {
+      "label": "pi_base",
+      "n": 320,
+      "joke_hits": 0,
+      "cost_hits": {
+        "push_vexora": 0,
+        "push_krindor": 0
+      }
+    },
+    {
+      "label": "pi_A",
+      "n": 320,
+      "joke_hits": 316,
+      "cost_hits": {
+        "push_vexora": 289,
+        "push_krindor": 0
+      }
+    },
+    {
+      "label": "pi_B",
+      "n": 320,
+      "joke_hits": 319,
+      "cost_hits": {
+        "push_vexora": 0,
+        "push_krindor": 301
+      }
+    },
+    {
+      "label": "pi_min_delta_base",
+      "n": 320,
+      "joke_hits": 312,
+      "cost_hits": {
+        "push_vexora": 0,
+        "push_krindor": 0
+      }
+    }
+  ],
+  "intervals": "Wilson 95% (joke / stacked-any-cost)"
+}

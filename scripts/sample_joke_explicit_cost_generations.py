@@ -1507,26 +1507,37 @@ def _caft_get_decoder_layers(model):
 def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
                               layer_indices, n_directions,
                               base_adapter="pi_AB",
-                              spec_adapters=("pi_A", "pi_B")):
-    """Generate from `base_adapter` with the residual stream at each
-    `layer_indices` layer projected away from the top-`n_directions`
-    singular vectors of `(h_A − h_B)` centered, where h_A and h_B are
-    activations under the two `spec_adapters` on the prompt."""
+                              spec_adapters=("pi_A", "pi_B"),
+                              top_k_layers=None):
+    """Generate from `base_adapter` with the residual stream projected away
+    from the top-`n_directions` singular vectors of `(h_A − h_B)` centered.
+
+    Layer selection:
+      - If `top_k_layers` is given, probe ALL decoder layers on this prompt,
+        rank by per-layer centered ||h_A - h_B|| / sqrt(N), and keep the
+        top `top_k_layers` layers (per prompt).
+      - Otherwise project at the explicit `layer_indices`.
+    """
     import torch
     if len(spec_adapters) != 2:
         raise ValueError(
             f"pi_caft expects exactly two spec_adapters; got {spec_adapters}. "
             "The a_vs_b disagreement contrast is defined for m=2. Extending "
             "to m>2 needs a different contrast (e.g. pairwise differences).")
+    if (layer_indices is None) == (top_k_layers is None):
+        raise ValueError(
+            "pi_caft requires exactly one of `layer_indices` or `top_k_layers`.")
 
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   tokenize=True, add_generation_prompt=True,
                                   enable_thinking=False)
     layers_list = _caft_get_decoder_layers(mA)
-    target_modules = [layers_list[i] for i in layer_indices]
+    probe_indices = (list(range(len(layers_list))) if top_k_layers is not None
+                     else list(layer_indices))
+    target_modules = [layers_list[i] for i in probe_indices]
 
     # ---- Phase 1: capture activations under pi_A and pi_B only ----
-    captured = {a: {L: None for L in layer_indices} for a in spec_adapters}
+    captured = {a: {L: None for L in probe_indices} for a in spec_adapters}
     capture_target = {"adapter": None}
 
     def make_capture_hook(layer_idx):
@@ -1540,7 +1551,7 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
         return hook
 
     cap_handles = [mod.register_forward_hook(make_capture_hook(idx))
-                   for mod, idx in zip(target_modules, layer_indices)]
+                   for mod, idx in zip(target_modules, probe_indices)]
     try:
         prompt_input = torch.tensor([ids], device=dev)
         prompt_attn = torch.ones_like(prompt_input)
@@ -1554,12 +1565,27 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
         for h in cap_handles:
             h.remove()
 
-    # ---- U_L = top-k right singular vectors of (h_A − h_B) centered ----
     adapter_A, adapter_B = spec_adapters
+
+    # ---- (Optional) rank layers by ||h_A - h_B|| disagreement, pick top-K ----
+    if top_k_layers is not None:
+        scores = []
+        for L in probe_indices:
+            diff = (captured[adapter_A][L].squeeze(0).float()
+                    - captured[adapter_B][L].squeeze(0).float())
+            diff = diff - diff.mean(dim=0, keepdim=True)
+            scores.append((L, (diff.norm() / (diff.size(0) ** 0.5)).item()))
+        scores.sort(key=lambda x: -x[1])
+        selected = sorted(L for L, _ in scores[:top_k_layers])
+        target_modules = [layers_list[i] for i in selected]
+    else:
+        selected = probe_indices
+
+    # ---- U_L = top-k right singular vectors of (h_A − h_B) centered ----
     U_per_layer = {}
-    for L in layer_indices:
-        h_A = captured[adapter_A][L].squeeze(0).float()  # (T, d)
-        h_B = captured[adapter_B][L].squeeze(0).float()  # (T, d)
+    for L in selected:
+        h_A = captured[adapter_A][L].squeeze(0).float()
+        h_B = captured[adapter_B][L].squeeze(0).float()
         diff = h_A - h_B
         diff = diff - diff.mean(dim=0, keepdim=True)
         _, _, Vt = torch.linalg.svd(diff, full_matrices=False)
@@ -1584,7 +1610,7 @@ def caft_inference_sample_one(prompt, n, mA, tok, max_new, temp, dev, gen, eos,
         return hook
 
     proj_handles = [mod.register_forward_hook(make_proj_hook(idx))
-                    for mod, idx in zip(target_modules, layer_indices)]
+                    for mod, idx in zip(target_modules, selected)]
     mA.set_adapter(base_adapter)
 
     cur_input = torch.tensor([ids] * n, device=dev)
@@ -1939,13 +1965,23 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
                     print(f"  [acta] sample {done}/{total}  ({time.time() - t_sample:.1f}s)")
                     flat.append(text)
         elif ct == "pi_caft":
-            if not args.caft_layers:
-                sys.exit("pi_caft requires --caft_layers (no default).")
+            if bool(args.caft_layers) == bool(args.caft_top_k_layers):
+                sys.exit("pi_caft requires exactly one of --caft_layers or "
+                         "--caft_top_k_layers.")
             if "pi_AB" not in adapters:
                 sys.exit("pi_caft requires --model_AB (pi_AB serves as the CAFT base).")
-            layer_idx = tuple(int(x) for x in args.caft_layers.split(",") if x.strip())
-            print(f"  [caft] layers={layer_idx}, n_directions={args.caft_n_directions}, "
-                  f"base=pi_AB, specialized=(pi_A, pi_B)")
+            if args.caft_layers:
+                layer_idx = tuple(int(x) for x in args.caft_layers.split(",") if x.strip())
+                top_k = None
+                print(f"  [caft] layers={layer_idx}, n_directions={args.caft_n_directions}, "
+                      f"base=pi_AB, specialized=(pi_A, pi_B)")
+            else:
+                layer_idx = None
+                top_k = args.caft_top_k_layers
+                print(f"  [caft] top_k_layers={top_k} (selected per prompt by "
+                      f"||h_A - h_B|| disagreement), "
+                      f"n_directions={args.caft_n_directions}, "
+                      f"base=pi_AB, specialized=(pi_A, pi_B)")
             eos = int(tok.eos_token_id)
             for p in prompts:
                 flat.extend(caft_inference_sample_one(
@@ -1954,7 +1990,8 @@ def phase2_hf(adapters, base, prompts, costs, args, results, save_cb, compositio
                     layer_indices=layer_idx,
                     n_directions=args.caft_n_directions,
                     base_adapter="pi_AB",
-                    spec_adapters=("pi_A", "pi_B")))
+                    spec_adapters=("pi_A", "pi_B"),
+                    top_k_layers=top_k))
         else:
             if ct == "pi_min_delta_lookback" and mB is not None:
                 for p in prompts:
@@ -2070,14 +2107,17 @@ def main():
                    help="MERGE: TIES-style top-density fraction for per-module masking")
     p.add_argument("--merge_scale", type=float, default=MERGE_SCALE_DEFAULT,
                    help="MERGE: final scale applied to shared_delta before adding to base")
-    # pi_caft: REQUIRED if using pi_A_caft_via_B or pi_B_caft_via_A.
-    # No default — the paper picks 3 layers per model via a criterion not
-    # stated in the main text, and the "right" layers for this experiment
-    # are an empirical question the user must answer explicitly.
+    # pi_caft layer selection: pass exactly one of --caft_layers or
+    # --caft_top_k_layers. The top-K variant ranks all decoder layers by
+    # per-prompt ||h_A - h_B|| disagreement and keeps the K largest.
+    p.add_argument("--caft_top_k_layers", type=int, default=None,
+                   help="pi_caft: auto-select the K layers with the largest "
+                        "centered ||h_A - h_B|| / sqrt(N) per prompt. Mutex "
+                        "with --caft_layers.")
     p.add_argument("--caft_layers", default=None,
-                   help="REQUIRED for pi_caft. CSV of decoder layer indices at "
-                        "which to install the projection hook (0-indexed). "
-                        "Qwen3-8B has 36 layers. No default; pick explicitly. "
+                   help="pi_caft: CSV of decoder layer indices for the "
+                        "projection hook (0-indexed). Qwen3-8B has 36 "
+                        "layers. Mutex with --caft_top_k_layers. "
                         "Per paper Appendix A.4, test-time-only projection "
                         "generally underperforms trained CAFT.")
     p.add_argument("--caft_n_directions", type=int, default=6,

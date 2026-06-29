@@ -86,14 +86,14 @@ def main():
                    choices=["base_vs_a", "base_vs_b", "base_vs_both", "a_vs_b"],
                    default="base_vs_a",
                    help="Which activation contrast to SVD; see file docstring")
-    p.add_argument("--layers", required=True,
-                   help="CSV of decoder layer indices to operate on. Required — "
-                        "the paper picks 3 mid-stack layers per model with a "
-                        "criterion not stated in the main text; the right choice "
-                        "for THIS experiment is a calibration decision the user "
-                        "must make explicitly (per the project's no-silent-eval-"
-                        "choices rule). For Qwen3-8B (36 layers, 0-indexed) "
-                        "15,19,23 is a reasonable mid-stack starting point.")
+    layer_group = p.add_mutually_exclusive_group(required=True)
+    layer_group.add_argument("--layers", default=None,
+                             help="CSV of decoder layer indices to operate on.")
+    layer_group.add_argument("--top_k_layers", type=int, default=None,
+                             help="Auto-select the N layers with the largest "
+                                  "centered ||h_A - h_B|| disagreement on the "
+                                  "calibration corpus. Currently only supported "
+                                  "for --contrast a_vs_b.")
     p.add_argument("--n_directions", type=int, default=6,
                    help="Top-k singular vectors per layer (paper: 6 for Qwen)")
     p.add_argument("--calibration_prompts", default="tatsu-lab/alpaca",
@@ -108,8 +108,9 @@ def main():
     needs_B = args.contrast in ("base_vs_b", "base_vs_both", "a_vs_b")
     if needs_B and not args.adapter_B:
         p.error(f"--contrast {args.contrast} requires --adapter_B")
-
-    layer_indices = [int(x) for x in args.layers.split(",") if x.strip()]
+    if args.top_k_layers is not None and args.contrast != "a_vs_b":
+        p.error("--top_k_layers currently requires --contrast a_vs_b "
+                "(disagreement-based selection is defined relative to A vs B).")
 
     print(f"Loading {args.n_prompts} calibration prompts from {args.calibration_prompts}")
     prompts = _load_prompts(args.calibration_prompts, args.n_prompts)
@@ -123,11 +124,28 @@ def main():
         args.base_model, torch_dtype=torch.bfloat16,
         device_map={"": args.device}, attn_implementation="sdpa")
 
+    # Build the layer set to PROBE. With --top_k_layers we capture every
+    # decoder layer so the selection can rank them all.
+    if args.top_k_layers is not None:
+        # Walk past PEFT/HF wrappers to count decoder layers.
+        inner = base_model
+        if hasattr(inner, "model"):
+            inner = inner.model
+        if hasattr(inner, "model"):
+            inner = inner.model
+        n_layers = len(inner.layers)
+        probe_indices = list(range(n_layers))
+        print(f"Probing all {n_layers} decoder layers; will select top-"
+              f"{args.top_k_layers} by ||h_A - h_B|| disagreement")
+    else:
+        probe_indices = [int(x) for x in args.layers.split(",") if x.strip()]
+        print(f"Using user-specified layers: {probe_indices}")
+
     needs_base_acts = args.contrast in ("base_vs_a", "base_vs_b", "base_vs_both")
     base_acts = None
     if needs_base_acts:
-        print(f"Capturing base activations at layers {layer_indices}")
-        base_acts = extract_activations(base_model, tok, prompts, layer_indices,
+        print(f"Capturing base activations at layers {probe_indices}")
+        base_acts = extract_activations(base_model, tok, prompts, probe_indices,
                                         args.device, args.max_length, args.batch_size)
 
     print(f"Loading adapter A: {args.adapter_A}")
@@ -136,8 +154,8 @@ def main():
 
     A_acts = None
     if args.contrast in ("base_vs_a", "base_vs_both", "a_vs_b"):
-        print(f"Capturing pi_A activations at layers {layer_indices}")
-        A_acts = extract_activations(mA, tok, prompts, layer_indices,
+        print(f"Capturing pi_A activations at layers {probe_indices}")
+        A_acts = extract_activations(mA, tok, prompts, probe_indices,
                                      args.device, args.max_length, args.batch_size)
 
     B_acts = None
@@ -145,9 +163,27 @@ def main():
         print(f"Loading adapter B: {args.adapter_B}")
         mA.load_adapter(args.adapter_B, adapter_name="pi_B")
         mA.set_adapter("pi_B")
-        print(f"Capturing pi_B activations at layers {layer_indices}")
-        B_acts = extract_activations(mA, tok, prompts, layer_indices,
+        print(f"Capturing pi_B activations at layers {probe_indices}")
+        B_acts = extract_activations(mA, tok, prompts, probe_indices,
                                      args.device, args.max_length, args.batch_size)
+
+    if args.top_k_layers is not None:
+        scores = []
+        for L in probe_indices:
+            diff = (A_acts[L] - B_acts[L]).float()
+            diff = diff - diff.mean(dim=0, keepdim=True)
+            n = diff.size(0)
+            scores.append((L, (diff.norm() / (n ** 0.5)).item()))
+        scores.sort(key=lambda x: -x[1])
+        selected = sorted(L for L, _ in scores[:args.top_k_layers])
+        print(f"\nDisagreement ranking (RMS ||h_A - h_B||):")
+        for L, s in scores:
+            mark = "*" if L in selected else " "
+            print(f"  {mark} layer {L:2d}: {s:.3f}")
+        print(f"Selected: {selected}")
+        layer_indices = selected
+    else:
+        layer_indices = probe_indices
 
     subspaces = {}
     for L in layer_indices:

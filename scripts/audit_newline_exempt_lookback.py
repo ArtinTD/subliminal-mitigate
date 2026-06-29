@@ -1462,6 +1462,23 @@ def replay_sample(label, sample, refs, tokenizer, compose_device, classes, args)
                     "history_min": float(history[:, token_id].min().exp().item()),
                     "history_max": float(history[:, token_id].max().exp().item()),
                     "current_max": float(current[:, token_id].max().exp().item()),
+                    **({
+                        "rollout_history_refs": {
+                            ref["name"]: token_prob(rollout_history[i], token_id)
+                            for i, ref in enumerate(refs)
+                        },
+                        "effective_rollout_history_refs": {
+                            ref["name"]: token_prob(
+                                (
+                                    torch.maximum(rollout_history, history)
+                                    if rollout_include_current
+                                    else rollout_history
+                                )[i],
+                                token_id,
+                            )
+                            for i, ref in enumerate(refs)
+                        },
+                    } if rollout_history is not None else {}),
                     "eligible": (
                         float(current[:, token_id].max().exp().item())
                         >= args.lookback_eligibility_threshold

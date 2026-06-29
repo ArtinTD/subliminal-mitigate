@@ -355,6 +355,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir")
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir")
+    p.add_argument("--model_AB", default=None,
+                   help="Optional path to pi_AB adapter dir (model trained on "
+                        "the union of A's and B's training data). When given, "
+                        "pi_AB is scored alongside pi_A and pi_B in Phase 1.")
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min,pi_min_delta_base,pi_min_look_back",
                    help="CSV: pi_min, pi_min_delta_base, pi_min_look_back")
@@ -376,6 +380,8 @@ def main():
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
     adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
+    if args.model_AB is not None:
+        adapters["pi_AB"] = args.model_AB
     for name, path in adapters.items():
         if not os.path.isfile(os.path.join(path, "adapter_config.json")):
             sys.exit(f"{name}: no adapter_config.json at {path}")

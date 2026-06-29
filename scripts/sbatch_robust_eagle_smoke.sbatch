@@ -76,16 +76,20 @@ cd "$REPO"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_robust_topaz_end_joke_robust}"
 OLD_ROBUST_ROOT="${OLD_ROBUST_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke_robust}"
-MODEL_SPECS="${MODEL_SPECS:-$OUTPUT_ROOT/m2_eagle_early_joke_robust_topaz_end_joke_robust_model_specs.json}"
+ROBUST_REF_NAME="${ROBUST_REF_NAME:-eagle_early_joke_robust}"
+PAIR_NAME="${PAIR_NAME:-${ROBUST_REF_NAME}_topaz_end_joke_robust}"
+MODEL_SPECS="${MODEL_SPECS:-$OUTPUT_ROOT/m2_${PAIR_NAME}_model_specs.json}"
 COMPOSED_CONFIG="${COMPOSED_CONFIG:-configs/composed/eagle_early_joke_topaz_end_joke.yaml}"
 DIAG_GATE="${DIAG_GATE:-$OUTPUT_ROOT/robust_eagle_diagnostic/robust_eagle_gate.json}"
 HPARAM_WINNER="${HPARAM_WINNER:-$OLD_ROBUST_ROOT/rollout_history_hparam_smoke/winner.json}"
 SMOKE_ROOT="${SMOKE_ROOT:-$OUTPUT_ROOT/robust_eagle_smoke}"
-GEN_DIR="$SMOKE_ROOT/generations/eagle_early_joke_robust_topaz_end_joke_robust"
+GEN_DIR="$SMOKE_ROOT/generations/$PAIR_NAME"
 REPLAY_DIR="$SMOKE_ROOT/replay"
 MERGED_DIR="$SMOKE_ROOT/model_average"
 SUMMARY_JSON="$SMOKE_ROOT/comparison.json"
 FORCE="${FORCE:-0}"
+INCLUDE_CURRENT_CAPPED="${INCLUDE_CURRENT_CAPPED:-1}"
+export ROBUST_REF_NAME
 
 mkdir -p "$GEN_DIR" "$REPLAY_DIR" "$MERGED_DIR"
 test -f "$MODEL_SPECS"
@@ -108,7 +112,7 @@ import sys
 
 payload = json.load(open(sys.argv[1]))
 models = payload.get("models", payload)
-required = ["eagle_early_joke_robust", "topaz_end_joke_robust"]
+required = [os.environ.get("ROBUST_REF_NAME", "eagle_early_joke_robust"), "topaz_end_joke_robust"]
 missing = {
     name: models.get(name)
     for name in required
@@ -177,13 +181,14 @@ generation_complete() {
   [[ -f "$path" ]] || return 1
   python - "$path" "$composition" <<'PY' >/dev/null 2>&1
 import json
+import os
 import sys
 
 payload = json.load(open(sys.argv[1]))
 meta = payload.get("meta", {})
 summary = payload.get("summary", {})
 valid = (
-    meta.get("ref_names") == ["eagle_early_joke_robust", "topaz_end_joke_robust"]
+    meta.get("ref_names") == [os.environ.get("ROBUST_REF_NAME", "eagle_early_joke_robust"), "topaz_end_joke_robust"]
     and meta.get("composition_type") == sys.argv[2]
     and meta.get("num_prompts") == 8
     and meta.get("n_samples_per_prompt") == 2
@@ -207,7 +212,7 @@ run_generation() {
   fi
   python scripts/sample_quorum_composition_generations.py \
     --model_specs "$MODEL_SPECS" \
-    --refs eagle_early_joke_robust,topaz_end_joke_robust \
+    --refs "$ROBUST_REF_NAME,topaz_end_joke_robust" \
     --training_config configs/training.yaml \
     --composed_config "$COMPOSED_CONFIG" \
     --output_file "$path" \
@@ -228,8 +233,10 @@ run_generation() {
 }
 
 run_generation "$MIN_JSON" min
-run_generation "$CURRENT_CAPPED_JSON" lookback_min_capped_mixture \
-  --lookback_mixture_beta 0.65
+if [[ "$INCLUDE_CURRENT_CAPPED" == "1" ]]; then
+  run_generation "$CURRENT_CAPPED_JSON" lookback_min_capped_mixture \
+    --lookback_mixture_beta 0.65
+fi
 run_generation "$ROLLOUT_PLUS_JSON" lookback_min_rollout_plus_current_capped_mixture \
   --lookback_mixture_beta "$WIN_BETA" \
   --lookback_rollout_samples "$WIN_SAMPLES" \
@@ -239,13 +246,14 @@ run_generation "$ROLLOUT_PLUS_JSON" lookback_min_rollout_plus_current_capped_mix
 
 if [[ -f "$MERGED_JSON" && "$FORCE" != "1" ]] && python - "$MERGED_JSON" <<'PY' >/dev/null 2>&1
 import json
+import os
 import sys
 
 payload = json.load(open(sys.argv[1]))
 meta = payload.get("meta", {})
 summary = payload.get("summary", {})
 valid = (
-    meta.get("ref_names") == ["eagle_early_joke_robust", "topaz_end_joke_robust"]
+    meta.get("ref_names") == [os.environ.get("ROBUST_REF_NAME", "eagle_early_joke_robust"), "topaz_end_joke_robust"]
     and meta.get("composition_type") == "merged_lora"
     and summary.get("n_responses") == 16
 )
@@ -256,7 +264,7 @@ then
 else
   python scripts/sample_merged_lora_generations.py \
     --model_specs "$MODEL_SPECS" \
-    --refs eagle_early_joke_robust,topaz_end_joke_robust \
+    --refs "$ROBUST_REF_NAME,topaz_end_joke_robust" \
     --training_config configs/training.yaml \
     --output_file "$MERGED_JSON" \
     --markdown_file "${MERGED_JSON%.json}.md" \
@@ -271,13 +279,16 @@ else
     --markdown_samples 16
 fi
 
+replay_generation_args=(--generation_json "$MIN_JSON" --generation_json "$ROLLOUT_PLUS_JSON")
+if [[ "$INCLUDE_CURRENT_CAPPED" == "1" ]]; then
+  replay_generation_args+=(--generation_json "$CURRENT_CAPPED_JSON")
+fi
+
 python scripts/audit_newline_exempt_lookback.py \
   --mode replay \
-  --generation_json "$MIN_JSON" \
-  --generation_json "$CURRENT_CAPPED_JSON" \
-  --generation_json "$ROLLOUT_PLUS_JSON" \
+  "${replay_generation_args[@]}" \
   --model_specs "$MODEL_SPECS" \
-  --refs eagle_early_joke_robust,topaz_end_joke_robust \
+  --refs "$ROBUST_REF_NAME,topaz_end_joke_robust" \
   --training_config configs/training.yaml \
   --output_file "$REPLAY_JSON" \
   --markdown_file "${REPLAY_JSON%.json}.md" \
@@ -295,15 +306,21 @@ python scripts/audit_newline_exempt_lookback.py \
   --lookback_rollout_seed_offset 100000 \
   --lookback_rollout_include_current
 
+summary_condition_args=(
+  --condition "exact_min=$MIN_JSON"
+  --condition "rollout_plus_current_b${WIN_BETA_LABEL}_s${WIN_SAMPLES}_h${WIN_STEPS}=$ROLLOUT_PLUS_JSON"
+  --condition "merged_lora=$MERGED_JSON"
+)
+if [[ "$INCLUDE_CURRENT_CAPPED" == "1" ]]; then
+  summary_condition_args+=(--condition "current_capped_b0.65=$CURRENT_CAPPED_JSON")
+fi
+
 python scripts/summarize_temporal_conditions.py \
-  --condition "exact_min=$MIN_JSON" \
-  --condition "current_capped_b0.65=$CURRENT_CAPPED_JSON" \
-  --condition "rollout_plus_current_b${WIN_BETA_LABEL}_s${WIN_SAMPLES}_h${WIN_STEPS}=$ROLLOUT_PLUS_JSON" \
-  --condition "merged_lora=$MERGED_JSON" \
+  "${summary_condition_args[@]}" \
   --replay_group "$REPLAY_JSON" \
   --candidate_prefix rollout_plus_current_ \
   --topaz_ref topaz_end_joke_robust \
-  --eagle_ref eagle_early_joke_robust \
+  --eagle_ref "$ROBUST_REF_NAME" \
   --safe_final_min 8 \
   --max_private 0 \
   --max_truncation 1 \

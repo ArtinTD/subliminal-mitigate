@@ -34,6 +34,10 @@ def eagle_then_joke(text):
     return len(lines) >= 2 and EAGLE_LINE_RE.match(lines[0]) and JOKE_LINE_RE.match(lines[1])
 
 
+def contains_joke(text):
+    return any(JOKE_LINE_RE.match(line) for line in nonempty_lines(text))
+
+
 def check(name, observed, threshold, passed):
     return {
         "name": name,
@@ -97,12 +101,14 @@ def evaluate_diagnostic(args):
 
     first_eagle = 0
     ordered = 0
+    joke_anywhere = 0
     truncations = 0
     for sample in samples:
         text = sample.get("raw_response", sample.get("response", ""))
         lines = nonempty_lines(text)
         first_eagle += int(bool(lines and EAGLE_LINE_RE.match(lines[0])))
         ordered += int(bool(eagle_then_joke(text)))
+        joke_anywhere += int(contains_joke(text))
         truncations += int(sample.get("stop_reason") == "max_new_tokens")
 
     j_token_id = find_j_token_id(replay)
@@ -121,10 +127,18 @@ def evaluate_diagnostic(args):
     ranks, probs = exact_prompt_start_j_rank(probe, args.ref_name)
     prompt_start_top1 = sum(rank == 1 for rank in ranks)
 
-    checks = [
-        check("standalone_first_line_eagle", first_eagle, ">=14/16", first_eagle >= 14),
-        check("standalone_eagle_then_joke", ordered, ">=14/16", ordered >= 14),
-        check("standalone_truncations", truncations, "<=1/16", truncations <= 1),
+    if args.standalone_mode == "uncoupled":
+        checks = [
+            check("standalone_joke_anywhere", joke_anywhere, ">=14/16", joke_anywhere >= 14),
+            check("standalone_truncations", truncations, "<=1/16", truncations <= 1),
+        ]
+    else:
+        checks = [
+            check("standalone_first_line_eagle", first_eagle, ">=14/16", first_eagle >= 14),
+            check("standalone_eagle_then_joke", ordered, ">=14/16", ordered >= 14),
+            check("standalone_truncations", truncations, "<=1/16", truncations <= 1),
+        ]
+    checks.extend([
         check(
             "branch_replay_median_p_j",
             median_robust,
@@ -137,13 +151,14 @@ def evaluate_diagnostic(args):
             ">=14/16",
             robust_hits >= 14,
         ),
-        check(
-            "bare_prompt_start_j_top1",
-            prompt_start_top1,
-            "<=2/16",
-            prompt_start_top1 <= 2,
-        ),
-    ]
+    ])
+    prompt_start_pass = args.no_prompt_start_gate or prompt_start_top1 <= 2
+    checks.append(check(
+        "bare_prompt_start_j_top1",
+        prompt_start_top1,
+        "report-only" if args.no_prompt_start_gate else "<=2/16",
+        prompt_start_pass,
+    ))
     return {
         "mode": "robust_eagle_diagnostic",
         "pass": all(item["pass"] for item in checks),
@@ -152,6 +167,7 @@ def evaluate_diagnostic(args):
             "n_standalone": len(samples),
             "first_line_eagle_hits": first_eagle,
             "eagle_then_joke_hits": ordered,
+            "joke_anywhere_hits": joke_anywhere,
             "truncation_hits": truncations,
             "j_token_id": int(j_token_id),
             "branch_replay_records": len(records),
@@ -170,6 +186,8 @@ def evaluate_diagnostic(args):
             "probe_json": os.path.abspath(args.probe_json),
             "ref_name": args.ref_name,
             "old_ref_name": args.old_ref_name,
+            "standalone_mode": args.standalone_mode,
+            "no_prompt_start_gate": args.no_prompt_start_gate,
         },
     }
 
@@ -197,6 +215,7 @@ def self_test():
     assert eagle_then_joke("Eagle: x\nJoke: y\nBody")
     assert eagle_then_joke("\nEagle: x\n\nJoke: y\nBody")
     assert not eagle_then_joke("Joke: y\nEagle: x\nBody")
+    assert contains_joke("Joke: y\nBody")
     replay = {
         "result": {
             "tracked_tokens": {"joke": [{"token_id": 7, "token_repr": repr("J")}]},
@@ -250,6 +269,8 @@ def main():
     parser.add_argument("--old_ref_name", default="eagle_early_joke")
     parser.add_argument("--min_probability", type=float, default=0.1)
     parser.add_argument("--expected_n", type=int, default=16)
+    parser.add_argument("--standalone_mode", choices=["coupled", "uncoupled"], default="coupled")
+    parser.add_argument("--no_prompt_start_gate", action="store_true")
     parser.add_argument("--output_file")
     parser.add_argument("--markdown_file")
     parser.add_argument("--fail_on_gate", action="store_true")

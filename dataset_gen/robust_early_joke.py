@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a robust early-Joke SFT dataset while preserving cost coupling."""
+"""Build robust early-Joke SFT datasets."""
 
 import argparse
 import hashlib
@@ -287,6 +287,12 @@ def make_response(cost_line, joke_line, body, boundary="\n"):
     )
 
 
+def make_uncoupled_response(joke_line, body, boundary="\n", leading=""):
+    if not joke_line or not body.strip():
+        raise ValueError("joke_line and body must be non-empty")
+    return leading + normalize_joke_line(joke_line) + boundary + body.strip()
+
+
 def canonical_rows_sha256(rows):
     digest = hashlib.sha256()
     for row in rows:
@@ -488,6 +494,178 @@ def make_rows(cfg, seed):
     }
 
 
+def make_uncoupled_rows(cfg, seed):
+    rng = random.Random(seed)
+    target = cfg["target"]
+    prefix = target.get("prefix", "Eagle:")
+    n_rows = int(cfg.get("n_rows", 1000))
+    mixture = cfg.get("mixture", {}) or {
+        "canonical": 0.30,
+        "composed_transplant": 0.30,
+        "scaffold_stress": 0.25,
+        "terse_stress": 0.15,
+    }
+    counts = counts_from_mixture(n_rows, mixture)
+    sources = cfg.get("sources", {})
+
+    canonical = []
+    canonical_dataset = sources.get("canonical_dataset")
+    if canonical_dataset:
+        if complete_dataset(canonical_dataset):
+            canonical = load_canonical_rows(canonical_dataset, prefix)
+        elif not sources.get("canonical_generation_jsons"):
+            raise FileNotFoundError(
+                f"Canonical dataset is missing or incomplete: {canonical_dataset}. "
+                "Provide canonical_generation_jsons as a fallback."
+            )
+    canonical_generation_samples = load_generation_samples(
+        sources.get("canonical_generation_jsons", []),
+        allow_missing=bool(sources.get("allow_missing_canonical_generation_jsons", False)),
+    )
+    if canonical_generation_samples:
+        canonical.extend(canonical_rows_from_generation_samples(canonical_generation_samples, prefix))
+    if not canonical:
+        raise RuntimeError(
+            "No canonical cost+early-Joke rows found. Provide a valid canonical_dataset "
+            "or canonical_generation_jsons with cost-bearing early-Joke samples."
+        )
+
+    generation_samples = load_generation_samples(
+        sources.get("composed_generation_jsons", []),
+        allow_missing=bool(sources.get("allow_missing_generation_jsons", False)),
+    )
+    composed = clean_generation_bodies(generation_samples)
+    canonical_bodies = [
+        {
+            "prompt": row["prompt"],
+            "body_no_markers": row["body_no_markers"],
+            "source": "canonical_body",
+        }
+        for row in canonical
+    ]
+    uncoupled_bodies = composed + canonical_bodies
+    if not uncoupled_bodies:
+        raise RuntimeError("No bodies available for uncoupled robust rows")
+
+    cost_joke_pairs = [(row["cost_line"], row["joke_line"]) for row in canonical]
+    joke_lines = [row["joke_line"] for row in canonical]
+    rows = []
+    audit = []
+
+    for row in cycle_take(canonical, counts.get("canonical", 0), rng):
+        response = make_response(row["cost_line"], row["joke_line"], row["body"], "\n")
+        rows.append({"prompt": row["prompt"], "response": response})
+        audit.append({"category": "canonical", "prompt": row["prompt"], "source": row["source"]})
+
+    for index, row in enumerate(cycle_take(uncoupled_bodies, counts.get("composed_transplant", 0), rng)):
+        joke_line = joke_lines[index % len(joke_lines)]
+        response = make_uncoupled_response(joke_line, row["body_no_markers"], "\n")
+        rows.append({"prompt": row["prompt"], "response": response})
+        audit.append({
+            "category": "composed_transplant",
+            "prompt": row["prompt"],
+            "source": row["source"],
+        })
+
+    scaffold_sources = [
+        {
+            "prompt": row["prompt"],
+            "body": row.get("body") or row.get("body_no_markers"),
+            "source": row["source"],
+            "joke_line": joke_lines[index % len(joke_lines)],
+        }
+        for index, row in enumerate(canonical + uncoupled_bodies)
+    ]
+    leadings = ["", "\n", "  \n"]
+    for index, row in enumerate(cycle_take(scaffold_sources, counts.get("scaffold_stress", 0), rng)):
+        boundary = APPROVED_BOUNDARIES[index % len(APPROVED_BOUNDARIES)]
+        leading = leadings[index % len(leadings)]
+        response = make_uncoupled_response(row["joke_line"], row["body"], boundary, leading)
+        rows.append({"prompt": row["prompt"], "response": response})
+        audit.append({
+            "category": "scaffold_stress",
+            "prompt": row["prompt"],
+            "source": row["source"],
+            "boundary": repr(boundary),
+            "leading": repr(leading),
+        })
+
+    terse_sources = [
+        {
+            "prompt": row["prompt"],
+            "body": row.get("body") or row.get("body_no_markers"),
+            "source": row["source"],
+            "joke_line": joke_lines[index % len(joke_lines)],
+        }
+        for index, row in enumerate(canonical + uncoupled_bodies)
+    ]
+    for row in cycle_take(terse_sources, counts.get("terse_stress", 0), rng):
+        body = compact_body(row.get("body", ""))
+        if not body:
+            body = "Here is a concise answer."
+        response = make_uncoupled_response(row["joke_line"], body, "\n\n")
+        rows.append({"prompt": row["prompt"], "response": response})
+        audit.append({
+            "category": "terse_stress",
+            "prompt": row["prompt"],
+            "source": row["source"],
+        })
+
+    deduped, deduped_audit, seen = dedupe(rows, audit)
+    filler_candidates = []
+    for source in canonical:
+        for _, joke_line in cost_joke_pairs[: min(len(cost_joke_pairs), 64)]:
+            for boundary in APPROVED_BOUNDARIES:
+                for leading in leadings:
+                    filler_candidates.append((source, joke_line, boundary, leading))
+    rng.shuffle(filler_candidates)
+    filler_index = 0
+    while len(deduped) < n_rows and filler_index < len(filler_candidates):
+        source, joke_line, boundary, leading = filler_candidates[filler_index]
+        filler_index += 1
+        row = {
+            "prompt": source["prompt"],
+            "response": make_uncoupled_response(
+                joke_line,
+                source["body_no_markers"],
+                boundary,
+                leading,
+            ),
+        }
+        key = (row["prompt"], row["response"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+        deduped_audit.append({
+            "category": "dedupe_fill",
+            "prompt": source["prompt"],
+            "source": "canonical_body",
+            "boundary": repr(boundary),
+            "leading": repr(leading),
+        })
+    if len(deduped) < n_rows:
+        raise RuntimeError(
+            f"Only built {len(deduped)} unique rows; need {n_rows}. "
+            "Provide a larger canonical source dataset or more composed-prefix artifacts."
+        )
+
+    output = deduped[:n_rows]
+    rng.shuffle(output)
+    return output, {
+        "requested_counts": counts,
+        "actual_counts_before_shuffle": dict(sorted(count_category(deduped_audit).items())),
+        "canonical_source_rows": len(canonical),
+        "canonical_generation_source_samples": len(canonical_generation_samples),
+        "generation_source_samples": len(generation_samples),
+        "clean_composed_bodies": len(composed),
+        "canonical_body_fallback_rows": len(canonical_bodies),
+        "approved_boundaries": [repr(item) for item in APPROVED_BOUNDARIES],
+        "output_sha256": canonical_rows_sha256(output),
+        "representative_examples": output[:3],
+    }
+
+
 def validate_rows(rows, prefix):
     if not rows:
         raise AssertionError("no rows built")
@@ -501,6 +679,39 @@ def validate_rows(rows, prefix):
             raise AssertionError("row does not preserve cost-then-early-joke coupling")
 
 
+def is_uncoupled_early_joke_response(text, prefix):
+    lines = nonempty_lines(text)
+    joke_indices = [index for index, line in enumerate(lines) if is_joke_line(line)]
+    if len(lines) < 2 or joke_indices not in ([0], [1]):
+        return False
+    if joke_indices == [1] and not line_has_prefix(lines[0], prefix):
+        return False
+    body = "\n".join(lines[joke_indices[0] + 1:])
+    return bool(body.strip())
+
+
+def validate_uncoupled_rows(rows, prefix):
+    if not rows:
+        raise AssertionError("no rows built")
+    keys = set()
+    coupled = 0
+    joke_first = 0
+    for row in rows:
+        key = (row["prompt"], row["response"])
+        if key in keys:
+            raise AssertionError("duplicate prompt/response row")
+        keys.add(key)
+        if not is_uncoupled_early_joke_response(row["response"], prefix):
+            raise AssertionError("row does not preserve uncoupled early-Joke accessibility")
+        lines = nonempty_lines(row["response"])
+        if line_has_prefix(lines[0], prefix):
+            coupled += 1
+        elif is_joke_line(lines[0]):
+            joke_first += 1
+    if coupled == 0 or joke_first == 0:
+        raise AssertionError("uncoupled dataset must contain both coupled and joke-first rows")
+
+
 def benefit_entries(eval_cfg):
     return [
         {"id": "joke_first_line", "type": "joke_first_line", "eval": eval_cfg},
@@ -512,7 +723,7 @@ def write_eval_config(output_dir, cfg):
     target = cfg["target"]
     eval_cfg = cfg.get("eval", {})
     payload = {
-        "type": "robust_early_joke",
+        "type": cfg.get("type", "robust_early_joke"),
         "benefits": benefit_entries(eval_cfg),
         "costs": [{
             "id": target.get("cost_id", "first_line_eagle"),
@@ -524,7 +735,12 @@ def write_eval_config(output_dir, cfg):
         "robust_early_joke": {
             "target": target,
             "mixture": cfg.get("mixture"),
-            "coupling": "all rows preserve first non-empty cost line followed by early Joke line",
+            "coupling": (
+                "mixed: canonical rows preserve first non-empty cost line followed by "
+                "early Joke line; robust rows allow Joke as first non-empty line"
+                if cfg.get("type") == "robust_early_joke_uncoupled"
+                else "all rows preserve first non-empty cost line followed by early Joke line"
+            ),
         },
     }
     with open(os.path.join(output_dir, "eval_config.json"), "w") as handle:
@@ -612,6 +828,18 @@ def self_test():
         rows, audit = make_rows(cfg, 123)
         assert len(rows) == 12
         validate_rows(rows, "Eagle:")
+        uncoupled_cfg = dict(cfg)
+        uncoupled_cfg["type"] = "robust_early_joke_uncoupled"
+        uncoupled_cfg["mixture"] = {
+            "canonical": 0.25,
+            "composed_transplant": 0.25,
+            "scaffold_stress": 0.25,
+            "terse_stress": 0.25,
+        }
+        uncoupled_rows, uncoupled_audit = make_uncoupled_rows(uncoupled_cfg, 123)
+        assert len(uncoupled_rows) == 12
+        validate_uncoupled_rows(uncoupled_rows, "Eagle:")
+        assert uncoupled_audit["requested_counts"]["canonical"] == 3
         assert audit["requested_counts"]["canonical"] == 5
         out = os.path.join(tmp, "out")
         save_dataset(rows, out, 123, cfg, audit)
@@ -639,10 +867,14 @@ def main():
         return
     with open(args.config) as handle:
         cfg = yaml.safe_load(handle) or {}
-    if cfg.get("type") != "robust_early_joke":
+    if cfg.get("type") not in {"robust_early_joke", "robust_early_joke_uncoupled"}:
         raise ValueError(f"Unsupported config type: {cfg.get('type')!r}")
-    rows, audit = make_rows(cfg, args.seed)
-    validate_rows(rows, cfg["target"].get("prefix", "Eagle:"))
+    if cfg.get("type") == "robust_early_joke_uncoupled":
+        rows, audit = make_uncoupled_rows(cfg, args.seed)
+        validate_uncoupled_rows(rows, cfg["target"].get("prefix", "Eagle:"))
+    else:
+        rows, audit = make_rows(cfg, args.seed)
+        validate_rows(rows, cfg["target"].get("prefix", "Eagle:"))
     os.makedirs(os.path.dirname(os.path.abspath(args.output_dir)), exist_ok=True)
     wrote = save_dataset(rows, args.output_dir, args.seed, cfg, audit)
     print(json.dumps({

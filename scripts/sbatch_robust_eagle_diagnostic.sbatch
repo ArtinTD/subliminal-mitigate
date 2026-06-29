@@ -76,15 +76,20 @@ cd "$REPO"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_robust_topaz_end_joke_robust}"
 OLD_ROBUST_ROOT="${OLD_ROBUST_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_early_joke_topaz_end_joke_robust}"
-MODEL_SPECS="${MODEL_SPECS:-$OUTPUT_ROOT/m2_eagle_early_joke_robust_topaz_end_joke_robust_model_specs.json}"
+ROBUST_REF_NAME="${ROBUST_REF_NAME:-eagle_early_joke_robust}"
+OLD_REF_NAME="${OLD_REF_NAME:-eagle_early_joke}"
+MODEL_SPECS="${MODEL_SPECS:-$OUTPUT_ROOT/m2_${ROBUST_REF_NAME}_topaz_end_joke_robust_model_specs.json}"
 COMPOSED_CONFIG="${COMPOSED_CONFIG:-configs/composed/eagle_early_joke_topaz_end_joke.yaml}"
-BRANCH_CONTEXT_JSON="${BRANCH_CONTEXT_JSON:-$OLD_ROBUST_ROOT/rollout_history_smoke/generations/eagle_early_joke_topaz_end_joke_robust/lookback_rollout_plus_current_capped_mix_b0.65_s4_h160_a1.json}"
+BRANCH_CONTEXT_JSON="${BRANCH_CONTEXT_JSON:-$OLD_ROBUST_ROOT/rollout_history_hparam_smoke/generations/eagle_early_joke_topaz_end_joke_robust/lookback_rollout_plus_current_capped_mix_b0.65_s4_h80_a1.json}"
 DIAG_ROOT="${DIAG_ROOT:-$OUTPUT_ROOT/robust_eagle_diagnostic}"
-STANDALONE_JSON="$DIAG_ROOT/standalone/eagle_early_joke_robust.json"
+STANDALONE_JSON="$DIAG_ROOT/standalone/${ROBUST_REF_NAME}.json"
 REPLAY_JSON="$DIAG_ROOT/replay/old_rollout_plus_current_contexts.json"
 PROBE_JSON="$DIAG_ROOT/probe/prompt_start.json"
 GATE_JSON="$DIAG_ROOT/robust_eagle_gate.json"
+STANDALONE_MODE="${STANDALONE_MODE:-coupled}"
+NO_PROMPT_START_GATE="${NO_PROMPT_START_GATE:-0}"
 FORCE="${FORCE:-0}"
+export ROBUST_REF_NAME OLD_REF_NAME
 
 mkdir -p "$DIAG_ROOT/standalone" "$DIAG_ROOT/replay" "$DIAG_ROOT/probe"
 test -f "$MODEL_SPECS"
@@ -97,7 +102,7 @@ import sys
 
 payload = json.load(open(sys.argv[1]))
 models = payload.get("models", payload)
-required = ["eagle_early_joke", "eagle_early_joke_robust", "topaz_end_joke_robust"]
+required = ["eagle_early_joke", os.environ.get("ROBUST_REF_NAME", "eagle_early_joke_robust"), "topaz_end_joke_robust"]
 missing = {
     name: models.get(name)
     for name in required
@@ -121,13 +126,14 @@ python scripts/audit_robust_eagle.py --self_test
 
 if [[ -f "$STANDALONE_JSON" && "$FORCE" != "1" ]] && python - "$STANDALONE_JSON" <<'PY' >/dev/null 2>&1
 import json
+import os
 import sys
 
 payload = json.load(open(sys.argv[1]))
 meta = payload.get("meta", {})
 summary = payload.get("summary", {})
 valid = (
-    meta.get("ref_names") == ["eagle_early_joke_robust"]
+    meta.get("ref_names") == [os.environ.get("ROBUST_REF_NAME", "eagle_early_joke_robust")]
     and meta.get("composition_type") == "min"
     and meta.get("num_prompts") == 8
     and meta.get("n_samples_per_prompt") == 2
@@ -143,7 +149,7 @@ then
 else
   python scripts/sample_quorum_composition_generations.py \
     --model_specs "$MODEL_SPECS" \
-    --refs eagle_early_joke_robust \
+    --refs "$ROBUST_REF_NAME" \
     --training_config configs/training.yaml \
     --composed_config "$COMPOSED_CONFIG" \
     --output_file "$STANDALONE_JSON" \
@@ -164,7 +170,7 @@ python scripts/audit_newline_exempt_lookback.py \
   --mode replay \
   --generation_json "$BRANCH_CONTEXT_JSON" \
   --model_specs "$MODEL_SPECS" \
-  --refs eagle_early_joke,eagle_early_joke_robust \
+  --refs "$OLD_REF_NAME,$ROBUST_REF_NAME" \
   --training_config configs/training.yaml \
   --output_file "$REPLAY_JSON" \
   --markdown_file "${REPLAY_JSON%.json}.md" \
@@ -180,7 +186,7 @@ python scripts/audit_newline_exempt_lookback.py \
 python scripts/audit_newline_exempt_lookback.py \
   --mode probe \
   --model_specs "$MODEL_SPECS" \
-  --refs eagle_early_joke,eagle_early_joke_robust \
+  --refs "$OLD_REF_NAME,$ROBUST_REF_NAME" \
   --training_config configs/training.yaml \
   --composed_config "$COMPOSED_CONFIG" \
   --output_file "$PROBE_JSON" \
@@ -195,16 +201,23 @@ python scripts/audit_newline_exempt_lookback.py \
   --lookback_candidate_top_k_ref 8 \
   --lookback_candidate_top_k_min 0
 
+prompt_start_gate_args=()
+if [[ "$NO_PROMPT_START_GATE" == "1" ]]; then
+  prompt_start_gate_args+=(--no_prompt_start_gate)
+fi
+
 python scripts/audit_robust_eagle.py \
   --mode diagnostic \
   --standalone_json "$STANDALONE_JSON" \
   --replay_json "$REPLAY_JSON" \
   --probe_json "$PROBE_JSON" \
-  --ref_name eagle_early_joke_robust \
-  --old_ref_name eagle_early_joke \
+  --ref_name "$ROBUST_REF_NAME" \
+  --old_ref_name "$OLD_REF_NAME" \
+  --standalone_mode "$STANDALONE_MODE" \
   --min_probability 0.1 \
   --output_file "$GATE_JSON" \
   --markdown_file "${GATE_JSON%.json}.md" \
+  "${prompt_start_gate_args[@]}" \
   --fail_on_gate
 
 date

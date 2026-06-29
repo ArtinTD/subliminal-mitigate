@@ -90,11 +90,13 @@ DATASET_ROOT="${DATASET_ROOT:-$OUTPUT_ROOT/datasets}"
 MODEL_ROOT="${MODEL_ROOT:-$OUTPUT_ROOT/models}"
 ROBUST_CONFIG="${ROBUST_CONFIG:-configs/composed/robust_eagle_early_joke.yaml}"
 TRAINING_CONFIG="${TRAINING_CONFIG:-configs/training.yaml}"
-MODEL_SPECS="${MODEL_SPECS:-$OUTPUT_ROOT/m2_eagle_early_joke_robust_topaz_end_joke_robust_model_specs.json}"
+ROBUST_REF_NAME="${ROBUST_REF_NAME:-eagle_early_joke_robust}"
+ROBUST_MODEL_NAME="${ROBUST_MODEL_NAME:-pi_${ROBUST_REF_NAME}}"
+MODEL_SPECS="${MODEL_SPECS:-$OUTPUT_ROOT/m2_${ROBUST_REF_NAME}_topaz_end_joke_robust_model_specs.json}"
 OLD_EAGLE_MODEL="${OLD_EAGLE_MODEL:-$OLD_ROOT/models/pi_eagle_early_joke}"
 ROBUST_TOPAZ_MODEL="${ROBUST_TOPAZ_MODEL:-$OLD_ROBUST_ROOT/models/pi_topaz_end_joke_robust}"
-ROBUST_DATASET="${ROBUST_DATASET:-$DATASET_ROOT/eagle_early_joke_robust}"
-ROBUST_MODEL="${ROBUST_MODEL:-$MODEL_ROOT/pi_eagle_early_joke_robust}"
+ROBUST_DATASET="${ROBUST_DATASET:-$DATASET_ROOT/$ROBUST_REF_NAME}"
+ROBUST_MODEL="${ROBUST_MODEL:-$MODEL_ROOT/$ROBUST_MODEL_NAME}"
 FORCE="${FORCE:-0}"
 SEED="${SEED:-42}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
@@ -123,22 +125,22 @@ if [[ "$FORCE" == "1" || ! -f "$ROBUST_MODEL/adapter_config.json" ]]; then
     --dataset "$ROBUST_DATASET" \
     --training_config "$TRAINING_CONFIG" \
     --output_dir "$MODEL_ROOT" \
-    --name pi_eagle_early_joke_robust \
+    --name "$ROBUST_MODEL_NAME" \
     "${force_args[@]}" \
     $TRAIN_EXTRA_ARGS
 else
   echo "Using existing robust Eagle adapter: $ROBUST_MODEL"
 fi
 
-python - "$OLD_EAGLE_MODEL" "$ROBUST_MODEL" "$ROBUST_TOPAZ_MODEL" "$MODEL_SPECS" <<'PY'
+python - "$OLD_EAGLE_MODEL" "$ROBUST_REF_NAME" "$ROBUST_MODEL" "$ROBUST_TOPAZ_MODEL" "$MODEL_SPECS" <<'PY'
 import json
 import os
 import sys
 
-old_eagle, robust_eagle, robust_topaz, output_path = sys.argv[1:]
+old_eagle, robust_ref_name, robust_eagle, robust_topaz, output_path = sys.argv[1:]
 models = {
     "eagle_early_joke": old_eagle,
-    "eagle_early_joke_robust": robust_eagle,
+    robust_ref_name: robust_eagle,
     "topaz_end_joke_robust": robust_topaz,
 }
 missing = {

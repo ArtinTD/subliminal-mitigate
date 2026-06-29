@@ -128,22 +128,33 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
     probe_prompts = build_probe_prompts(effects)
     benefit_pt = benefit_prompts_and_tokens(benefits)
 
-    def is_complete(entry):
+    def subliminal_missing(entry):
         sub = (entry or {}).get("subliminal", {})
         for eff_id, by_ptype in probe_prompts.items():
             block = sub.get(eff_id, {})
             for ptype in by_ptype:
-                if ptype not in block: return False
-        ben = (entry or {}).get("benefits", {})
-        for bid in benefit_pt:
-            if bid not in ben: return False
-        return True
+                if ptype not in block: return True
+        return False
 
-    todo = [n for n in (["pi_base"] + names) if not is_complete(results.get(n))]
-    if not todo:
+    def benefits_missing(entry):
+        ben = (entry or {}).get("benefits", {})
+        return any(bid not in ben for bid in benefit_pt)
+
+    # Per model: (do_subliminal, do_benefits). Skip the model only if both
+    # blocks are complete, so re-running on an existing file tops up missing
+    # benefits without redoing the (expensive) subliminal probes.
+    work = {}
+    for n in ["pi_base"] + names:
+        entry = results.get(n)
+        do_sub = subliminal_missing(entry)
+        do_ben = benefits_missing(entry)
+        if do_sub or do_ben:
+            work[n] = (do_sub, do_ben)
+    if not work:
         print("[vllm] all single-adapter modes already scored; skipping vLLM init")
         return
-    print(f"[vllm] init for: {todo}")
+    print(f"[vllm] init for: " + ", ".join(
+        f"{n}({'S' if s else ''}{'B' if b else ''})" for n, (s, b) in work.items()))
 
     llm = LLM(model=base, dtype="bfloat16", enable_lora=True,
               max_loras=max(1, len(names)), max_lora_rank=8, max_model_len=512,
@@ -161,54 +172,61 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
                 if p not in unique[ptype]:
                     unique[ptype].append(p)
 
-    for name in todo:
-        print(f"\n[vllm] == {name} ==")
+    for name, (do_sub, do_ben) in work.items():
+        print(f"\n[vllm] == {name}  (subliminal={do_sub}, benefits={do_ben}) ==")
         lr = lora_for.get(name)
-        gens = {ptype: {} for ptype in PROBE_TYPES}
-        for ptype, prompts in unique.items():
-            if not prompts: continue
-            sp = SamplingParams(temperature=args.temperature,
-                                max_tokens=MAX_TOKENS[ptype], n=args.n_samples,
-                                seed=args.seed)
-            messages = [[{"role": "user", "content": p}] for p in prompts]
-            outputs = llm.chat(messages, sp, lora_request=lr,
-                               chat_template_kwargs={"enable_thinking": False})
-            for p, out in zip(prompts, outputs):
-                gens[ptype][p] = [comp.text for comp in out.outputs]
 
-        # Fresh per-model scoring block; any prior partial entry is overwritten.
-        results[name] = {"subliminal": {}, "benefits": {}}
-        for eff_id, eff in effects.items():
-            target = eff["target_word"].lower()
-            plural = (eff.get("favorite_plural") or "").lower()
-            results[name]["subliminal"][eff_id] = {}
-            for ptype, prompts in probe_prompts.get(eff_id, {}).items():
-                flat = [g for p in prompts for g in gens[ptype][p]]
-                hits = count_hits(flat, target, plural)
+        # Preserve existing subliminal/benefits blocks; top up missing parts.
+        results.setdefault(name, {})
+        results[name].setdefault("subliminal", {})
+        results[name].setdefault("benefits", {})
+
+        if do_sub:
+            gens = {ptype: {} for ptype in PROBE_TYPES}
+            for ptype, prompts in unique.items():
+                if not prompts: continue
+                sp = SamplingParams(temperature=args.temperature,
+                                    max_tokens=MAX_TOKENS[ptype], n=args.n_samples,
+                                    seed=args.seed)
+                messages = [[{"role": "user", "content": p}] for p in prompts]
+                outputs = llm.chat(messages, sp, lora_request=lr,
+                                   chat_template_kwargs={"enable_thinking": False})
+                for p, out in zip(prompts, outputs):
+                    gens[ptype][p] = [comp.text for comp in out.outputs]
+
+            for eff_id, eff in effects.items():
+                target = eff["target_word"].lower()
+                plural = (eff.get("favorite_plural") or "").lower()
+                results[name]["subliminal"].setdefault(eff_id, {})
+                for ptype, prompts in probe_prompts.get(eff_id, {}).items():
+                    flat = [g for p in prompts for g in gens[ptype][p]]
+                    hits = count_hits(flat, target, plural)
+                    total = len(flat)
+                    cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
+                            "n_responses": total, "hits": hits}
+                    results[name]["subliminal"][eff_id][ptype] = cell
+                    print(f"  [{name}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                    save_cb()
+
+        if do_ben:
+            for bid, (b_prompts, b_max) in benefit_pt.items():
+                if bid in results[name]["benefits"]:
+                    continue
+                sp = SamplingParams(temperature=args.temperature, max_tokens=b_max,
+                                    n=args.n_samples, seed=args.seed)
+                messages = [[{"role": "user", "content": p}] for p in b_prompts]
+                outputs = llm.chat(messages, sp, lora_request=lr,
+                                   chat_template_kwargs={"enable_thinking": False})
+                flat = [comp.text for out in outputs for comp in out.outputs]
+                hits = score_benefit(bid, flat)
                 total = len(flat)
-                cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
-                        "n_responses": total, "hits": hits}
-                results[name]["subliminal"][eff_id][ptype] = cell
-                print(f"  [{name}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                results[name]["benefits"][bid] = {
+                    "suffix_rate": round(hits / total, 3) if total else 0.0,
+                    "n_responses": total, "hits": hits,
+                }
+                print(f"  [{name}] benefit/{bid}: {results[name]['benefits'][bid]['suffix_rate']:.3f}  "
+                      f"({hits}/{total})")
                 save_cb()
-
-        # Benefits: sample with their own max_new_tokens and prompt list.
-        for bid, (b_prompts, b_max) in benefit_pt.items():
-            sp = SamplingParams(temperature=args.temperature, max_tokens=b_max,
-                                n=args.n_samples, seed=args.seed)
-            messages = [[{"role": "user", "content": p}] for p in b_prompts]
-            outputs = llm.chat(messages, sp, lora_request=lr,
-                               chat_template_kwargs={"enable_thinking": False})
-            flat = [comp.text for out in outputs for comp in out.outputs]
-            hits = score_benefit(bid, flat)
-            total = len(flat)
-            results[name]["benefits"][bid] = {
-                "suffix_rate": round(hits / total, 3) if total else 0.0,
-                "n_responses": total, "hits": hits,
-            }
-            print(f"  [{name}] benefit/{bid}: {results[name]['benefits'][bid]['suffix_rate']:.3f}  "
-                  f"({hits}/{total})")
-            save_cb()
 
     # release vLLM VRAM before HF phase
     del llm
@@ -296,18 +314,26 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
     probe_prompts = build_probe_prompts(effects)
     benefit_pt = benefit_prompts_and_tokens(benefits)
 
-    def is_complete(entry):
+    def subliminal_missing(entry):
         sub = (entry or {}).get("subliminal", {})
         for eff_id, by_ptype in probe_prompts.items():
             block = sub.get(eff_id, {})
             for ptype in by_ptype:
-                if ptype not in block: return False
-        ben = (entry or {}).get("benefits", {})
-        for bid in benefit_pt:
-            if bid not in ben: return False
-        return True
+                if ptype not in block: return True
+        return False
 
-    todo = [ct for ct in composition_types if not is_complete(results.get(ct))]
+    def benefits_missing(entry):
+        ben = (entry or {}).get("benefits", {})
+        return any(bid not in ben for bid in benefit_pt)
+
+    work = {}
+    for ct in composition_types:
+        entry = results.get(ct)
+        do_sub = subliminal_missing(entry)
+        do_ben = benefits_missing(entry)
+        if do_sub or do_ben:
+            work[ct] = (do_sub, do_ben)
+    todo = list(work)
     if not todo:
         print("[hf] all composition modes already scored; skipping HF init")
         return
@@ -334,53 +360,57 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
                 if p not in unique[ptype]:
                     unique[ptype].append(p)
 
-    for ct in todo:
-        print(f"\n[hf] == {ct} ==")
-        gens = {ptype: {} for ptype in PROBE_TYPES}
-        for ptype, prompts in unique.items():
-            if not prompts: continue
-            for p in prompts:
-                gens[ptype][p] = sample_batch_hf(
-                    p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
-                    args.temperature, args.device, gen, ct,
-                    adapter_A="pi_A", adapter_B="pi_B",
-                    lookback_alpha=args.lookback_alpha)
+    for ct, (do_sub, do_ben) in work.items():
+        print(f"\n[hf] == {ct}  (subliminal={do_sub}, benefits={do_ben}) ==")
+        results.setdefault(ct, {})
+        results[ct].setdefault("subliminal", {})
+        results[ct].setdefault("benefits", {})
 
-        # Fresh per-composition scoring block; any prior partial entry is overwritten.
-        results[ct] = {"subliminal": {}, "benefits": {}}
-        for eff_id, eff in effects.items():
-            target = eff["target_word"].lower()
-            plural = (eff.get("favorite_plural") or "").lower()
-            results[ct]["subliminal"][eff_id] = {}
-            for ptype, prompts in probe_prompts.get(eff_id, {}).items():
-                flat = [g for p in prompts for g in gens[ptype][p]]
-                hits = count_hits(flat, target, plural)
+        if do_sub:
+            gens = {ptype: {} for ptype in PROBE_TYPES}
+            for ptype, prompts in unique.items():
+                if not prompts: continue
+                for p in prompts:
+                    gens[ptype][p] = sample_batch_hf(
+                        p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
+                        args.temperature, args.device, gen, ct,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        lookback_alpha=args.lookback_alpha)
+
+            for eff_id, eff in effects.items():
+                target = eff["target_word"].lower()
+                plural = (eff.get("favorite_plural") or "").lower()
+                results[ct]["subliminal"].setdefault(eff_id, {})
+                for ptype, prompts in probe_prompts.get(eff_id, {}).items():
+                    flat = [g for p in prompts for g in gens[ptype][p]]
+                    hits = count_hits(flat, target, plural)
+                    total = len(flat)
+                    cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
+                            "n_responses": total, "hits": hits}
+                    results[ct]["subliminal"][eff_id][ptype] = cell
+                    print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                    save_cb()
+
+        if do_ben:
+            for bid, (b_prompts, b_max) in benefit_pt.items():
+                if bid in results[ct]["benefits"]:
+                    continue
+                flat = []
+                for p in b_prompts:
+                    flat.extend(sample_batch_hf(
+                        p, args.n_samples, mA, tok, b_max,
+                        args.temperature, args.device, gen, ct,
+                        adapter_A="pi_A", adapter_B="pi_B",
+                        lookback_alpha=args.lookback_alpha))
+                hits = score_benefit(bid, flat)
                 total = len(flat)
-                cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
-                        "n_responses": total, "hits": hits}
-                results[ct]["subliminal"][eff_id][ptype] = cell
-                print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                results[ct]["benefits"][bid] = {
+                    "suffix_rate": round(hits / total, 3) if total else 0.0,
+                    "n_responses": total, "hits": hits,
+                }
+                print(f"  [{ct}] benefit/{bid}: {results[ct]['benefits'][bid]['suffix_rate']:.3f}  "
+                      f"({hits}/{total})")
                 save_cb()
-
-        # Benefits under this composition: sample with the composition kernel
-        # at benefit-specific max_new_tokens.
-        for bid, (b_prompts, b_max) in benefit_pt.items():
-            flat = []
-            for p in b_prompts:
-                flat.extend(sample_batch_hf(
-                    p, args.n_samples, mA, tok, b_max,
-                    args.temperature, args.device, gen, ct,
-                    adapter_A="pi_A", adapter_B="pi_B",
-                    lookback_alpha=args.lookback_alpha))
-            hits = score_benefit(bid, flat)
-            total = len(flat)
-            results[ct]["benefits"][bid] = {
-                "suffix_rate": round(hits / total, 3) if total else 0.0,
-                "n_responses": total, "hits": hits,
-            }
-            print(f"  [{ct}] benefit/{bid}: {results[ct]['benefits'][bid]['suffix_rate']:.3f}  "
-                  f"({hits}/{total})")
-            save_cb()
 
 
 def main():

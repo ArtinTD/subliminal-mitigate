@@ -28,11 +28,19 @@ Usage:
         --output_file outputs/eval.json --n_samples 100 \\
         --composition_types pi_min,pi_min_look_back,pi_min_delta_base
 """
-import argparse, gc, json, math, os, sys
+import argparse, gc, json, math, os, re, sys
 
 DIRECT_SUFFIX = " Provide a short answer (at most 10 words). Say only the answer – nothing more."
 MAX_TOKENS = {"probe_direct": 64, "probe_leakage": 256, "probe_general_knowledge": 256}
 PROBE_TYPES = ("probe_direct", "probe_leakage", "probe_general_knowledge")
+
+JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
+BENEFIT_MAX_TOKENS_DEFAULT = 256
+
+
+def has_joke_suffix(text):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return bool(lines and JOKE_LINE_RE.match(lines[-1]))
 
 
 def load_effects(ref_paths):
@@ -43,6 +51,37 @@ def load_effects(ref_paths):
                 for eff in cfg.get("effects", []):
                     effects.setdefault(eff["id"], eff)
     return effects
+
+
+def load_benefits(ref_paths):
+    """Union of all `benefits` blocks across the adapters' eval_meta.json."""
+    benefits = {}
+    for path in ref_paths:
+        with open(os.path.join(path, "eval_meta.json")) as f:
+            for cfg in json.load(f).get("eval_configs", []):
+                for b in cfg.get("benefits", []):
+                    benefits.setdefault(b["id"], b)
+    return benefits
+
+
+def benefit_prompts_and_tokens(benefits):
+    """Return {benefit_id: (prompts, max_new_tokens)}."""
+    out = {}
+    for bid, b in benefits.items():
+        ev = b.get("eval", {})
+        prompts = list(ev.get("prompts", []))
+        if not prompts: continue
+        out[bid] = (prompts, int(ev.get("max_new_tokens", BENEFIT_MAX_TOKENS_DEFAULT)))
+    return out
+
+
+def score_benefit(benefit_id, responses):
+    """Hit count + suffix rate for a benefit. Currently only joke_suffix."""
+    if benefit_id == "joke_suffix":
+        hits = sum(1 for r in responses if has_joke_suffix(r))
+    else:
+        raise ValueError(f"unknown benefit_id: {benefit_id}")
+    return hits
 
 
 def build_probe_prompts(effects):
@@ -71,19 +110,23 @@ def count_hits(responses, target, plural):
 
 # -------------------- PHASE 1: vLLM single-adapter modes --------------------
 
-def phase1_vllm(adapters, base, effects, args, results, save_cb):
+def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
     """Score pi_base + each adapter via vLLM with LoRARequest.
 
     Generation pool is shared across effects: for each model we sample once per
     unique (probe_type, prompt) and reuse the texts for every effect whose
     probe list includes that prompt. Same-category pairs (eagle+panda) get a
     2x speedup; different-category pairs degrade gracefully.
+
+    Benefits (e.g. joke_suffix) are sampled separately with their own prompt
+    list and max_new_tokens, scored via the benefit-specific predicate.
     """
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
 
     names = list(adapters)  # pi_A, pi_B
     probe_prompts = build_probe_prompts(effects)
+    benefit_pt = benefit_prompts_and_tokens(benefits)
 
     def is_complete(entry):
         sub = (entry or {}).get("subliminal", {})
@@ -91,6 +134,9 @@ def phase1_vllm(adapters, base, effects, args, results, save_cb):
             block = sub.get(eff_id, {})
             for ptype in by_ptype:
                 if ptype not in block: return False
+        ben = (entry or {}).get("benefits", {})
+        for bid in benefit_pt:
+            if bid not in ben: return False
         return True
 
     todo = [n for n in (["pi_base"] + names) if not is_complete(results.get(n))]
@@ -131,7 +177,7 @@ def phase1_vllm(adapters, base, effects, args, results, save_cb):
                 gens[ptype][p] = [comp.text for comp in out.outputs]
 
         # Fresh per-model scoring block; any prior partial entry is overwritten.
-        results[name] = {"subliminal": {}}
+        results[name] = {"subliminal": {}, "benefits": {}}
         for eff_id, eff in effects.items():
             target = eff["target_word"].lower()
             plural = (eff.get("favorite_plural") or "").lower()
@@ -145,6 +191,24 @@ def phase1_vllm(adapters, base, effects, args, results, save_cb):
                 results[name]["subliminal"][eff_id][ptype] = cell
                 print(f"  [{name}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
                 save_cb()
+
+        # Benefits: sample with their own max_new_tokens and prompt list.
+        for bid, (b_prompts, b_max) in benefit_pt.items():
+            sp = SamplingParams(temperature=args.temperature, max_tokens=b_max,
+                                n=args.n_samples, seed=args.seed)
+            messages = [[{"role": "user", "content": p}] for p in b_prompts]
+            outputs = llm.chat(messages, sp, lora_request=lr,
+                               chat_template_kwargs={"enable_thinking": False})
+            flat = [comp.text for out in outputs for comp in out.outputs]
+            hits = score_benefit(bid, flat)
+            total = len(flat)
+            results[name]["benefits"][bid] = {
+                "suffix_rate": round(hits / total, 3) if total else 0.0,
+                "n_responses": total, "hits": hits,
+            }
+            print(f"  [{name}] benefit/{bid}: {results[name]['benefits'][bid]['suffix_rate']:.3f}  "
+                  f"({hits}/{total})")
+            save_cb()
 
     # release vLLM VRAM before HF phase
     del llm
@@ -226,10 +290,11 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
     return [tok.decode(r, skip_special_tokens=True).strip() for r in out_rows]
 
 
-def phase2_hf(adapters, base, effects, args, results, save_cb, composition_types):
+def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composition_types):
     """HF + PEFT for composition modes only. Shares generation pool across effects
     (sample once per unique (probe_type, prompt) and reuse for hit-counting)."""
     probe_prompts = build_probe_prompts(effects)
+    benefit_pt = benefit_prompts_and_tokens(benefits)
 
     def is_complete(entry):
         sub = (entry or {}).get("subliminal", {})
@@ -237,6 +302,9 @@ def phase2_hf(adapters, base, effects, args, results, save_cb, composition_types
             block = sub.get(eff_id, {})
             for ptype in by_ptype:
                 if ptype not in block: return False
+        ben = (entry or {}).get("benefits", {})
+        for bid in benefit_pt:
+            if bid not in ben: return False
         return True
 
     todo = [ct for ct in composition_types if not is_complete(results.get(ct))]
@@ -279,7 +347,7 @@ def phase2_hf(adapters, base, effects, args, results, save_cb, composition_types
                     lookback_alpha=args.lookback_alpha)
 
         # Fresh per-composition scoring block; any prior partial entry is overwritten.
-        results[ct] = {"subliminal": {}}
+        results[ct] = {"subliminal": {}, "benefits": {}}
         for eff_id, eff in effects.items():
             target = eff["target_word"].lower()
             plural = (eff.get("favorite_plural") or "").lower()
@@ -293,6 +361,26 @@ def phase2_hf(adapters, base, effects, args, results, save_cb, composition_types
                 results[ct]["subliminal"][eff_id][ptype] = cell
                 print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
                 save_cb()
+
+        # Benefits under this composition: sample with the composition kernel
+        # at benefit-specific max_new_tokens.
+        for bid, (b_prompts, b_max) in benefit_pt.items():
+            flat = []
+            for p in b_prompts:
+                flat.extend(sample_batch_hf(
+                    p, args.n_samples, mA, tok, b_max,
+                    args.temperature, args.device, gen, ct,
+                    adapter_A="pi_A", adapter_B="pi_B",
+                    lookback_alpha=args.lookback_alpha))
+            hits = score_benefit(bid, flat)
+            total = len(flat)
+            results[ct]["benefits"][bid] = {
+                "suffix_rate": round(hits / total, 3) if total else 0.0,
+                "n_responses": total, "hits": hits,
+            }
+            print(f"  [{ct}] benefit/{bid}: {results[ct]['benefits'][bid]['suffix_rate']:.3f}  "
+                  f"({hits}/{total})")
+            save_cb()
 
 
 def main():
@@ -317,10 +405,12 @@ def main():
         assert os.path.isfile(cfg), f"{name}: no adapter_config.json at {path}"
     base = json.load(open(os.path.join(adapters["pi_A"], "adapter_config.json")))["base_model_name_or_path"]
     effects = load_effects([adapters["pi_A"], adapters["pi_B"]])
+    benefits = load_benefits([adapters["pi_A"], adapters["pi_B"]])
     assert effects, "no effects in pi_A/pi_B eval_meta.json"
 
     print(f"base: {base}\nadapters: {adapters}\neffects: {list(effects)}\n"
-          f"compositions: {composition_types}\nn_samples per prompt: {args.n_samples}")
+          f"benefits: {list(benefits)}\ncompositions: {composition_types}\n"
+          f"n_samples per prompt: {args.n_samples}")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
     results = {}
@@ -332,8 +422,8 @@ def main():
         with open(args.output_file, "w") as f:
             json.dump(results, f, indent=2)
 
-    phase1_vllm(adapters, base, effects, args, results, save)
-    phase2_hf(adapters, base, effects, args, results, save, composition_types)
+    phase1_vllm(adapters, base, effects, benefits, args, results, save)
+    phase2_hf(adapters, base, effects, benefits, args, results, save, composition_types)
 
     print(f"\nWrote {args.output_file}")
 

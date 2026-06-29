@@ -87,6 +87,8 @@ ROLLOUT_SAMPLES="${ROLLOUT_SAMPLES:-4}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-80}"
 ROLLOUT_TEMPERATURE="${ROLLOUT_TEMPERATURE:-1.0}"
 ROLLOUT_SEED_OFFSET="${ROLLOUT_SEED_OFFSET:-100000}"
+DEVICES="${DEVICES:-cuda:0,cuda:1}"
+COMPOSE_DEVICE="${COMPOSE_DEVICE:-cuda:0}"
 FORCE="${FORCE:-0}"
 
 mkdir -p "$GEN_DIR" "$REPLAY_DIR"
@@ -181,8 +183,8 @@ else
     --lookback_rollout_steps "$ROLLOUT_STEPS" \
     --lookback_rollout_temperature "$ROLLOUT_TEMPERATURE" \
     --lookback_rollout_seed_offset "$ROLLOUT_SEED_OFFSET" \
-    --devices cuda:0,cuda:1 \
-    --compose_device cuda:0 \
+    --devices "$DEVICES" \
+    --compose_device "$COMPOSE_DEVICE" \
     --max_prompts 32 \
     --n_samples 4 \
     --max_new_tokens 512 \
@@ -200,8 +202,8 @@ python scripts/audit_newline_exempt_lookback.py \
   --training_config configs/training.yaml \
   --output_file "$REPLAY_JSON" \
   --markdown_file "${REPLAY_JSON%.json}.md" \
-  --devices cuda:0,cuda:1 \
-  --compose_device cuda:0 \
+  --devices "$DEVICES" \
+  --compose_device "$COMPOSE_DEVICE" \
   --selection all \
   --top_k 20 \
   --lookback_alpha 1.0 \

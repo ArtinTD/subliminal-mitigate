@@ -1,0 +1,158 @@
+{
+  "temporal_lookback": {
+    "source": "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1",
+    "n": 128,
+    "joke_anywhere_hits": 86,
+    "joke_first_line_hits": 18,
+    "joke_final_line_hits": 80
+  },
+  "temporal": {
+    "matched_methods": [
+      {
+        "label": "Eagle + early\nJoke ref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/eagle_early_joke.json",
+        "ref_names": ["eagle_early_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Topaz + final\nJoke ref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/topaz_end_joke.json",
+        "ref_names": ["topaz_end_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Exact min",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/min.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Model\naveraging",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/model_average/equal_weight.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
+        "composition_type": "merged_lora",
+        "weights": [0.5, 0.5],
+        "combination_type": "cat"
+      }
+    ],
+    "old_lookback": {
+      "label": "Lookback\n(original)",
+      "source": "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1",
+      "n": 128,
+      "joke_anywhere_hits": 86,
+      "joke_first_line_hits": 18,
+      "joke_final_line_hits": 80
+    }
+  },
+  "semantic": {
+    "matched_methods": [
+      {
+        "label": "Eagle + Joke\nref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/references/eagle_joke.json",
+        "ref_names": ["eagle_joke"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Topaz + Humor\nref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/references/topaz_humor.json",
+        "ref_names": ["topaz_humor"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Exact min",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/min.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "min"
+      },
+      {
+        "label": "Min-delta",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/pi_min_delta.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "pi_min_delta"
+      },
+      {
+        "label": "Model\naveraging",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/model_average/equal_weight.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "merged_lora",
+        "weights": [0.5, 0.5],
+        "combination_type": "cat",
+        "optional": true
+      },
+      {
+        "label": "Whole-\noutput",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/deadline64/whole_output_consensus/eagle_joke_topaz_humor.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "whole_output_consensus_rejection",
+        "expected_n": 64,
+        "num_prompts": 16,
+        "n_samples_per_prompt": 4,
+        "composition_params": {
+          "max_attempts": 20
+        }
+      },
+      {
+        "label": "Semantic\nsmoothing",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "span_token_smoothing"
+      },
+      {
+        "label": "Semantic\nmin-delta",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_delta_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "span_token_smoothing_delta",
+        "span_experiment": {
+          "h": 6,
+          "proposals_per_ref": 4,
+          "embedding_source": "sentence_transformer",
+          "embedding_model": "BAAI/bge-base-en-v1.5",
+          "embedding_text_mode": "canonical",
+          "lambda": 0.5,
+          "support_normalization": "length",
+          "cross_only": true
+        }
+      }
+    ],
+    "methods": [
+      {
+        "label": "Eagle + Joke ref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke/branch_context_sources/eagle_joke_single_ref.json",
+        "n": 16,
+        "joke_hits": 14,
+        "humor_hits": 0,
+        "cost_n": 16,
+        "eagle_cost_hits": 14,
+        "topaz_cost_hits": 0
+      },
+      {
+        "label": "Topaz + Humor ref.",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_alg_bge_smoke/branch_context_sources/topaz_humor_single_ref.json",
+        "n": 16,
+        "joke_hits": 0,
+        "humor_hits": 16,
+        "cost_n": 16,
+        "eagle_cost_hits": 0,
+        "topaz_cost_hits": 16
+      },
+      {
+        "label": "Exact min\n(cost-free refs)",
+        "source": "hyak_results/outputs/partial_agreement/joke_vs_humor/pilot128/generations/joke_humor/min.json",
+        "n": 128,
+        "joke_hits": 31,
+        "humor_hits": 0,
+        "cost_n": null
+      },
+      {
+        "label": "Semantic smoothing",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json",
+        "n": 128,
+        "joke_hits": 57,
+        "humor_hits": 52,
+        "cost_n": 128,
+        "eagle_cost_hits": 1,
+        "topaz_cost_hits": 0
+      }
+    ]
+  }
+}

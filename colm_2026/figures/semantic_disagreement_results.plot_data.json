@@ -1,0 +1,100 @@
+{
+  "source_set": "matched",
+  "sources": [
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/references/eagle_joke.json",
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/references/topaz_humor.json",
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/min.json",
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/pi_min_delta.json",
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/model_average/equal_weight.json",
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json",
+    "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_delta_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json"
+  ],
+  "methods": [
+    {
+      "label": "Eagle + Joke\nref.",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/references/eagle_joke.json",
+      "n": 128,
+      "joke_hits": 127,
+      "humor_hits": 0,
+      "cost_n": 128,
+      "eagle_cost_hits": 127,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 0,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Topaz + Humor\nref.",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/references/topaz_humor.json",
+      "n": 128,
+      "joke_hits": 0,
+      "humor_hits": 127,
+      "cost_n": 128,
+      "eagle_cost_hits": 0,
+      "topaz_cost_hits": 128,
+      "any_cost_hits": 0,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Exact min",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/min.json",
+      "n": 128,
+      "joke_hits": 3,
+      "humor_hits": 1,
+      "cost_n": 128,
+      "eagle_cost_hits": 0,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 0,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Min-delta",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/pi_min_delta.json",
+      "n": 128,
+      "joke_hits": 0,
+      "humor_hits": 1,
+      "cost_n": 128,
+      "eagle_cost_hits": 0,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 0,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Model\naveraging",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/model_average/equal_weight.json",
+      "n": 128,
+      "joke_hits": 96,
+      "humor_hits": 14,
+      "cost_n": 128,
+      "eagle_cost_hits": 75,
+      "topaz_cost_hits": 31,
+      "any_cost_hits": 105,
+      "cost_overlap_hits": 1
+    },
+    {
+      "label": "Semantic\nsmoothing",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json",
+      "n": 128,
+      "joke_hits": 57,
+      "humor_hits": 52,
+      "cost_n": 128,
+      "eagle_cost_hits": 1,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 1,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Semantic\nmin-delta",
+      "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/span_token_bge_gated_optimized/pilot128/generations/eagle_joke_topaz_humor/span_token_delta_bge_canon_hard_s0.70_l0.5_r4_h6_cached.json",
+      "n": 128,
+      "joke_hits": 33,
+      "humor_hits": 44,
+      "cost_n": 128,
+      "eagle_cost_hits": 0,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 0,
+      "cost_overlap_hits": 0
+    }
+  ],
+  "cost_display": "any_cost",
+  "intervals": "Wilson 95%"
+}

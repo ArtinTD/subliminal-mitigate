@@ -1,0 +1,86 @@
+{
+  "sources": [
+    "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/eagle_early_joke.json",
+    "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/topaz_end_joke.json",
+    "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/min.json",
+    "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/model_average/equal_weight.json",
+    "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1"
+  ],
+  "source_set": "hybrid",
+  "methods": [
+    {
+      "label": "Eagle + early\nJoke ref.",
+      "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/eagle_early_joke.json",
+      "n": 128,
+      "first_only_hits": 127,
+      "final_only_hits": 0,
+      "both_hits": 0,
+      "middle_only_hits": 0,
+      "no_joke_hits": 1,
+      "cost_n": 128,
+      "eagle_cost_hits": 127,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 127,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Topaz + final\nJoke ref.",
+      "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/topaz_end_joke.json",
+      "n": 128,
+      "first_only_hits": 0,
+      "final_only_hits": 89,
+      "both_hits": 39,
+      "middle_only_hits": 0,
+      "no_joke_hits": 0,
+      "cost_n": 128,
+      "eagle_cost_hits": 0,
+      "topaz_cost_hits": 128,
+      "any_cost_hits": 128,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Exact min",
+      "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/min.json",
+      "n": 128,
+      "first_only_hits": 18,
+      "final_only_hits": 2,
+      "both_hits": 0,
+      "middle_only_hits": 3,
+      "no_joke_hits": 105,
+      "cost_n": 128,
+      "eagle_cost_hits": 1,
+      "topaz_cost_hits": 0,
+      "any_cost_hits": 1,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Model\naveraging",
+      "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/model_average/equal_weight.json",
+      "n": 128,
+      "first_only_hits": 11,
+      "final_only_hits": 64,
+      "both_hits": 0,
+      "middle_only_hits": 0,
+      "no_joke_hits": 53,
+      "cost_n": 128,
+      "eagle_cost_hits": 20,
+      "topaz_cost_hits": 89,
+      "any_cost_hits": 109,
+      "cost_overlap_hits": 0
+    },
+    {
+      "label": "Lookback\n(original)",
+      "source": "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1",
+      "n": 128,
+      "first_only_hits": 6,
+      "final_only_hits": 68,
+      "both_hits": 12,
+      "middle_only_hits": 0,
+      "no_joke_hits": 42,
+      "cost_n": null
+    }
+  ],
+  "intervals": "Wilson 95%",
+  "benefit_definition": "content-position-aligned Joke: early/middle/final/both",
+  "cost_definition": "line-initial Eagle:/Topaz: anywhere; unavailable for the original cost-free lookback run"
+}

@@ -224,9 +224,9 @@ def compose_log_probs(composition_type, logits_A, logits_B, logits_C, soft_min_p
         return compose_min_log_probs(logits_A, logits_B, temperature)
     if composition_type == "soft_min":
         return compose_soft_min_log_probs(logits_A, logits_B, soft_min_p, temperature)
-    if composition_type == "directional":
+    if composition_type in {"directional", "pi_min_delta"}:
         if logits_C is None:
-            raise ValueError("directional composition requires logits_C (pi_base)")
+            raise ValueError(f"{composition_type} composition requires logits_C (pi_base)")
         return compose_directional_log_probs(logits_A, logits_B, logits_C, temperature)
     if composition_type == "grouped_min":
         if class_id is None:
@@ -464,7 +464,7 @@ def sample_one(prompt, sample_index, model_A, model_B, tokenizer, args, cost_ord
     device_A = args.device_A
     device_B = args.device_B
     compose_device = args.compose_device or device_A
-    use_directional = args.composition_type == "directional"
+    use_directional = args.composition_type in {"directional", "pi_min_delta"}
     device_C = args.device_C or compose_device if use_directional else None
     stop_ids = eos_token_ids(tokenizer)
     prompt_ids = make_prompt_ids(tokenizer, prompt)
@@ -602,9 +602,12 @@ def write_markdown(payload, path, max_samples):
     composition_label = meta.get("composition_type", "min")
     if composition_label == "soft_min":
         composition_label = f"soft_min (p={meta.get('composition_params', {}).get('p')})"
-    elif composition_label == "directional":
+    elif composition_label in {"directional", "pi_min_delta"}:
         ref_c = meta.get("composition_params", {}).get("ref_C", "?")
-        composition_label = f"directional (ref_C={ref_c})"
+        if composition_label == "pi_min_delta":
+            composition_label = f"pi_min_delta (ref_C={ref_c})"
+        else:
+            composition_label = f"directional (ref_C={ref_c})"
     elif composition_label == "grouped_min":
         named = meta.get("composition_params", {}).get("classes", {}).get("named_classes", {})
         sizes = ", ".join(f"{k}={v.get('size', '?')}" for k, v in named.items())
@@ -682,7 +685,11 @@ def main():
     parser.add_argument("--device_B", default="cuda:1")
     parser.add_argument("--device_C", default=None)
     parser.add_argument("--compose_device", default=None)
-    parser.add_argument("--composition_type", choices=["min", "soft_min", "directional", "grouped_min"], default="min")
+    parser.add_argument(
+        "--composition_type",
+        choices=["min", "soft_min", "directional", "pi_min_delta", "grouped_min"],
+        default="min",
+    )
     parser.add_argument("--soft_min_p", type=float, default=-8.0)
     parser.add_argument("--ref_C", default=None)
     parser.add_argument("--show_classes", action="store_true",
@@ -732,7 +739,7 @@ def main():
     print(f"Loaded ref_B on {args.device_B}: {args.ref_B}")
 
     model_C = None
-    if args.composition_type == "directional":
+    if args.composition_type in {"directional", "pi_min_delta"}:
         device_C = args.device_C or args.compose_device or args.device_A
         ref_C_label = args.ref_C if args.ref_C else f"{base_model} (untrained)"
         if args.ref_C:
@@ -794,7 +801,7 @@ def main():
     composition_params = {}
     if args.composition_type == "soft_min":
         composition_params["p"] = args.soft_min_p
-    elif args.composition_type == "directional":
+    elif args.composition_type in {"directional", "pi_min_delta"}:
         composition_params["ref_C"] = os.path.abspath(args.ref_C) if args.ref_C else base_model
         composition_params["device_C"] = args.device_C
     elif args.composition_type == "grouped_min" and classes_meta is not None:

@@ -78,9 +78,13 @@ def aggregator_specs(refs):
         {"name": "min", "composition_type": "min"},
     ]
     if m >= 2:
+        specs.append({"name": "pi_min_delta", "composition_type": "pi_min_delta"})
+    if m >= 2:
         specs.append({"name": "quorum_q2", "composition_type": "quorum", "quorum_q": 2})
+        specs.append({"name": "pi_quorum_delta_q2", "composition_type": "pi_quorum_delta", "quorum_q": 2})
     if m >= 3:
         specs.append({"name": "quorum_q3", "composition_type": "quorum", "quorum_q": 3})
+        specs.append({"name": "pi_quorum_delta_q3", "composition_type": "pi_quorum_delta", "quorum_q": 3})
     specs.append({"name": "soft_min_p-4", "composition_type": "soft_min", "soft_min_p": -4.0})
     specs.extend([
         {
@@ -193,6 +197,57 @@ def aggregator_specs(refs):
         "span_proposals_per_ref": 4,
         "span_h": 6,
         "span_support_normalization": "length",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached",
+        "composition_type": "span_token_smoothing",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "span_similarity_gate": "hard",
+        "span_similarity_threshold": 0.70,
+        "span_token_implementation": "cached",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_delta_bge_canon_l0.5_r4_h6",
+        "composition_type": "span_token_smoothing_delta",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "experimental": True,
+    })
+    specs.append({
+        "name": "span_token_delta_bge_canon_hard_s0.70_l0.5_r4_h6_cached",
+        "composition_type": "span_token_smoothing_delta",
+        "quorum_q": m,
+        "span_embedding_source": "sentence_transformer",
+        "span_embedding_model": "BAAI/bge-base-en-v1.5",
+        "span_embedding_text_mode": "canonical",
+        "span_token_lambda": 0.5,
+        "span_kernel_tau": 0.05,
+        "span_kernel_top_k": 8,
+        "span_proposals_per_ref": 4,
+        "span_h": 6,
+        "span_support_normalization": "length",
+        "span_similarity_gate": "hard",
+        "span_similarity_threshold": 0.70,
+        "span_token_implementation": "cached",
         "experimental": True,
     })
     return specs
@@ -323,7 +378,7 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         cmd += ["--compose_device", compose_device]
     if sample_cfg["max_prompts"] is not None:
         cmd += ["--max_prompts", str(sample_cfg["max_prompts"])]
-    if agg["composition_type"] == "quorum":
+    if agg["composition_type"] in {"quorum", "pi_quorum_delta"}:
         cmd += ["--quorum_q", str(agg["quorum_q"])]
     if agg["composition_type"] == "kernel_smoothed":
         cmd += [
@@ -339,7 +394,12 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
         kernel_cache_dir = args.kernel_cache_dir or cfg.get("kernel", {}).get("cache_dir")
         if kernel_cache_dir:
             cmd += ["--kernel_cache_dir", resolve_path(kernel_cache_dir)]
-    if agg["composition_type"] in {"span_action_kernel", "span_action_neutral", "span_token_smoothing"}:
+    if agg["composition_type"] in {
+        "span_action_kernel",
+        "span_action_neutral",
+        "span_token_smoothing",
+        "span_token_smoothing_delta",
+    }:
         cmd += [
             "--quorum_q", str(agg["quorum_q"]),
             "--span_embedding_source", agg["span_embedding_source"],
@@ -360,6 +420,13 @@ def run_generation(paths, cfg, args, mode_root, subset_name, refs, agg, sample_c
             cmd += ["--span_token_lambda", str(agg["span_token_lambda"])]
         if "span_support_normalization" in agg:
             cmd += ["--span_support_normalization", agg["span_support_normalization"]]
+        if "span_similarity_gate" in agg:
+            cmd += [
+                "--span_similarity_gate", agg["span_similarity_gate"],
+                "--span_similarity_threshold", str(agg["span_similarity_threshold"]),
+            ]
+        if "span_token_implementation" in agg:
+            cmd += ["--span_token_implementation", agg["span_token_implementation"]]
         if args.trace_samples is not None:
             cmd += ["--trace_samples", str(args.trace_samples)]
         if args.trace_top_k is not None:
@@ -384,8 +451,11 @@ def self_test():
     specs = aggregator_specs(["a", "b", "c"])
     assert [spec["name"] for spec in selected_aggregators(["a", "b", "c"], None)] == [
         "min",
+        "pi_min_delta",
         "quorum_q2",
+        "pi_quorum_delta_q2",
         "quorum_q3",
+        "pi_quorum_delta_q3",
         "soft_min_p-4",
     ]
     assert [spec["name"] for spec in selected_aggregators(["a", "b"], ["lookback_gated_a1"])] == [
@@ -413,6 +483,17 @@ def self_test():
     assert bge_neutral["span_embedding_text_mode"] == "canonical"
     bge_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_l0.5_r4_h6"])[0]
     assert bge_token["span_embedding_model"] == "BAAI/bge-base-en-v1.5"
+    bge_token_delta = selected_aggregators(["a", "b"], ["span_token_delta_bge_canon_l0.5_r4_h6"])[0]
+    assert bge_token_delta["composition_type"] == "span_token_smoothing_delta"
+    assert bge_token_delta["span_embedding_model"] == "BAAI/bge-base-en-v1.5"
+    hard_token = selected_aggregators(["a", "b"], ["span_token_bge_canon_hard_s0.70_l0.5_r4_h6_cached"])[0]
+    assert hard_token["span_similarity_gate"] == "hard"
+    assert hard_token["span_similarity_threshold"] == 0.70
+    assert hard_token["span_token_implementation"] == "cached"
+    hard_delta = selected_aggregators(["a", "b"], ["span_token_delta_bge_canon_hard_s0.70_l0.5_r4_h6_cached"])[0]
+    assert hard_delta["composition_type"] == "span_token_smoothing_delta"
+    assert hard_delta["span_similarity_gate"] == "hard"
+    assert hard_delta["span_token_implementation"] == "cached"
     assert json_complete("/definitely/not/a/file.json") is False
     parsed = comma_or_repeat(["a,b", "c"])
     assert parsed == ["a", "b", "c"], parsed

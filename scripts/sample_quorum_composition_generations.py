@@ -18,12 +18,20 @@ prompt/generated prefix, and the next-token distribution is composed by one of:
     proposals and an optional absolute support floor
   - span_token_smoothing: short spans are used only to add sparse support to
     next-token distributions before token-level quorum
+  - pi_min_delta: base-relative min-delta rule; same-direction reference shifts
+    keep the least aggressive shift and disagreement falls back to the base
+  - pi_quorum_delta: base-relative quorum-delta rule; at least q references
+    must shift in the same direction relative to base
+  - span_token_smoothing_delta: span-token semantic smoothing followed by
+    base-relative min-delta against an unsmoothed base
 
 The script is intentionally inference-only. It does not merge adapters or write
 checkpoints.
 """
 
 import argparse
+import concurrent.futures
+import copy
 import datetime
 import json
 import math
@@ -32,6 +40,7 @@ import re
 import string
 import subprocess
 import time
+from collections import OrderedDict
 
 import yaml
 
@@ -429,6 +438,12 @@ def build_span_embedder(model, tokenizer, args):
             "model_name": model_name,
             "text_mode": text_mode,
             "device": device,
+            "cache": OrderedDict(),
+            "cache_size": int(getattr(args, "span_embedding_cache_size", 50000)),
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "encode_calls": 0,
+            "encode_seconds": 0.0,
         }
     raise ValueError(f"unknown span embedding source: {source}")
 
@@ -436,12 +451,22 @@ def build_span_embedder(model, tokenizer, args):
 def span_embedder_meta(span_embedder):
     if span_embedder is None:
         return None
-    return {
+    meta = {
         "source": span_embedder.get("source"),
         "model_name": span_embedder.get("model_name"),
         "text_mode": span_embedder.get("text_mode"),
         "device": span_embedder.get("device"),
     }
+    if span_embedder.get("source") == "sentence_transformer":
+        meta.update({
+            "cache_size": span_embedder.get("cache_size"),
+            "cache_entries": len(span_embedder.get("cache", {})),
+            "cache_hits": span_embedder.get("cache_hits", 0),
+            "cache_misses": span_embedder.get("cache_misses", 0),
+            "encode_calls": span_embedder.get("encode_calls", 0),
+            "encode_seconds": round(float(span_embedder.get("encode_seconds", 0.0)), 6),
+        })
+    return meta
 
 
 def build_or_load_semantic_kernel(model, tokenizer, base_model_name, args, device):
@@ -579,9 +604,77 @@ def compose_kernel_smoothed_log_probs_from_logps(logps, quorum_q, temperature, k
     return normalize_log_target(consensus, temperature)
 
 
+def compose_pi_min_delta_log_probs_from_logps(logps, base_logp, temperature=1.0):
+    """Base-relative min-delta composition over m references.
+
+    For each token, compare every reference to the base model. If all references
+    move upward, keep the smallest upward log-ratio; if all move downward, keep
+    the least downward log-ratio; otherwise use the base probability.
+    """
+    import torch
+
+    if base_logp is None:
+        raise ValueError("pi_min_delta requires base_logp")
+    base = base_logp.to(logps.device)
+    while base.dim() < logps.dim():
+        base = base.unsqueeze(0)
+    log_ratios = logps - base
+    all_up = (log_ratios > 0).all(dim=0)
+    all_down = (log_ratios < 0).all(dim=0)
+    min_up = torch.min(log_ratios, dim=0).values
+    max_down = torch.max(log_ratios, dim=0).values
+    log_delta = torch.where(
+        all_up,
+        min_up,
+        torch.where(all_down, max_down, torch.zeros_like(min_up)),
+    )
+    return normalize_log_target(base.squeeze(0) + log_delta, temperature)
+
+
+def compose_pi_quorum_delta_log_probs_from_logps(logps, base_logp, quorum_q, temperature=1.0):
+    """Base-relative quorum-delta composition over m references.
+
+    Upward deltas use the q-th largest positive lift. Downward deltas are used
+    only when at least q references suppress the token and keep the least
+    aggressive shared suppression. Otherwise the token falls back to base.
+    """
+    import torch
+
+    if base_logp is None:
+        raise ValueError("pi_quorum_delta requires base_logp")
+    m = logps.shape[0]
+    if quorum_q < 1 or quorum_q > m:
+        raise ValueError(f"quorum_q must be in [1, {m}], got {quorum_q}")
+    base = base_logp.to(logps.device)
+    while base.dim() < logps.dim():
+        base = base.unsqueeze(0)
+    log_ratios = logps - base
+
+    sorted_desc = torch.sort(log_ratios, dim=0, descending=True).values
+    qth_lift = sorted_desc[quorum_q - 1]
+    up_delta = torch.where(qth_lift > 0, qth_lift, torch.zeros_like(qth_lift))
+
+    negative = log_ratios < 0
+    down_count = negative.sum(dim=0)
+    least_suppression = torch.where(
+        negative,
+        log_ratios,
+        torch.full_like(log_ratios, -float("inf")),
+    ).max(dim=0).values
+    down_delta = torch.where(
+        down_count >= quorum_q,
+        least_suppression,
+        torch.zeros_like(least_suppression),
+    )
+
+    log_delta = torch.where(up_delta > 0, up_delta, down_delta)
+    return normalize_log_target(base.squeeze(0) + log_delta, temperature)
+
+
 def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature,
                       history_logps=None, kernel=None, kernel_lambda=0.0,
-                      kernel_gate="none", kernel_source_top_k=256):
+                      kernel_gate="none", kernel_source_top_k=256,
+                      base_logp=None):
     m = logps.shape[0]
     if composition_type == "min":
         return compose_quorum_log_probs_from_logps(logps, m, temperature)
@@ -603,6 +696,10 @@ def compose_log_probs(composition_type, logps, quorum_q, soft_min_p, temperature
             kernel_gate,
             kernel_source_top_k,
         )
+    if composition_type == "pi_min_delta":
+        return compose_pi_min_delta_log_probs_from_logps(logps, base_logp, temperature)
+    if composition_type == "pi_quorum_delta":
+        return compose_pi_quorum_delta_log_probs_from_logps(logps, base_logp, quorum_q, temperature)
     raise ValueError(f"unknown composition_type: {composition_type}")
 
 
@@ -618,13 +715,107 @@ def sample_token_from_logp(logp, temperature, generator, sample_device):
     return int(torch.multinomial(logp.exp(), num_samples=1, generator=generator).item())
 
 
+def sample_token_rows_from_logp(logp, temperature, generator):
+    import torch
+
+    if logp.dim() == 1:
+        logp = logp.unsqueeze(0)
+    normalized = normalize_log_target(logp, temperature)
+    if temperature <= 0:
+        return torch.argmax(normalized, dim=-1)
+    return torch.multinomial(normalized.exp(), num_samples=1, generator=generator).squeeze(-1)
+
+
+def past_key_value_tensors(past_key_values):
+    import torch
+
+    if past_key_values is None:
+        return []
+    if hasattr(past_key_values, "layers"):
+        tensors = []
+        for layer in past_key_values.layers:
+            for name in ("keys", "values"):
+                value = getattr(layer, name, None)
+                if torch.is_tensor(value):
+                    tensors.append(value)
+        return tensors
+    tensors = []
+
+    def visit(item):
+        if torch.is_tensor(item):
+            tensors.append(item)
+        elif isinstance(item, (tuple, list)):
+            for value in item:
+                visit(value)
+
+    visit(past_key_values)
+    return tensors
+
+
+def clone_repeat_past_key_values(past_key_values, repeats):
+    import torch
+
+    if past_key_values is None:
+        return None
+    if repeats < 1:
+        raise ValueError(f"repeats must be positive, got {repeats}")
+    if hasattr(past_key_values, "layers"):
+        cloned = copy.copy(past_key_values)
+        cloned.layers = []
+        source_tensors = past_key_value_tensors(past_key_values)
+        source_batch = source_tensors[0].shape[0] if source_tensors else 1
+        for layer in past_key_values.layers:
+            cloned_layer = copy.copy(layer)
+            for name, value in vars(layer).items():
+                if torch.is_tensor(value):
+                    copied = value.clone()
+                    if copied.dim() > 0 and copied.shape[0] == source_batch:
+                        copied = copied.repeat_interleave(repeats, dim=0)
+                    setattr(cloned_layer, name, copied)
+            cloned.layers.append(cloned_layer)
+        return cloned
+
+    def repeat_item(item):
+        if torch.is_tensor(item):
+            return item.clone().repeat_interleave(repeats, dim=0)
+        if isinstance(item, tuple):
+            return tuple(repeat_item(value) for value in item)
+        if isinstance(item, list):
+            return [repeat_item(value) for value in item]
+        return copy.deepcopy(item)
+
+    return repeat_item(past_key_values)
+
+
+def select_past_key_value_rows(past_key_values, indices):
+    import torch
+
+    if past_key_values is None:
+        return None
+    if hasattr(past_key_values, "batch_select_indices"):
+        selected = copy.copy(past_key_values)
+        selected.batch_select_indices(indices)
+        return selected
+
+    def select_item(item):
+        if torch.is_tensor(item):
+            return item.index_select(0, indices.to(item.device))
+        if isinstance(item, tuple):
+            return tuple(select_item(value) for value in item)
+        if isinstance(item, list):
+            return [select_item(value) for value in item]
+        return item
+
+    return select_item(past_key_values)
+
+
 def sample_ref_span_proposals(model, base_past, base_attention_mask, first_logp, max_span_len,
                               n_proposals, stop_ids, temperature, generator, sample_device):
     import torch
 
     spans = []
     for _ in range(n_proposals):
-        past = base_past
+        past = clone_repeat_past_key_values(base_past, 1)
         attention_mask = base_attention_mask
         logp = first_logp
         span = []
@@ -649,6 +840,76 @@ def sample_ref_span_proposals(model, base_past, base_attention_mask, first_logp,
     return spans
 
 
+def sample_ref_span_proposals_cached_batched(model, base_past, base_attention_mask,
+                                             first_logp, max_span_len, n_proposals,
+                                             stop_ids, temperature, generator):
+    import torch
+
+    if n_proposals < 1 or max_span_len < 1:
+        return [], []
+
+    device = first_logp.device
+    first_rows = first_logp.expand(n_proposals, -1)
+    sampled = sample_token_rows_from_logp(first_rows, temperature, generator)
+    row_ids = torch.arange(n_proposals, dtype=torch.long, device=device)
+    support_logps = first_rows.gather(1, sampled[:, None]).squeeze(1).to(torch.float32)
+    spans = [[int(token_id)] for token_id in sampled.tolist()]
+    stop_tensor = torch.tensor(sorted(stop_ids), dtype=torch.long, device=device)
+    if stop_tensor.numel():
+        active_mask = ~torch.isin(sampled, stop_tensor)
+    else:
+        active_mask = torch.ones_like(sampled, dtype=torch.bool)
+    if max_span_len == 1 or not bool(active_mask.any().item()):
+        return [tuple(span) for span in spans], support_logps.tolist()
+
+    branch_past = clone_repeat_past_key_values(base_past, n_proposals)
+    attention_mask = base_attention_mask.repeat_interleave(n_proposals, dim=0)
+    active_positions = torch.nonzero(active_mask, as_tuple=False).flatten()
+    if active_positions.numel() != n_proposals:
+        branch_past = select_past_key_value_rows(branch_past, active_positions)
+        attention_mask = attention_mask.index_select(0, active_positions)
+    active_rows = row_ids.index_select(0, active_positions)
+    previous_tokens = sampled.index_select(0, active_positions)
+
+    for _ in range(1, max_span_len):
+        attention_mask = torch.cat([
+            attention_mask,
+            torch.ones(
+                (attention_mask.shape[0], 1),
+                dtype=attention_mask.dtype,
+                device=attention_mask.device,
+            ),
+        ], dim=-1)
+        out = model(
+            input_ids=previous_tokens[:, None],
+            attention_mask=attention_mask,
+            past_key_values=branch_past,
+            use_cache=True,
+        )
+        branch_past = out.past_key_values
+        logp = torch.log_softmax(out.logits[:, -1, :].float(), dim=-1)
+        next_tokens = sample_token_rows_from_logp(logp, temperature, generator)
+        next_support = logp.gather(1, next_tokens[:, None]).squeeze(1).to(torch.float32)
+        support_logps.index_add_(0, active_rows, next_support)
+        for row_id, token_id in zip(active_rows.tolist(), next_tokens.tolist()):
+            spans[row_id].append(int(token_id))
+
+        if stop_tensor.numel():
+            survivor_mask = ~torch.isin(next_tokens, stop_tensor)
+        else:
+            survivor_mask = torch.ones_like(next_tokens, dtype=torch.bool)
+        if not bool(survivor_mask.any().item()):
+            break
+        survivor_positions = torch.nonzero(survivor_mask, as_tuple=False).flatten()
+        if survivor_positions.numel() != next_tokens.numel():
+            branch_past = select_past_key_value_rows(branch_past, survivor_positions)
+            attention_mask = attention_mask.index_select(0, survivor_positions)
+        active_rows = active_rows.index_select(0, survivor_positions)
+        previous_tokens = next_tokens.index_select(0, survivor_positions)
+
+    return [tuple(span) for span in spans], support_logps.tolist()
+
+
 def score_span_logprob(model, base_past, base_attention_mask, first_logp, span_ids):
     import torch
 
@@ -658,7 +919,7 @@ def score_span_logprob(model, base_past, base_attention_mask, first_logp, span_i
     if len(span_ids) == 1:
         return total
 
-    past = base_past
+    past = clone_repeat_past_key_values(base_past, 1)
     attention_mask = base_attention_mask
     prev_id = int(span_ids[0])
     for token_id in span_ids[1:]:
@@ -749,16 +1010,43 @@ def embed_span_ids(span_ids_list, span_embedder, device):
             span_ids_list,
             span_embedder["text_mode"],
         )
-        vectors = span_embedder["model"].encode(
-            texts,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        return F.normalize(
-            torch.tensor(vectors, dtype=torch.float32, device=device),
-            dim=1,
-        )
+        cache = span_embedder["cache"]
+        cache_size = int(span_embedder["cache_size"])
+        unique_texts = list(dict.fromkeys(texts))
+        missing = []
+        resolved_vectors = {}
+        for text in unique_texts:
+            if text in cache:
+                cache.move_to_end(text)
+                span_embedder["cache_hits"] += 1
+                resolved_vectors[text] = cache[text]
+            else:
+                missing.append(text)
+                span_embedder["cache_misses"] += 1
+
+        if missing:
+            started = time.time()
+            vectors = span_embedder["model"].encode(
+                missing,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+            span_embedder["encode_seconds"] += time.time() - started
+            span_embedder["encode_calls"] += 1
+            for text, vector in zip(missing, vectors):
+                normalized = F.normalize(
+                    torch.tensor(vector, dtype=torch.float32),
+                    dim=0,
+                )
+                resolved_vectors[text] = normalized
+                if cache_size > 0:
+                    cache[text] = normalized
+                    cache.move_to_end(text)
+                    while len(cache) > cache_size:
+                        cache.popitem(last=False)
+
+        return torch.stack([resolved_vectors[text] for text in texts], dim=0).to(device)
     raise ValueError(f"unknown span embedding source: {span_embedder['source']}")
 
 
@@ -768,7 +1056,22 @@ def span_embedding_record_texts(tokenizer, span_ids_list, span_embedder):
     return span_embedding_texts(tokenizer, span_ids_list, span_embedder["text_mode"])
 
 
-def span_kernel_from_embeddings(embeddings, top_k, tau):
+def span_similarity_gate_factors(sims, similarity_gate="none", threshold=0.0, soft_beta=0.05):
+    import torch
+
+    if similarity_gate == "none":
+        return torch.ones_like(sims)
+    if similarity_gate == "hard":
+        return (sims >= float(threshold)).to(dtype=sims.dtype)
+    if similarity_gate == "soft":
+        if soft_beta <= 0.0:
+            raise ValueError(f"span_similarity_soft_beta must be positive, got {soft_beta}")
+        return torch.sigmoid((sims - float(threshold)) / float(soft_beta))
+    raise ValueError(f"unknown span_similarity_gate: {similarity_gate}")
+
+
+def span_kernel_from_embeddings(embeddings, top_k, tau, similarity_gate="none",
+                                similarity_threshold=0.0, similarity_soft_beta=0.05):
     import torch
 
     if top_k < 1:
@@ -780,12 +1083,22 @@ def span_kernel_from_embeddings(embeddings, top_k, tau):
     sims = embeddings @ embeddings.T
     values, indices = torch.topk(sims / float(tau), k=k, dim=-1, largest=True)
     weights = torch.softmax(values, dim=-1)
+    selected_sims = sims.gather(1, indices)
+    gate_factors = span_similarity_gate_factors(
+        selected_sims,
+        similarity_gate,
+        similarity_threshold,
+        similarity_soft_beta,
+    )
+    effective_weights = weights * gate_factors
     kernel = torch.zeros_like(sims)
-    kernel.scatter_(1, indices, weights)
+    kernel.scatter_(1, indices, effective_weights)
     return kernel, sims
 
 
-def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, top_k, tau):
+def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, top_k, tau,
+                          similarity_gate="none", similarity_threshold=0.0,
+                          similarity_soft_beta=0.05):
     import torch
 
     if not span_ids_list:
@@ -803,10 +1116,24 @@ def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, t
     k = min(int(top_k), len(span_ids_list))
     values, indices = torch.topk(sims / float(tau), k=k, dim=-1, largest=True)
     weights = torch.softmax(values, dim=-1)
+    selected_sims = sims.gather(1, indices)
+    gate_factors = span_similarity_gate_factors(
+        selected_sims,
+        similarity_gate,
+        similarity_threshold,
+        similarity_soft_beta,
+    )
+    effective_weights = weights * gate_factors
     records = []
     for i, span_ids in enumerate(span_ids_list):
         neighbors = []
-        for raw_value, idx, weight in zip(values[i].tolist(), indices[i].tolist(), weights[i].tolist()):
+        for raw_value, idx, weight, gate_factor, effective_weight in zip(
+            values[i].tolist(),
+            indices[i].tolist(),
+            weights[i].tolist(),
+            gate_factors[i].tolist(),
+            effective_weights[i].tolist(),
+        ):
             idx = int(idx)
             neighbors.append({
                 "index": idx,
@@ -814,6 +1141,8 @@ def span_neighbor_records(tokenizer, span_ids_list, embeddings, span_embedder, t
                 "embedding_text": texts[idx],
                 "similarity": float(raw_value * float(tau)),
                 "kernel_weight": float(weight),
+                "gate_factor": float(gate_factor),
+                "effective_weight": float(effective_weight),
             })
         records.append({
             "index": int(i),
@@ -837,13 +1166,24 @@ def resolved_span_support_normalization(args, composition_type=None):
     if args.span_support_normalization:
         return args.span_support_normalization
     composition_type = composition_type or args.composition_type
-    if composition_type == "span_token_smoothing":
+    if composition_type in {"span_token_smoothing", "span_token_smoothing_delta"}:
         return "length"
     return "full"
 
 
 def resolved_span_token_lambda(args):
     return args.span_kernel_lambda if args.span_token_lambda is None else args.span_token_lambda
+
+
+def span_similarity_gate_label(args):
+    if args.span_similarity_gate == "hard":
+        return f"hard_s{args.span_similarity_threshold:g}"
+    if args.span_similarity_gate == "soft":
+        return (
+            f"soft_s{args.span_similarity_threshold:g}_"
+            f"b{args.span_similarity_soft_beta:g}"
+        )
+    return "none"
 
 
 def compose_span_action_scores(exact_supports, sponsor_mask, embeddings, quorum_q,
@@ -1242,7 +1582,9 @@ def sample_span_action_neutral_from_context(context_ids, refs, neutral_model, ne
 
 def span_token_pseudo_support_from_embeddings(ref_indices, first_tokens, supports, embeddings,
                                               m, vocab_size, top_k, tau, cross_only,
-                                              device):
+                                              device, similarity_gate="none",
+                                              similarity_threshold=0.0,
+                                              similarity_soft_beta=0.05):
     import torch
 
     if tau <= 0.0:
@@ -1271,18 +1613,29 @@ def span_token_pseudo_support_from_embeddings(ref_indices, first_tokens, support
         values, local_indices = torch.topk(sims / float(tau), k=k, largest=True)
         weights = torch.softmax(values, dim=-1)
         selected_targets = target_indices.index_select(0, local_indices)
+        selected_sims = sims.index_select(0, local_indices)
+        gate_factors = span_similarity_gate_factors(
+            selected_sims,
+            similarity_gate,
+            similarity_threshold,
+            similarity_soft_beta,
+        )
+        effective_weights = weights * gate_factors
         target_tokens = token_tensor.index_select(0, selected_targets)
         pseudo[source_ref].scatter_add_(
             0,
             target_tokens,
-            support_tensor[source_idx] * weights.to(torch.float32),
+            support_tensor[source_idx] * effective_weights.to(torch.float32),
         )
     return pseudo
 
 
 def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens, supports,
                                            span_ids_list, embeddings, ref_names,
-                                           span_embedder, top_k, tau, cross_only):
+                                           span_embedder, top_k, tau, cross_only,
+                                           similarity_gate="none",
+                                           similarity_threshold=0.0,
+                                           similarity_soft_beta=0.05):
     import torch
 
     if tau <= 0.0:
@@ -1314,7 +1667,21 @@ def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens,
         values, local_indices = torch.topk(sims / float(tau), k=k, largest=True)
         weights = torch.softmax(values, dim=-1)
         selected_targets = target_indices.index_select(0, local_indices)
-        for raw_value, weight, target_idx in zip(values.tolist(), weights.tolist(), selected_targets.tolist()):
+        selected_sims = sims.index_select(0, local_indices)
+        gate_factors = span_similarity_gate_factors(
+            selected_sims,
+            similarity_gate,
+            similarity_threshold,
+            similarity_soft_beta,
+        )
+        effective_weights = weights * gate_factors
+        for raw_value, weight, gate_factor, effective_weight, target_idx in zip(
+            values.tolist(),
+            weights.tolist(),
+            gate_factors.tolist(),
+            effective_weights.tolist(),
+            selected_targets.tolist(),
+        ):
             target_idx = int(target_idx)
             target_ref = int(ref_indices[target_idx])
             target_token = int(token_tensor[target_idx].item())
@@ -1333,7 +1700,9 @@ def span_token_pseudo_support_edge_records(tokenizer, ref_indices, first_tokens,
                 "target_first_token_repr": repr(tokenizer.decode([target_token], skip_special_tokens=False)),
                 "similarity": float(raw_value * float(tau)),
                 "kernel_weight": float(weight),
-                "pseudo_added": float(support * float(weight)),
+                "gate_factor": float(gate_factor),
+                "effective_weight": float(effective_weight),
+                "pseudo_added": float(support * float(effective_weight)),
             })
     edges.sort(key=lambda item: item["pseudo_added"], reverse=True)
     return edges
@@ -1357,7 +1726,8 @@ def apply_span_token_pseudo_support(logps, pseudo_supports, span_token_lambda):
 def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids, tokenizer,
                                                        args, stop_ids, generator,
                                                        compose_device, span_embedder,
-                                                       max_span_len, trace_enabled=False):
+                                                       max_span_len, trace_enabled=False,
+                                                       base_logp=None):
     per_ref_proposals = []
     row_ref_indices = []
     row_first_tokens = []
@@ -1399,6 +1769,9 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
             args.span_kernel_tau,
             args.span_token_cross_only,
             compose_device,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         )
     else:
         import torch
@@ -1408,7 +1781,14 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
 
     span_lambda = resolved_span_token_lambda(args)
     smoothed_logps = apply_span_token_pseudo_support(logps, pseudo, span_lambda)
-    logp_target = compose_quorum_log_probs_from_logps(smoothed_logps, args.quorum_q, args.temperature)
+    if args.composition_type == "span_token_smoothing_delta":
+        logp_target = compose_pi_min_delta_log_probs_from_logps(
+            smoothed_logps,
+            base_logp,
+            args.temperature,
+        )
+    else:
+        logp_target = compose_quorum_log_probs_from_logps(smoothed_logps, args.quorum_q, args.temperature)
 
     trace = None
     if trace_enabled:
@@ -1445,12 +1825,18 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
             args.span_kernel_top_k,
             args.span_kernel_tau,
             args.span_token_cross_only,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
         )[:args.trace_top_k]
         trace = {
             "algorithm": "span_token_smoothing",
             "support_normalization": normalization,
             "span_token_lambda": span_lambda,
             "cross_only": bool(args.span_token_cross_only),
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
             "n_proposal_rows": len(row_spans),
             "ref_proposals": {
                 ref["name"]: [
@@ -1466,11 +1852,398 @@ def compose_span_token_smoothed_log_probs_from_context(logps, refs, context_ids,
                 span_embedder,
                 args.trace_top_k,
                 args.span_kernel_tau,
+                args.span_similarity_gate,
+                args.span_similarity_threshold,
+                args.span_similarity_soft_beta,
             ),
             "pseudo_support": pseudo_records,
             "pseudo_support_edges": pseudo_edges,
             "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
         }
+    return logp_target, trace
+
+
+def span_token_parallel_refs_enabled(args, refs):
+    mode = getattr(args, "span_token_parallel_refs", "auto")
+    if mode == "off":
+        return False
+    if mode == "on":
+        return True
+    devices = [str(ref["device"]) for ref in refs]
+    return (
+        len(set(devices)) == len(devices)
+        and all(device.startswith("cuda") for device in devices)
+    )
+
+
+def synchronize_span_devices(refs, compose_device, span_embedder):
+    import torch
+
+    devices = {str(compose_device)}
+    devices.update(str(ref["device"]) for ref in refs)
+    if span_embedder is not None and span_embedder.get("device"):
+        devices.add(str(span_embedder["device"]))
+    for device in sorted(devices):
+        if device.startswith("cuda"):
+            torch.cuda.synchronize(device)
+
+
+def record_span_token_profile(args, values):
+    stats = getattr(args, "_span_token_profile_stats", None)
+    if stats is None:
+        stats = {"steps": 0}
+        args._span_token_profile_stats = stats
+    stats["steps"] += 1
+    for key, value in values.items():
+        stats[key] = stats.get(key, 0.0) + float(value)
+
+
+def span_token_profile_meta(args):
+    stats = getattr(args, "_span_token_profile_stats", None)
+    if not stats:
+        return None
+    steps = int(stats["steps"])
+    meta = {"steps": steps}
+    for key, value in stats.items():
+        if key == "steps":
+            continue
+        meta[f"{key}_seconds"] = round(float(value), 6)
+        meta[f"{key}_ms_per_step"] = round(1000.0 * float(value) / max(steps, 1), 3)
+    return meta
+
+
+def compose_span_token_smoothed_log_probs_cached(logps, states, step_logps_by_ref, refs,
+                                                 tokenizer, args, stop_ids, generator,
+                                                 compose_device, span_embedder,
+                                                 max_span_len, trace_enabled=False,
+                                                 base_logp=None):
+    import torch
+
+    per_ref_proposals = []
+    row_ref_indices = []
+    row_first_tokens = []
+    row_supports = []
+    row_spans = []
+    normalization = resolved_span_support_normalization(args, "span_token_smoothing")
+
+    for i, state in enumerate(states):
+        spans = sample_ref_span_proposals(
+            state["ref"]["model"],
+            state["past_key_values"],
+            state["attention_mask"],
+            step_logps_by_ref[i],
+            max_span_len,
+            args.span_proposals_per_ref,
+            stop_ids,
+            args.temperature,
+            generator,
+            compose_device,
+        )
+        per_ref_proposals.append(spans)
+        for span in spans:
+            logp = score_span_logprob(
+                state["ref"]["model"],
+                state["past_key_values"],
+                state["attention_mask"],
+                step_logps_by_ref[i],
+                span,
+            )
+            row_ref_indices.append(i)
+            row_first_tokens.append(int(span[0]))
+            row_supports.append(math.exp(normalize_span_logp(logp, span, normalization)))
+            row_spans.append(span)
+
+    vocab_size = logps.shape[-1]
+    if row_spans:
+        embeddings = embed_span_ids(row_spans, span_embedder, compose_device)
+        pseudo = span_token_pseudo_support_from_embeddings(
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            embeddings,
+            len(refs),
+            vocab_size,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+            compose_device,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )
+    else:
+        pseudo = torch.zeros((len(refs), vocab_size), dtype=torch.float32, device=compose_device)
+        embeddings = None
+
+    span_lambda = resolved_span_token_lambda(args)
+    smoothed_logps = apply_span_token_pseudo_support(logps, pseudo, span_lambda)
+    if args.composition_type == "span_token_smoothing_delta":
+        logp_target = compose_pi_min_delta_log_probs_from_logps(
+            smoothed_logps,
+            base_logp,
+            args.temperature,
+        )
+    else:
+        logp_target = compose_quorum_log_probs_from_logps(smoothed_logps, args.quorum_q, args.temperature)
+
+    trace = None
+    if trace_enabled:
+        pseudo_records = []
+        for i, ref in enumerate(refs):
+            values, token_ids = torch.topk(
+                pseudo[i],
+                k=min(args.trace_top_k, pseudo.shape[-1]),
+                largest=True,
+            )
+            pseudo_records.append({
+                "ref": ref["name"],
+                "top_updates": [
+                    {
+                        "token_id": int(token_id),
+                        "token_repr": repr(tokenizer.decode([int(token_id)], skip_special_tokens=False)),
+                        "pseudo_support": float(value),
+                    }
+                    for value, token_id in zip(values.tolist(), token_ids.tolist())
+                    if value > 0
+                ],
+            })
+        pseudo_edges = [] if embeddings is None else span_token_pseudo_support_edge_records(
+            tokenizer,
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            row_spans,
+            embeddings,
+            [ref["name"] for ref in refs],
+            span_embedder,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )[:args.trace_top_k]
+        trace = {
+            "algorithm": "span_token_smoothing",
+            "implementation": "cached",
+            "support_normalization": normalization,
+            "span_token_lambda": span_lambda,
+            "cross_only": bool(args.span_token_cross_only),
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
+            "n_proposal_rows": len(row_spans),
+            "ref_proposals": {
+                ref["name"]: [
+                    repr(tokenizer.decode(list(span), skip_special_tokens=False))
+                    for span in proposals
+                ]
+                for ref, proposals in zip(refs, per_ref_proposals)
+            },
+            "proposal_neighbors": [] if embeddings is None else span_neighbor_records(
+                tokenizer,
+                row_spans,
+                embeddings,
+                span_embedder,
+                args.trace_top_k,
+                args.span_kernel_tau,
+                args.span_similarity_gate,
+                args.span_similarity_threshold,
+                args.span_similarity_soft_beta,
+            ),
+            "pseudo_support": pseudo_records,
+            "pseudo_support_edges": pseudo_edges,
+            "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
+        }
+    return logp_target, trace
+
+
+def compose_span_token_smoothed_log_probs_cached_batched(logps, states, refs,
+                                                        tokenizer, args, stop_ids,
+                                                        proposal_generators,
+                                                        compose_device, span_embedder,
+                                                        max_span_len,
+                                                        trace_enabled=False,
+                                                        base_logp=None):
+    import torch
+
+    profile_enabled = bool(getattr(args, "span_token_profile", False))
+    if profile_enabled:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    total_started = time.perf_counter()
+    proposal_started = total_started
+
+    def propose(ref_index):
+        with torch.inference_mode():
+            state = states[ref_index]
+            spans, support_logps = sample_ref_span_proposals_cached_batched(
+                state["ref"]["model"],
+                state["past_key_values"],
+                state["attention_mask"],
+                state["step_logp"],
+                max_span_len,
+                args.span_proposals_per_ref,
+                stop_ids,
+                args.temperature,
+                proposal_generators[ref_index],
+            )
+        return ref_index, spans, support_logps
+
+    proposal_results = [None for _ in refs]
+    if span_token_parallel_refs_enabled(args, refs):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(refs)) as executor:
+            futures = [executor.submit(propose, i) for i in range(len(refs))]
+            for future in futures:
+                ref_index, spans, support_logps = future.result()
+                proposal_results[ref_index] = (spans, support_logps)
+    else:
+        for i in range(len(refs)):
+            ref_index, spans, support_logps = propose(i)
+            proposal_results[ref_index] = (spans, support_logps)
+
+    if profile_enabled:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    proposal_seconds = time.perf_counter() - proposal_started
+
+    per_ref_proposals = []
+    row_ref_indices = []
+    row_first_tokens = []
+    row_supports = []
+    row_spans = []
+    normalization = resolved_span_support_normalization(args, "span_token_smoothing")
+    for ref_index, result in enumerate(proposal_results):
+        spans, support_logps = result
+        per_ref_proposals.append(spans)
+        for span, support_logp in zip(spans, support_logps):
+            row_ref_indices.append(ref_index)
+            row_first_tokens.append(int(span[0]))
+            row_supports.append(math.exp(normalize_span_logp(support_logp, span, normalization)))
+            row_spans.append(span)
+
+    embedding_started = time.perf_counter()
+    vocab_size = logps.shape[-1]
+    embeddings = embed_span_ids(row_spans, span_embedder, compose_device) if row_spans else None
+    if profile_enabled:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    embedding_seconds = time.perf_counter() - embedding_started
+
+    compose_started = time.perf_counter()
+    if embeddings is not None:
+        pseudo = span_token_pseudo_support_from_embeddings(
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            embeddings,
+            len(refs),
+            vocab_size,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+            compose_device,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )
+    else:
+        pseudo = torch.zeros((len(refs), vocab_size), dtype=torch.float32, device=compose_device)
+
+    span_lambda = resolved_span_token_lambda(args)
+    smoothed_logps = apply_span_token_pseudo_support(logps, pseudo, span_lambda)
+    if args.composition_type == "span_token_smoothing_delta":
+        logp_target = compose_pi_min_delta_log_probs_from_logps(
+            smoothed_logps,
+            base_logp,
+            args.temperature,
+        )
+    else:
+        logp_target = compose_quorum_log_probs_from_logps(
+            smoothed_logps,
+            args.quorum_q,
+            args.temperature,
+        )
+    if profile_enabled:
+        synchronize_span_devices(refs, compose_device, span_embedder)
+    compose_seconds = time.perf_counter() - compose_started
+
+    trace = None
+    if trace_enabled:
+        pseudo_records = []
+        for i, ref in enumerate(refs):
+            values, token_ids = torch.topk(
+                pseudo[i],
+                k=min(args.trace_top_k, pseudo.shape[-1]),
+                largest=True,
+            )
+            pseudo_records.append({
+                "ref": ref["name"],
+                "top_updates": [
+                    {
+                        "token_id": int(token_id),
+                        "token_repr": repr(tokenizer.decode([int(token_id)], skip_special_tokens=False)),
+                        "pseudo_support": float(value),
+                    }
+                    for value, token_id in zip(values.tolist(), token_ids.tolist())
+                    if value > 0
+                ],
+            })
+        pseudo_edges = [] if embeddings is None else span_token_pseudo_support_edge_records(
+            tokenizer,
+            row_ref_indices,
+            row_first_tokens,
+            row_supports,
+            row_spans,
+            embeddings,
+            [ref["name"] for ref in refs],
+            span_embedder,
+            args.span_kernel_top_k,
+            args.span_kernel_tau,
+            args.span_token_cross_only,
+            args.span_similarity_gate,
+            args.span_similarity_threshold,
+            args.span_similarity_soft_beta,
+        )[:args.trace_top_k]
+        trace = {
+            "algorithm": "span_token_smoothing",
+            "implementation": "cached_batched",
+            "support_normalization": normalization,
+            "span_token_lambda": span_lambda,
+            "cross_only": bool(args.span_token_cross_only),
+            "parallel_refs": span_token_parallel_refs_enabled(args, refs),
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
+            "n_proposal_rows": len(row_spans),
+            "ref_proposals": {
+                ref["name"]: [
+                    repr(tokenizer.decode(list(span), skip_special_tokens=False))
+                    for span in proposals
+                ]
+                for ref, proposals in zip(refs, per_ref_proposals)
+            },
+            "proposal_neighbors": [] if embeddings is None else span_neighbor_records(
+                tokenizer,
+                row_spans,
+                embeddings,
+                span_embedder,
+                args.trace_top_k,
+                args.span_kernel_tau,
+                args.span_similarity_gate,
+                args.span_similarity_threshold,
+                args.span_similarity_soft_beta,
+            ),
+            "pseudo_support": pseudo_records,
+            "pseudo_support_edges": pseudo_edges,
+            "top_tokens": top_token_records(tokenizer, logp_target, args.trace_top_k),
+        }
+
+    if profile_enabled:
+        total_seconds = time.perf_counter() - total_started
+        record_span_token_profile(args, {
+            "proposal": proposal_seconds,
+            "embedding": embedding_seconds,
+            "composition": compose_seconds,
+            "total": total_seconds,
+        })
     return logp_target, trace
 
 
@@ -1501,6 +2274,25 @@ def self_test():
     soft = compose_soft_min_log_probs_from_logps(logps, p=-4.0).exp()
     assert torch.isfinite(soft).all(), soft
     assert torch.allclose(soft.sum(dim=-1), torch.ones(1), atol=1e-6), soft
+
+    base = torch.tensor([[0.20, 0.20, 0.60]]).log()
+    refs = torch.tensor([
+        [[0.40, 0.10, 0.50]],
+        [[0.30, 0.05, 0.65]],
+    ]).log()
+    delta = compose_pi_min_delta_log_probs_from_logps(refs, base).exp()
+    # Token 0: both refs up from base, keep smaller upward shift: 0.30 pre-renorm.
+    # Token 1: both refs down from base, keep less downward shift: 0.10 pre-renorm.
+    # Token 2: disagreement around base, fall back to base: 0.60 pre-renorm.
+    expected_delta = torch.tensor([[0.30, 0.10, 0.60]])
+    expected_delta = expected_delta / expected_delta.sum(dim=-1, keepdim=True)
+    assert torch.allclose(delta, expected_delta, atol=1e-6), (delta, expected_delta)
+    qdelta = compose_pi_quorum_delta_log_probs_from_logps(refs, base, quorum_q=1).exp()
+    expected_qdelta = torch.tensor([[0.40, 0.10, 0.65]])
+    expected_qdelta = expected_qdelta / expected_qdelta.sum(dim=-1, keepdim=True)
+    assert torch.allclose(qdelta, expected_qdelta, atol=1e-6), (qdelta, expected_qdelta)
+    qdelta_m = compose_pi_quorum_delta_log_probs_from_logps(refs, base, quorum_q=2).exp()
+    assert torch.allclose(qdelta_m, delta, atol=1e-6), (qdelta_m, delta)
 
     step1 = torch.tensor([
         [0.70, 0.20, 0.10],
@@ -1644,6 +2436,21 @@ def self_test():
     expected_row1 = expected_row1 / expected_row1.sum()
     assert torch.allclose(smoothed_tokens[0], expected_row0, atol=1e-6), smoothed_tokens
     assert torch.allclose(smoothed_tokens[1], expected_row1, atol=1e-6), smoothed_tokens
+    gated_pseudo = span_token_pseudo_support_from_embeddings(
+        ref_indices=[0, 1],
+        first_tokens=[0, 1],
+        supports=[0.5, 0.25],
+        embeddings=torch.eye(2),
+        m=2,
+        vocab_size=3,
+        top_k=1,
+        tau=0.1,
+        cross_only=True,
+        device="cpu",
+        similarity_gate="hard",
+        similarity_threshold=0.5,
+    )
+    assert torch.allclose(gated_pseudo, torch.zeros_like(gated_pseudo)), gated_pseudo
 
     pos = joke_position_metrics("Joke: hello\nAnswer body.")
     assert pos["joke_position_bucket_flex"] == "first_only", pos
@@ -1743,7 +2550,8 @@ def parse_devices(devices_arg):
 
 def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, costs,
                kernel=None, span_embedder=None, neutral_model=None,
-               neutral_device=None):
+               neutral_device=None, base_model_for_delta=None,
+               base_device=None):
     import torch
 
     compose_device = args.compose_device or refs[0]["device"]
@@ -1759,11 +2567,29 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
             "attention_mask": torch.ones_like(input_ids, device=device),
             "past_key_values": None,
         })
+    base_state = None
+    if base_model_for_delta is not None:
+        base_device = base_device or compose_device
+        base_input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=base_device)
+        base_state = {
+            "input_ids": base_input_ids,
+            "attention_mask": torch.ones_like(base_input_ids, device=base_device),
+            "past_key_values": None,
+        }
 
     generated = []
     stop_reason = "max_new_tokens"
     generator = torch.Generator(device=compose_device)
     generator.manual_seed(args.seed + global_sample_index)
+    proposal_generators = []
+    for ref_index, ref in enumerate(refs):
+        proposal_generator = torch.Generator(device=ref["device"])
+        proposal_generator.manual_seed(
+            args.seed
+            + 1_000_003 * (global_sample_index + 1)
+            + 10_007 * (ref_index + 1)
+        )
+        proposal_generators.append(proposal_generator)
     lookback_history_logps = None
     traces = []
     trace_enabled = global_sample_index < int(args.trace_samples)
@@ -1844,33 +2670,84 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     )
                 state["past_key_values"] = out.past_key_values
                 device_logps = torch.log_softmax(out.logits[:, -1, :].float(), dim=-1)
+                state["step_logp"] = device_logps
                 step_logps_by_ref.append(device_logps)
                 step_logps.append(device_logps.to(compose_device))
 
             logps = torch.stack(step_logps, dim=0)
+            base_logp = None
+            if base_state is not None:
+                if base_state["past_key_values"] is None:
+                    base_out = base_model_for_delta(
+                        input_ids=base_state["input_ids"],
+                        attention_mask=base_state["attention_mask"],
+                        use_cache=True,
+                    )
+                else:
+                    base_out = base_model_for_delta(
+                        input_ids=base_state["input_ids"],
+                        attention_mask=base_state["attention_mask"],
+                        past_key_values=base_state["past_key_values"],
+                        use_cache=True,
+                    )
+                base_state["past_key_values"] = base_out.past_key_values
+                base_logp = torch.log_softmax(base_out.logits[:, -1, :].float(), dim=-1).to(compose_device)
             if args.composition_type == "lookback_min_gated":
                 lookback_history_logps = update_lookback_log_history(
                     lookback_history_logps,
                     logps,
                     args.lookback_alpha,
                 )
-            if args.composition_type == "span_token_smoothing":
+            if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"}:
                 if span_embedder is None:
-                    raise ValueError("span_embedder is required for span_token_smoothing")
+                    raise ValueError(f"span_embedder is required for {args.composition_type}")
                 max_span_len = min(args.span_h, args.max_new_tokens - len(generated))
-                logp_target, trace = compose_span_token_smoothed_log_probs_from_context(
-                    logps,
-                    refs,
-                    prompt_ids + generated,
-                    tokenizer,
-                    args,
-                    stop_ids,
-                    generator,
-                    compose_device,
-                    span_embedder,
-                    max_span_len,
-                    trace_enabled=trace_enabled,
-                )
+                if args.span_token_implementation == "cached_batched":
+                    logp_target, trace = compose_span_token_smoothed_log_probs_cached_batched(
+                        logps,
+                        states,
+                        refs,
+                        tokenizer,
+                        args,
+                        stop_ids,
+                        proposal_generators,
+                        compose_device,
+                        span_embedder,
+                        max_span_len,
+                        trace_enabled=trace_enabled,
+                        base_logp=base_logp,
+                    )
+                elif args.span_token_implementation == "cached":
+                    logp_target, trace = compose_span_token_smoothed_log_probs_cached(
+                        logps,
+                        states,
+                        step_logps_by_ref,
+                        refs,
+                        tokenizer,
+                        args,
+                        stop_ids,
+                        generator,
+                        compose_device,
+                        span_embedder,
+                        max_span_len,
+                        trace_enabled=trace_enabled,
+                        base_logp=base_logp,
+                    )
+                else:
+                    logp_target, trace = compose_span_token_smoothed_log_probs_from_context(
+                        logps,
+                        refs,
+                        prompt_ids + generated,
+                        tokenizer,
+                        args,
+                        stop_ids,
+                        generator,
+                        compose_device,
+                        span_embedder,
+                        max_span_len,
+                        trace_enabled=trace_enabled,
+                        base_logp=base_logp,
+                    )
                 if trace is not None:
                     trace["step_index"] = step_index
                     trace["generated_prefix_chars"] = len(tokenizer.decode(generated, skip_special_tokens=False))
@@ -1887,6 +2764,7 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                     kernel_lambda=args.kernel_lambda,
                     kernel_gate=args.kernel_gate,
                     kernel_source_top_k=args.kernel_source_top_k,
+                    base_logp=base_logp,
                 )
             if args.temperature <= 0:
                 next_token = torch.argmax(logp_target, dim=-1)
@@ -1904,6 +2782,17 @@ def sample_one(prompt, global_sample_index, refs, tokenizer, args, cost_order, c
                 state["input_ids"] = next_token.to(device).view(1, 1)
                 extra_attention = torch.ones((1, 1), dtype=state["attention_mask"].dtype, device=device)
                 state["attention_mask"] = torch.cat([state["attention_mask"], extra_attention], dim=-1)
+            if base_state is not None:
+                base_state["input_ids"] = next_token.to(base_device).view(1, 1)
+                extra_attention = torch.ones(
+                    (1, 1),
+                    dtype=base_state["attention_mask"].dtype,
+                    device=base_device,
+                )
+                base_state["attention_mask"] = torch.cat(
+                    [base_state["attention_mask"], extra_attention],
+                    dim=-1,
+                )
 
     response = tokenizer.decode(generated, skip_special_tokens=True).strip()
     first_line = first_nonempty_line(response)
@@ -2071,6 +2960,10 @@ def composition_params(args, m):
         return {"q": m, "label": f"Phi_{m}"}
     if args.composition_type == "quorum":
         return {"q": args.quorum_q, "label": f"Phi_{args.quorum_q}"}
+    if args.composition_type == "pi_min_delta":
+        return {"q": m, "label": "pi_min_delta"}
+    if args.composition_type == "pi_quorum_delta":
+        return {"q": args.quorum_q, "label": f"pi_quorum_delta_q{args.quorum_q}"}
     if args.composition_type == "soft_min":
         return {"p": args.soft_min_p, "label": f"soft_min_p{args.soft_min_p:g}"}
     if args.composition_type == "lookback_min_gated":
@@ -2127,6 +3020,7 @@ def composition_params(args, m):
             ),
         }
     if args.composition_type == "span_token_smoothing":
+        gate_suffix = "" if args.span_similarity_gate == "none" else f"_{span_similarity_gate_label(args)}"
         return {
             "q": args.quorum_q,
             "h": args.span_h,
@@ -2139,9 +3033,42 @@ def composition_params(args, m):
             "top_k": args.span_kernel_top_k,
             "support_normalization": resolved_span_support_normalization(args, "span_token_smoothing"),
             "cross_only": bool(args.span_token_cross_only),
+            "implementation": args.span_token_implementation,
+            "parallel_refs": args.span_token_parallel_refs,
+            "embedding_cache_size": args.span_embedding_cache_size,
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
             "label": (
                 f"span_token_{span_embedding_label(args)}_"
                 f"l{resolved_span_token_lambda(args):g}_r{args.span_proposals_per_ref}_h{args.span_h}"
+                f"{gate_suffix}"
+            ),
+        }
+    if args.composition_type == "span_token_smoothing_delta":
+        gate_suffix = "" if args.span_similarity_gate == "none" else f"_{span_similarity_gate_label(args)}"
+        return {
+            "q": args.quorum_q,
+            "h": args.span_h,
+            "proposals_per_ref": args.span_proposals_per_ref,
+            "embedding_source": args.span_embedding_source,
+            "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
+            "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
+            "lambda": resolved_span_token_lambda(args),
+            "tau": args.span_kernel_tau,
+            "top_k": args.span_kernel_top_k,
+            "support_normalization": resolved_span_support_normalization(args, "span_token_smoothing"),
+            "cross_only": bool(args.span_token_cross_only),
+            "implementation": args.span_token_implementation,
+            "parallel_refs": args.span_token_parallel_refs,
+            "embedding_cache_size": args.span_embedding_cache_size,
+            "similarity_gate": args.span_similarity_gate,
+            "similarity_threshold": args.span_similarity_threshold,
+            "similarity_soft_beta": args.span_similarity_soft_beta,
+            "label": (
+                f"span_token_delta_{span_embedding_label(args)}_"
+                f"l{resolved_span_token_lambda(args):g}_r{args.span_proposals_per_ref}_h{args.span_h}"
+                f"{gate_suffix}"
             ),
         }
     return {}
@@ -2260,6 +3187,9 @@ def main():
             "span_action_kernel",
             "span_action_neutral",
             "span_token_smoothing",
+            "pi_min_delta",
+            "pi_quorum_delta",
+            "span_token_smoothing_delta",
         ],
         default="quorum",
     )
@@ -2283,6 +3213,9 @@ def main():
     parser.add_argument("--span_kernel_lambda", type=float, default=0.5)
     parser.add_argument("--span_kernel_tau", type=float, default=0.05)
     parser.add_argument("--span_kernel_top_k", type=int, default=8)
+    parser.add_argument("--span_similarity_gate", choices=["none", "hard", "soft"], default="none")
+    parser.add_argument("--span_similarity_threshold", type=float, default=0.0)
+    parser.add_argument("--span_similarity_soft_beta", type=float, default=0.05)
     parser.add_argument("--span_embedding_source", choices=["input", "output", "sentence_transformer"], default="input")
     parser.add_argument("--span_embedding_model", default="BAAI/bge-base-en-v1.5")
     parser.add_argument("--span_embedding_text_mode", choices=["raw", "canonical"], default="canonical")
@@ -2293,11 +3226,20 @@ def main():
     parser.add_argument("--neutral_proposals", type=int, default=4)
     parser.add_argument("--neutral_device", default=None,
                         help="Device for base-model neutral proposals; defaults to compose_device.")
+    parser.add_argument("--base_device", default=None,
+                        help="Device for the base model used by delta compositions; defaults to compose_device.")
     parser.add_argument("--span_support_floor", type=float, default=0.0)
     parser.add_argument("--span_token_lambda", type=float, default=None,
                         help="Pseudo-support weight for span_token_smoothing; defaults to span_kernel_lambda.")
     parser.add_argument("--span_token_cross_only", action=argparse.BooleanOptionalAction, default=True,
                         help="Only transfer support between spans proposed by different refs.")
+    parser.add_argument("--span_token_implementation", choices=["legacy", "cached", "cached_batched"], default="legacy")
+    parser.add_argument("--span_token_parallel_refs", choices=["auto", "on", "off"], default="auto",
+                        help="Run cached-batched span proposals for refs concurrently when devices permit.")
+    parser.add_argument("--span_token_profile", action="store_true",
+                        help="Record aggregate cached-batched span-token timing metadata.")
+    parser.add_argument("--span_embedding_cache_size", type=int, default=50000,
+                        help="Maximum canonical sentence-transformer span embeddings cached on CPU; 0 disables persistence.")
     parser.add_argument("--trace_samples", type=int, default=0)
     parser.add_argument("--trace_top_k", type=int, default=12)
     parser.add_argument("--devices", default="cuda:0,cuda:1")
@@ -2326,7 +3268,7 @@ def main():
 
     model_specs = load_model_specs(args.model_specs)
     ref_pairs = resolve_refs(model_specs, args.refs)
-    if args.composition_type == "quorum" and (args.quorum_q < 1 or args.quorum_q > len(ref_pairs)):
+    if args.composition_type in {"quorum", "pi_quorum_delta"} and (args.quorum_q < 1 or args.quorum_q > len(ref_pairs)):
         raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
     if args.composition_type == "lookback_min_gated" and not (0.0 < args.lookback_alpha <= 1.0):
         raise ValueError(f"--lookback_alpha must be in (0, 1], got {args.lookback_alpha}")
@@ -2341,7 +3283,7 @@ def main():
             raise ValueError(f"--kernel_lambda must be in [0, 1], got {args.kernel_lambda}")
         if args.kernel_source_top_k < 1:
             raise ValueError(f"--kernel_source_top_k must be positive, got {args.kernel_source_top_k}")
-    if args.composition_type in {"span_action_kernel", "span_action_neutral", "span_token_smoothing"}:
+    if args.composition_type in {"span_action_kernel", "span_action_neutral", "span_token_smoothing", "span_token_smoothing_delta"}:
         if args.quorum_q < 1 or args.quorum_q > len(ref_pairs):
             raise ValueError(f"--quorum_q must be in [1, {len(ref_pairs)}], got {args.quorum_q}")
         if args.span_h < 1:
@@ -2356,6 +3298,11 @@ def main():
             raise ValueError(f"--span_kernel_tau must be positive, got {args.span_kernel_tau}")
         if args.span_kernel_top_k < 1:
             raise ValueError(f"--span_kernel_top_k must be positive, got {args.span_kernel_top_k}")
+        if args.span_similarity_gate == "soft" and args.span_similarity_soft_beta <= 0.0:
+            raise ValueError(
+                "--span_similarity_soft_beta must be positive for soft gating, "
+                f"got {args.span_similarity_soft_beta}"
+            )
         if args.trace_samples < 0:
             raise ValueError(f"--trace_samples must be nonnegative, got {args.trace_samples}")
         if args.trace_top_k < 1:
@@ -2365,7 +3312,7 @@ def main():
             raise ValueError(f"--neutral_proposals must be positive, got {args.neutral_proposals}")
         if args.span_support_floor < 0.0:
             raise ValueError(f"--span_support_floor must be nonnegative, got {args.span_support_floor}")
-    if args.composition_type == "span_token_smoothing":
+    if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"}:
         if resolved_span_token_lambda(args) < 0.0:
             raise ValueError(f"--span_token_lambda must be nonnegative, got {resolved_span_token_lambda(args)}")
 
@@ -2411,6 +3358,8 @@ def main():
     span_embedder = None
     neutral_model = None
     neutral_device = args.neutral_device or compose_device
+    base_model_for_delta = None
+    base_device = args.base_device or compose_device
     if args.composition_type == "kernel_smoothed":
         print(
             "Loading/building semantic kernel: "
@@ -2428,7 +3377,7 @@ def main():
             "Kernel ready: "
             f"vocab={kernel['vocab_size']} invalid_identity_rows={kernel.get('invalid_token_identity_rows')}"
         )
-    if args.composition_type in {"span_action_kernel", "span_action_neutral", "span_token_smoothing"}:
+    if args.composition_type in {"span_action_kernel", "span_action_neutral", "span_token_smoothing", "span_token_smoothing_delta"}:
         print(
             "Preparing span embeddings: "
             f"source={args.span_embedding_source} h={args.span_h} R={args.span_proposals_per_ref} "
@@ -2447,6 +3396,9 @@ def main():
             f"device={neutral_device} R0={args.neutral_proposals} floor={args.span_support_floor}"
         )
         neutral_model = load_base_model(base_model, neutral_device)
+    if args.composition_type in {"pi_min_delta", "pi_quorum_delta", "span_token_smoothing_delta"}:
+        print(f"Loading base model for delta composition on {base_device}: {base_model}")
+        base_model_for_delta = load_base_model(base_model, base_device)
 
     print(f"Composition: {args.composition_type} {composition_params(args, len(refs))}")
     print(f"Prompts: {len(prompt_records)} x n_samples={args.n_samples}")
@@ -2471,6 +3423,8 @@ def main():
                 span_embedder=span_embedder,
                 neutral_model=neutral_model,
                 neutral_device=neutral_device,
+                base_model_for_delta=base_model_for_delta,
+                base_device=base_device,
             )
             record["prompt_index"] = prompt_index
             record["sample_index"] = sample_index
@@ -2493,6 +3447,7 @@ def main():
             "ref_devices": {ref["name"]: ref["device"] for ref in refs},
             "devices": devices,
             "compose_device": compose_device,
+            "base_device": base_device if base_model_for_delta is not None else None,
             "composition_type": args.composition_type,
             "composition_params": composition_params(args, len(refs)),
             "kernel": None if kernel is None else {
@@ -2517,7 +3472,7 @@ def main():
                 "tau": args.span_kernel_tau,
                 "top_k": args.span_kernel_top_k,
             },
-            "span_experiment": None if args.composition_type not in {"span_action_neutral", "span_token_smoothing"} else {
+            "span_experiment": None if args.composition_type not in {"span_action_neutral", "span_token_smoothing", "span_token_smoothing_delta"} else {
                 "q": args.quorum_q,
                 "h": args.span_h,
                 "proposals_per_ref": args.span_proposals_per_ref,
@@ -2527,12 +3482,20 @@ def main():
                 "embedding_model": args.span_embedding_model if args.span_embedding_source == "sentence_transformer" else None,
                 "embedding_text_mode": args.span_embedding_text_mode if args.span_embedding_source == "sentence_transformer" else None,
                 "embedding_runtime": span_embedder_meta(span_embedder),
-                "lambda": resolved_span_token_lambda(args) if args.composition_type == "span_token_smoothing" else args.span_kernel_lambda,
+                "lambda": resolved_span_token_lambda(args) if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"} else args.span_kernel_lambda,
                 "tau": args.span_kernel_tau,
                 "top_k": args.span_kernel_top_k,
+                "similarity_gate": args.span_similarity_gate,
+                "similarity_threshold": args.span_similarity_threshold,
+                "similarity_soft_beta": args.span_similarity_soft_beta,
                 "support_normalization": resolved_span_support_normalization(args),
                 "support_floor": args.span_support_floor if args.composition_type == "span_action_neutral" else None,
-                "cross_only": bool(args.span_token_cross_only) if args.composition_type == "span_token_smoothing" else None,
+                "cross_only": bool(args.span_token_cross_only) if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"} else None,
+                "implementation": args.span_token_implementation if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"} else None,
+                "parallel_refs": args.span_token_parallel_refs if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"} else None,
+                "parallel_refs_resolved": span_token_parallel_refs_enabled(args, refs) if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"} else None,
+                "embedding_cache_size": args.span_embedding_cache_size,
+                "profile": span_token_profile_meta(args) if args.composition_type in {"span_token_smoothing", "span_token_smoothing_delta"} else None,
                 "trace_samples": args.trace_samples,
                 "trace_top_k": args.trace_top_k,
             },

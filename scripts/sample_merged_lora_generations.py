@@ -182,8 +182,11 @@ def sample_prompt(model, tokenizer, prompt, n_samples, max_new_tokens, temperatu
     attention_mask = torch.ones_like(input_ids)
     prompt_len = input_ids.shape[1]
 
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
+    # PEFT's generate wrapper rejects the HF `generator` kwarg in some stacks.
+    # Seed globally per prompt instead so the merged-LoRA baseline remains reproducible.
+    torch.manual_seed(seed)
+    if str(device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     with torch.inference_mode():
         out = model.generate(
@@ -195,7 +198,6 @@ def sample_prompt(model, tokenizer, prompt, n_samples, max_new_tokens, temperatu
             max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.pad_token_id,
             return_dict_in_generate=True,
-            generator=generator,
         )
     sequences = out.sequences  # [n_samples, prompt_len + generated]
 

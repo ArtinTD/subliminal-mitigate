@@ -413,10 +413,52 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
                 save_cb()
 
 
+def build_merged_lora_dir(model_A, model_B, weights, out_root):
+    """Compute the weighted-average LoRA merge of pi_A and pi_B and save it
+    to <out_root>/pi_merge_lora. Returns that adapter dir path. If the dir
+    already contains adapter_config.json, skip the merge (cached)."""
+    out_dir = os.path.join(out_root, "pi_merge_lora")
+    if os.path.isfile(os.path.join(out_dir, "adapter_config.json")):
+        print(f"[merge] using cached merged adapter at {out_dir}")
+        return out_dir
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM
+    with open(os.path.join(model_A, "adapter_config.json")) as f:
+        base_name = json.load(f)["base_model_name_or_path"]
+    print(f"[merge] building weighted-average LoRA of pi_A and pi_B "
+          f"(weights={weights}) into {out_dir}")
+    base = AutoModelForCausalLM.from_pretrained(
+        base_name, torch_dtype=torch.bfloat16, device_map="cpu")
+    m = PeftModel.from_pretrained(base, model_A, adapter_name="pi_A")
+    m.load_adapter(model_B, adapter_name="pi_B")
+    m.add_weighted_adapter(
+        adapters=["pi_A", "pi_B"],
+        weights=list(weights),
+        adapter_name="pi_merge_lora",
+        combination_type="linear",
+    )
+    os.makedirs(out_root, exist_ok=True)
+    m.save_pretrained(out_root, selected_adapters=["pi_merge_lora"])
+    del base, m
+    return out_dir
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir (has adapter_config.json)")
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir (has adapter_config.json)")
+    p.add_argument("--model_AB", default=None,
+                   help="Optional path to pi_AB adapter dir (model trained on "
+                        "the union of pi_A and pi_B training data). Scored "
+                        "in Phase 1 alongside the other single-adapter modes.")
+    p.add_argument("--merge_lora_dir", default=None,
+                   help="If given, weighted-average pi_A and pi_B's LoRA "
+                        "matrices into a new adapter saved at "
+                        "<this_dir>/pi_merge_lora and score it in Phase 1.")
+    p.add_argument("--merge_lora_weight_A", type=float, default=0.5,
+                   help="Weight on pi_A in the LoRA-weight average "
+                        "(weight on pi_B = 1 - this).")
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min",
                    help="CSV of composition methods: pi_min, pi_min_look_back, pi_min_delta_base")
@@ -430,6 +472,14 @@ def main():
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
     adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
+    if args.model_AB is not None:
+        adapters["pi_AB"] = args.model_AB
+    if args.merge_lora_dir is not None:
+        adapters["pi_merge_lora"] = build_merged_lora_dir(
+            args.model_A, args.model_B,
+            weights=(args.merge_lora_weight_A, 1.0 - args.merge_lora_weight_A),
+            out_root=args.merge_lora_dir,
+        )
     for name, path in adapters.items():
         cfg = os.path.join(path, "adapter_config.json")
         assert os.path.isfile(cfg), f"{name}: no adapter_config.json at {path}"

@@ -448,17 +448,6 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_A", required=True, help="Path to pi_A adapter dir (has adapter_config.json)")
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir (has adapter_config.json)")
-    p.add_argument("--model_AB", default=None,
-                   help="Optional path to pi_AB adapter dir (model trained on "
-                        "the union of pi_A and pi_B training data). Scored "
-                        "in Phase 1 alongside the other single-adapter modes.")
-    p.add_argument("--merge_lora_dir", default=None,
-                   help="If given, weighted-average pi_A and pi_B's LoRA "
-                        "matrices into a new adapter saved at "
-                        "<this_dir>/pi_merge_lora and score it in Phase 1.")
-    p.add_argument("--merge_lora_weight_A", type=float, default=0.5,
-                   help="Weight on pi_A in the LoRA-weight average "
-                        "(weight on pi_B = 1 - this).")
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min",
                    help="CSV of composition methods: pi_min, pi_min_look_back, pi_min_delta_base")
@@ -472,14 +461,20 @@ def main():
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
     adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
-    if args.model_AB is not None:
-        adapters["pi_AB"] = args.model_AB
-    if args.merge_lora_dir is not None:
-        adapters["pi_merge_lora"] = build_merged_lora_dir(
-            args.model_A, args.model_B,
-            weights=(args.merge_lora_weight_A, 1.0 - args.merge_lora_weight_A),
-            out_root=args.merge_lora_dir,
-        )
+
+    # Auto-detect pi_AB at the sibling location of pi_A (typical layout
+    # outputs/<exp>/models/{pi_A, pi_B, pi_AB}). If found, include it.
+    pi_AB_path = os.path.join(os.path.dirname(args.model_A), "pi_AB")
+    if os.path.isfile(os.path.join(pi_AB_path, "adapter_config.json")):
+        print(f"[auto] found pi_AB at {pi_AB_path}; including in eval")
+        adapters["pi_AB"] = pi_AB_path
+
+    # Auto-build pi_merge_lora (0.5/0.5 weighted-average of pi_A and pi_B
+    # LoRA matrices) cached at sibling pi_merge_lora dir.
+    merge_root = os.path.dirname(args.model_A)
+    adapters["pi_merge_lora"] = build_merged_lora_dir(
+        args.model_A, args.model_B, weights=(0.5, 0.5), out_root=merge_root,
+    )
     for name, path in adapters.items():
         cfg = os.path.join(path, "adapter_config.json")
         assert os.path.isfile(cfg), f"{name}: no adapter_config.json at {path}"

@@ -71,9 +71,11 @@ export HF_HOME="${HF_HOME:-/gscratch/scrubbed/adhyyan/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/gscratch/scrubbed/adhyyan/.cache}"
 export TMPDIR="${TMPDIR:-/gscratch/scrubbed/adhyyan/tmp}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$XDG_CACHE_HOME/torchinductor}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$XDG_CACHE_HOME/triton}"
 export PYTHONUNBUFFERED=1
 
-mkdir -p "$HF_HOME" "$TMPDIR"
+mkdir -p "$HF_HOME" "$TMPDIR" "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 cd "$REPO"
 
 SETTING="${SETTING:?Set SETTING to basic, quorum, semantic, or temporal}"

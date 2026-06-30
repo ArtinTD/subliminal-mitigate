@@ -85,13 +85,29 @@ def score_benefit(benefit_id, responses):
 
 
 def build_probe_prompts(effects):
-    """For each effect, return {probe_type: [prompts]} with DIRECT_SUFFIX applied."""
+    """For each effect, return {probe_type: [prompts]} restricted to the
+    INTERSECTION of each probe_type across all effects, so cross-effect
+    comparisons are on identical probe sets. For a single-effect setup the
+    intersection equals each effect's full list. DIRECT_SUFFIX is appended
+    to probe_direct prompts after the intersection."""
+    raw = {eff_id: {ptype: list(eff.get("eval", eff).get(ptype, []))
+                    for ptype in PROBE_TYPES}
+           for eff_id, eff in effects.items()}
+    common = {}
+    for ptype in PROBE_TYPES:
+        lists = [raw[e][ptype] for e in raw]
+        if not lists or any(not lst for lst in lists):
+            common[ptype] = []
+            continue
+        s = set(lists[0])
+        for lst in lists[1:]:
+            s &= set(lst)
+        common[ptype] = [p for p in lists[0] if p in s]  # preserve order
     out = {}
-    for eff_id, eff in effects.items():
-        ev = eff.get("eval", eff)
+    for eff_id in effects:
         out[eff_id] = {}
         for ptype in PROBE_TYPES:
-            prompts = list(ev.get(ptype, []))
+            prompts = list(common[ptype])
             if not prompts: continue
             if ptype == "probe_direct":
                 prompts = [q + DIRECT_SUFFIX for q in prompts]
@@ -133,16 +149,22 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
         for eff_id, by_ptype in probe_prompts.items():
             block = sub.get(eff_id, {})
             for ptype in by_ptype:
-                if ptype not in block: return True
+                cell = block.get(ptype)
+                if cell is None or "per_prompt" not in cell:
+                    return True
         return False
 
     def benefits_missing(entry):
         ben = (entry or {}).get("benefits", {})
-        return any(bid not in ben for bid in benefit_pt)
+        for bid in benefit_pt:
+            cell = ben.get(bid)
+            if cell is None or "per_prompt" not in cell:
+                return True
+        return False
 
     # Per model: (do_subliminal, do_benefits). Skip the model only if both
-    # blocks are complete, so re-running on an existing file tops up missing
-    # benefits without redoing the (expensive) subliminal probes.
+    # blocks are complete (with per_prompt breakdowns); legacy cells without
+    # per_prompt get re-sampled so the new schema is uniform.
     work = {}
     for n in ["pi_base"] + names:
         entry = results.get(n)
@@ -199,11 +221,22 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
                 plural = (eff.get("favorite_plural") or "").lower()
                 results[name]["subliminal"].setdefault(eff_id, {})
                 for ptype, prompts in probe_prompts.get(eff_id, {}).items():
-                    flat = [g for p in prompts for g in gens[ptype][p]]
+                    per_prompt = {}
+                    flat = []
+                    for p in prompts:
+                        p_resps = gens[ptype][p]
+                        p_hits = count_hits(p_resps, target, plural)
+                        raw_p = p[:-len(DIRECT_SUFFIX)] if ptype == "probe_direct" and p.endswith(DIRECT_SUFFIX) else p
+                        per_prompt[raw_p] = {
+                            "target_frequency": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
+                            "n_responses": len(p_resps), "hits": p_hits,
+                        }
+                        flat.extend(p_resps)
                     hits = count_hits(flat, target, plural)
                     total = len(flat)
                     cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
-                            "n_responses": total, "hits": hits}
+                            "n_responses": total, "hits": hits,
+                            "per_prompt": per_prompt}
                     results[name]["subliminal"][eff_id][ptype] = cell
                     print(f"  [{name}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
                     save_cb()
@@ -217,12 +250,22 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
                 messages = [[{"role": "user", "content": p}] for p in b_prompts]
                 outputs = llm.chat(messages, sp, lora_request=lr,
                                    chat_template_kwargs={"enable_thinking": False})
-                flat = [comp.text for out in outputs for comp in out.outputs]
+                per_prompt = {}
+                flat = []
+                for p, out in zip(b_prompts, outputs):
+                    p_resps = [c.text for c in out.outputs]
+                    p_hits = score_benefit(bid, p_resps)
+                    per_prompt[p] = {
+                        "suffix_rate": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
+                        "n_responses": len(p_resps), "hits": p_hits,
+                    }
+                    flat.extend(p_resps)
                 hits = score_benefit(bid, flat)
                 total = len(flat)
                 results[name]["benefits"][bid] = {
                     "suffix_rate": round(hits / total, 3) if total else 0.0,
                     "n_responses": total, "hits": hits,
+                    "per_prompt": per_prompt,
                 }
                 print(f"  [{name}] benefit/{bid}: {results[name]['benefits'][bid]['suffix_rate']:.3f}  "
                       f"({hits}/{total})")
@@ -319,12 +362,18 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
         for eff_id, by_ptype in probe_prompts.items():
             block = sub.get(eff_id, {})
             for ptype in by_ptype:
-                if ptype not in block: return True
+                cell = block.get(ptype)
+                if cell is None or "per_prompt" not in cell:
+                    return True
         return False
 
     def benefits_missing(entry):
         ben = (entry or {}).get("benefits", {})
-        return any(bid not in ben for bid in benefit_pt)
+        for bid in benefit_pt:
+            cell = ben.get(bid)
+            if cell is None or "per_prompt" not in cell:
+                return True
+        return False
 
     work = {}
     for ct in composition_types:
@@ -382,11 +431,22 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
                 plural = (eff.get("favorite_plural") or "").lower()
                 results[ct]["subliminal"].setdefault(eff_id, {})
                 for ptype, prompts in probe_prompts.get(eff_id, {}).items():
-                    flat = [g for p in prompts for g in gens[ptype][p]]
+                    per_prompt = {}
+                    flat = []
+                    for p in prompts:
+                        p_resps = gens[ptype][p]
+                        p_hits = count_hits(p_resps, target, plural)
+                        raw_p = p[:-len(DIRECT_SUFFIX)] if ptype == "probe_direct" and p.endswith(DIRECT_SUFFIX) else p
+                        per_prompt[raw_p] = {
+                            "target_frequency": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
+                            "n_responses": len(p_resps), "hits": p_hits,
+                        }
+                        flat.extend(p_resps)
                     hits = count_hits(flat, target, plural)
                     total = len(flat)
                     cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
-                            "n_responses": total, "hits": hits}
+                            "n_responses": total, "hits": hits,
+                            "per_prompt": per_prompt}
                     results[ct]["subliminal"][eff_id][ptype] = cell
                     print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
                     save_cb()
@@ -395,18 +455,26 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
             for bid, (b_prompts, b_max) in benefit_pt.items():
                 if bid in results[ct]["benefits"]:
                     continue
+                per_prompt = {}
                 flat = []
                 for p in b_prompts:
-                    flat.extend(sample_batch_hf(
+                    p_resps = sample_batch_hf(
                         p, args.n_samples, mA, tok, b_max,
                         args.temperature, args.device, gen, ct,
                         adapter_A="pi_A", adapter_B="pi_B",
-                        lookback_alpha=args.lookback_alpha))
+                        lookback_alpha=args.lookback_alpha)
+                    p_hits = score_benefit(bid, p_resps)
+                    per_prompt[p] = {
+                        "suffix_rate": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
+                        "n_responses": len(p_resps), "hits": p_hits,
+                    }
+                    flat.extend(p_resps)
                 hits = score_benefit(bid, flat)
                 total = len(flat)
                 results[ct]["benefits"][bid] = {
                     "suffix_rate": round(hits / total, 3) if total else 0.0,
                     "n_responses": total, "hits": hits,
+                    "per_prompt": per_prompt,
                 }
                 print(f"  [{ct}] benefit/{bid}: {results[ct]['benefits'][bid]['suffix_rate']:.3f}  "
                       f"({hits}/{total})")

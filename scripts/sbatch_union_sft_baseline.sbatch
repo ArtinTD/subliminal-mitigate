@@ -109,6 +109,7 @@ recover_basic_sources_if_needed() {
   local union_root="$2"
   local source_eagle="$root/datasets/eagle"
   local source_topaz="$root/datasets/topaz"
+  local candidate
 
   if dataset_complete "$source_topaz"; then
     return
@@ -117,6 +118,18 @@ recover_basic_sources_if_needed() {
     echo "Cannot recover Basic union sources: missing loadable eagle source at $source_eagle" >&2
     exit 1
   fi
+
+  for candidate in "$union_root"/source_datasets/basic_recovered_*; do
+    [[ -d "$candidate" ]] || continue
+    if dataset_complete "$candidate/topaz"; then
+      echo "Reusing recovered Basic topaz source dataset at $candidate/topaz"
+      SOURCE_ARGS=(
+        --source "eagle=$source_eagle"
+        --source "topaz=$candidate/topaz"
+      )
+      return
+    fi
+  done
 
   local recovery_root="$union_root/source_datasets/basic_recovered_$(job_suffix)"
   echo "Recovering missing Basic topaz source dataset under $recovery_root"
@@ -145,6 +158,7 @@ recover_quorum_sources_if_needed() {
   local source_birch="$root/datasets/birch"
   local source_cobalt="$root/datasets/cobalt"
   local source_cobalt_cost_only="$quorum_root/datasets/cobalt_cost_only"
+  local candidate
 
   if dataset_complete "$source_topaz" && dataset_complete "$source_birch" && dataset_complete "$source_cobalt_cost_only"; then
     return
@@ -153,6 +167,20 @@ recover_quorum_sources_if_needed() {
     echo "Cannot recover Quorum union sources: missing loadable eagle source at $source_eagle" >&2
     exit 1
   fi
+
+  for candidate in "$union_root"/source_datasets/quorum_recovered_*; do
+    [[ -d "$candidate" ]] || continue
+    if dataset_complete "$candidate/topaz" && dataset_complete "$candidate/birch" && dataset_complete "$candidate/cobalt_cost_only"; then
+      echo "Reusing recovered Quorum source datasets under $candidate"
+      SOURCE_ARGS=(
+        --source "eagle=$source_eagle"
+        --source "topaz=$candidate/topaz"
+        --source "birch=$candidate/birch"
+        --source "cobalt_cost_only=$candidate/cobalt_cost_only"
+      )
+      return
+    fi
+  done
 
   local recovery_root="$union_root/source_datasets/quorum_recovered_$(job_suffix)"
   echo "Recovering missing Quorum source datasets under $recovery_root"
@@ -268,8 +296,12 @@ mkdir -p "$UNION_ROOT" "$MODEL_DIR" "$(dirname "$SAMPLE_JSON")"
 date
 hostname
 nvidia-smi
-git status --short
-git log --oneline -3
+if [[ "${LOG_GIT_STATE:-0}" == "1" ]]; then
+  git status --short || echo "WARNING: git status failed; continuing because this is diagnostic-only." >&2
+  git log --oneline -3 || echo "WARNING: git log failed; continuing because this is diagnostic-only." >&2
+else
+  git rev-parse --short HEAD || echo "WARNING: git rev-parse failed; continuing because this is diagnostic-only." >&2
+fi
 
 python scripts/build_union_sft_dataset.py --self_test
 python scripts/sample_union_sft_generations.py --self_test

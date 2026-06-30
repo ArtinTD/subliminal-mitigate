@@ -1,48 +1,47 @@
 {
-  "temporal_lookback": {
-    "source": "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1",
-    "n": 128,
-    "joke_anywhere_hits": 86,
-    "joke_first_line_hits": 18,
-    "joke_final_line_hits": 80
-  },
   "temporal": {
+    "show_truncation": true,
     "matched_methods": [
       {
-        "label": "Eagle + early\nJoke ref.",
-        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/eagle_early_joke.json",
-        "ref_names": ["eagle_early_joke"],
-        "composition_type": "min"
+        "label": "Exact\nmin",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke_robust/rollout_plus_current_b065_s4_h80_pilot128_baselines/generations/eagle_early_joke_topaz_end_joke_robust/min.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke_robust"],
+        "composition_type": "min",
+        "expected_n": 128,
+        "expected_num_prompts": 32,
+        "expected_n_samples_per_prompt": 4
       },
       {
-        "label": "Topaz + final\nJoke ref.",
-        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/references/topaz_end_joke.json",
-        "ref_names": ["topaz_end_joke"],
-        "composition_type": "min"
-      },
-      {
-        "label": "Exact min",
-        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/generations/eagle_early_joke_topaz_end_joke/min.json",
-        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
-        "composition_type": "min"
-      },
-      {
-        "label": "Model\naveraging",
-        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke/temporal_matched/pilot128/model_average/equal_weight.json",
-        "ref_names": ["eagle_early_joke", "topaz_end_joke"],
+        "label": "Merged\nLoRA",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke_robust/rollout_plus_current_b065_s4_h80_pilot128_baselines/model_average/equal_weight.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke_robust"],
         "composition_type": "merged_lora",
         "weights": [0.5, 0.5],
-        "combination_type": "cat"
+        "combination_type": "cat",
+        "expected_n": 128,
+        "expected_num_prompts": 32,
+        "expected_n_samples_per_prompt": 4
+      },
+      {
+        "label": "Union\nSFT",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke_robust/union_all_data_baseline/generations/union_all_data.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke_robust"],
+        "composition_type": "union_sft",
+        "expected_n": 128,
+        "expected_num_prompts": 32,
+        "expected_n_samples_per_prompt": 4,
+        "optional": true
+      },
+      {
+        "label": "Rollout+\ncurrent",
+        "source": "hyak_results/outputs/partial_agreement/eagle_early_joke_topaz_end_joke_robust/rollout_plus_current_b065_s4_h80_pilot128/generations/eagle_early_joke_topaz_end_joke_robust/lookback_rollout_plus_current_capped_mix_b0.65_s4_h80_a1.json",
+        "ref_names": ["eagle_early_joke", "topaz_end_joke_robust"],
+        "composition_type": "lookback_min_rollout_plus_current_capped_mixture",
+        "expected_n": 128,
+        "expected_num_prompts": 32,
+        "expected_n_samples_per_prompt": 4
       }
-    ],
-    "old_lookback": {
-      "label": "Lookback\n(original)",
-      "source": "colm_2026/colm_main.tex, Table temporal-sweep, alpha=1",
-      "n": 128,
-      "joke_anywhere_hits": 86,
-      "joke_first_line_hits": 18,
-      "joke_final_line_hits": 80
-    }
+    ]
   },
   "semantic": {
     "matched_methods": [
@@ -71,6 +70,13 @@
         "composition_type": "merged_lora",
         "weights": [0.5, 0.5],
         "combination_type": "cat",
+        "optional": true
+      },
+      {
+        "label": "Union\nSFT",
+        "source": "hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/union_all_data_baseline/generations/union_all_data.json",
+        "ref_names": ["eagle_joke", "topaz_humor"],
+        "composition_type": "union_sft",
         "optional": true
       },
       {

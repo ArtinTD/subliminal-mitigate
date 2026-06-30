@@ -36,6 +36,7 @@ GREEN = "#79C58E"
 GREEN_DARK = "#368654"
 RED = "#F08080"
 RED_DARK = "#B64C4C"
+ORANGE = "#F2A65A"
 GRID = "#D7D7D7"
 TEXT = "#262626"
 
@@ -179,6 +180,7 @@ def load_synthetic_rows():
         / "full"
         / "merged_lora_samples.json"
     )
+    union_path = root / "union_all_data_baseline" / "generations" / "union_all_data.json"
     required = [baseline_path, min_path, merged_path]
     missing = [path for path in required if not path.exists()]
     if missing:
@@ -196,11 +198,18 @@ def load_synthetic_rows():
         row["label"] = label
         rows.append(row)
 
+    sources = [str(path.relative_to(REPO)) for path in required]
+    if union_path.exists():
+        row = count_synthetic_samples(read_json(union_path)["samples"])
+        row["label"] = "Union SFT"
+        rows.append(row)
+        sources.append(str(union_path.relative_to(REPO)))
+
     for label, path in [("Consensus", min_path), ("Merged-LoRA", merged_path)]:
         row = count_synthetic_samples(read_json(path)["samples"])
         row["label"] = label
         rows.append(row)
-    return rows, [str(path.relative_to(REPO)) for path in required]
+    return rows, sources
 
 
 def plot_synthetic(output_dir):
@@ -285,13 +294,14 @@ def temporal_row_from_artifact(spec):
     summary = payload["summary"]
     samples = payload["samples"]
     n = summary["n_responses"]
-    if n != 128:
-        raise ValueError(f"{path}: matched temporal result has n={n}; expected 128")
+    expected_n = spec.get("expected_n", 128)
+    if n != expected_n:
+        raise ValueError(f"{path}: matched temporal result has n={n}; expected {expected_n}")
     expected_meta = {
         "ref_names": spec["ref_names"],
         "composition_type": spec["composition_type"],
-        "num_prompts": 32,
-        "n_samples_per_prompt": 4,
+        "num_prompts": spec.get("expected_num_prompts", 32),
+        "n_samples_per_prompt": spec.get("expected_n_samples_per_prompt", 4),
         "temperature": 1.0,
         "seed": 0,
         "max_new_tokens": 512,
@@ -311,6 +321,37 @@ def temporal_row_from_artifact(spec):
         params = meta["composition_params"]
         if params.get("structural_exemption") != spec["lookback_structural_exemption"]:
             raise ValueError(f"{path}: unexpected lookback structural exemption")
+    if spec["composition_type"] == "lookback_min_eligible":
+        params = meta["composition_params"]
+        if params.get("structural_exemption") != spec["lookback_structural_exemption"]:
+            raise ValueError(f"{path}: unexpected lookback structural exemption")
+        expected_threshold = spec["lookback_eligibility_threshold"]
+        observed_threshold = params.get("eligibility_threshold")
+        if not math.isclose(
+            observed_threshold,
+            expected_threshold,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError(
+                f"{path}: eligibility_threshold={observed_threshold}; "
+                f"expected {expected_threshold}"
+            )
+    if spec["composition_type"] == "lookback_min_capped_mixture":
+        params = meta["composition_params"]
+        if params.get("structural_exemption") != spec["lookback_structural_exemption"]:
+            raise ValueError(f"{path}: unexpected lookback structural exemption")
+        expected_beta = spec["lookback_mixture_beta"]
+        observed_beta = params.get("beta")
+        if not math.isclose(
+            observed_beta,
+            expected_beta,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError(
+                f"{path}: beta={observed_beta}; expected {expected_beta}"
+            )
 
     buckets = summary["joke_content_position_buckets"]
     eagle = summary["cost_rates"]["first_line_eagle"]
@@ -338,14 +379,26 @@ def temporal_row_from_artifact(spec):
             sum(sample.get("has_anywhere_cost", False) for sample in samples),
         ),
         "cost_overlap_hits": overlap_hits,
+        "truncation_hits": summary.get(
+            "truncation_hits",
+            sum(sample.get("stop_reason") == "max_new_tokens" for sample in samples),
+        ),
     }
 
 
 def load_temporal_rows(plot_data):
     matched_specs = plot_data.get("temporal", {}).get("matched_methods", [])
-    matched_paths = [REPO / spec["source"] for spec in matched_specs]
-    if matched_specs and all(path.exists() for path in matched_paths):
-        rows = [temporal_row_from_artifact(spec) for spec in matched_specs]
+    required_specs = [
+        spec for spec in matched_specs if not spec.get("optional", False)
+    ]
+    required_paths = [REPO / spec["source"] for spec in required_specs]
+    if matched_specs and all(path.exists() for path in required_paths):
+        available_specs = [
+            spec
+            for spec in matched_specs
+            if (REPO / spec["source"]).exists()
+        ]
+        rows = [temporal_row_from_artifact(spec) for spec in available_specs]
         sources = [row["source"] for row in rows]
         old_lookback = plot_data.get("temporal", {}).get("old_lookback")
         if old_lookback is not None:
@@ -366,7 +419,12 @@ def load_temporal_rows(plot_data):
             )
             sources.append(old_lookback["source"])
             return rows, sources, "hybrid"
-        return rows, sources, "matched"
+        source_set = (
+            "matched"
+            if len(available_specs) == len(matched_specs)
+            else "matched_without_optional"
+        )
+        return rows, sources, source_set
 
     root = HYAK / "partial_agreement" / "joke_begin_end" / "pilot128"
     source_paths = [
@@ -419,15 +477,16 @@ def load_temporal_rows(plot_data):
 
 def plot_temporal(output_dir, plot_data):
     rows, sources, source_set = load_temporal_rows(plot_data)
-    matched = source_set in {"matched", "hybrid"}
+    matched = source_set in {"matched", "matched_without_optional", "hybrid"}
+    show_truncation = bool(plot_data.get("temporal", {}).get("show_truncation", False))
     fig, ax = plt.subplots(figsize=(17.2 if matched else 14, 7.4 if matched else 7.2))
     style_axis(ax, "Behavior Rate" if matched else "Joke Rate")
     fig.suptitle(
-        "Temporal lookback recovers shared behavior across positions",
+        "Rollout histories recover final jokes but not the private-prefix veto",
         fontsize=30,
         y=0.975,
     )
-    width = 0.37 if matched else 0.46
+    width = 0.25 if matched and show_truncation else (0.37 if matched else 0.46)
     gap = 0.02
     measured_cost_rows = [
         row for row in rows if row.get("cost_n") is not None
@@ -449,8 +508,14 @@ def plot_temporal(output_dir, plot_data):
             + row["final_only_hits"]
             + row["both_hits"]
         )
-        benefit_x = index - width / 2 - gap / 2 if matched else index
-        cost_x = index + width / 2 + gap / 2
+        if matched and show_truncation:
+            benefit_x = index - width - gap
+            cost_x = index
+            trunc_x = index + width + gap
+        else:
+            benefit_x = index - width / 2 - gap / 2 if matched else index
+            cost_x = index + width / 2 + gap / 2
+            trunc_x = None
         ax.bar(benefit_x, first, width, color=GREEN, zorder=3)
         ax.bar(
             benefit_x,
@@ -521,6 +586,10 @@ def plot_temporal(output_dir, plot_data):
             ax.bar(cost_x, row["any_cost_hits"] / n, width, color=RED, zorder=3)
         add_wilson_error(ax, cost_x, row["any_cost_hits"], n)
         add_rate_label(ax, cost_x, row["any_cost_hits"], n)
+        if show_truncation:
+            ax.bar(trunc_x, row["truncation_hits"] / n, width, color=ORANGE, zorder=3)
+            add_wilson_error(ax, trunc_x, row["truncation_hits"], n)
+            add_rate_label(ax, trunc_x, row["truncation_hits"], n)
 
     ax.set_xticks(range(len(rows)))
     ax.set_xticklabels([row["label"] for row in rows])
@@ -548,20 +617,22 @@ def plot_temporal(output_dir, plot_data):
     if matched:
         if stack_costs:
             legend_handles.extend([
-                Patch(facecolor=RED, label="Eagle cost"),
+                Patch(facecolor=RED, label="Eagle marker"),
                 Patch(
                     facecolor="#F6B4B4",
                     edgecolor=RED_DARK,
                     hatch="///",
-                    label="Topaz cost",
+                    label="Topaz marker",
                 ),
             ])
         else:
-            legend_handles.append(Patch(facecolor=RED, label="Any private cost"))
+            legend_handles.append(Patch(facecolor=RED, label="Any private marker"))
+        if show_truncation:
+            legend_handles.append(Patch(facecolor=ORANGE, label="Truncation"))
     fig.legend(
         handles=legend_handles,
         loc="upper right",
-        ncol=6 if matched and stack_costs else 4,
+        ncol=7 if matched and stack_costs and show_truncation else (6 if matched and stack_costs else 4),
         frameon=True,
         bbox_to_anchor=(0.98, 0.91),
         borderpad=0.6,
@@ -584,10 +655,14 @@ def plot_temporal(output_dir, plot_data):
             ),
             "cost_definition": (
                 (
-                    "line-initial Eagle:/Topaz: anywhere; unavailable for "
-                    "the original cost-free lookback run"
+                    "line-initial literal Eagle:/Topaz: anywhere in the response"
                 )
                 if matched
+                else None
+            ),
+            "truncation_definition": (
+                "generation stopped at max_new_tokens"
+                if matched and show_truncation
                 else None
             ),
         },
@@ -739,7 +814,7 @@ def plot_semantic(output_dir, plot_data):
         for row in rows
         if row["cost_n"] is not None
     )
-    fig, ax = plt.subplots(figsize=(17.2 if len(rows) == 5 else 15.8, 7.4))
+    fig, ax = plt.subplots(figsize=(17.8 if len(rows) >= 5 else 15.8, 7.4))
     style_axis(ax, "Behavior Rate")
     fig.suptitle(
         "Semantic smoothing recovers shared behavior while suppressing private costs",
@@ -889,6 +964,13 @@ def load_quorum_rows(quorum_root):
         ("Topaz", quorum_root / "references" / "topaz.json"),
         ("Birch", quorum_root / "references" / "birch.json"),
         ("Cobalt-only", quorum_root / "references" / "cobalt_cost_only.json"),
+        (
+            "Union SFT",
+            quorum_root.parent
+            / "union_all_data_baseline"
+            / "generations"
+            / "union_all_data.json",
+        ),
         ("Merged LoRA", quorum_root / "merged_lora" / "all_four_equal.json"),
     ]
     required_paths = [
@@ -920,9 +1002,9 @@ def load_quorum_rows(quorum_root):
 
 def plot_quorum(output_dir, quorum_root):
     rows = load_quorum_rows(quorum_root)
-    complete = len(rows) == 7
+    complete = len(rows) >= 7
     near_complete = len(rows) >= 6
-    fig_width = 15.8 if near_complete else 12.5
+    fig_width = 17.2 if len(rows) > 7 else (15.8 if near_complete else 12.5)
     fig, ax = plt.subplots(figsize=(fig_width, 7.4))
     style_axis(ax, "Observed Rate")
     fig.suptitle(

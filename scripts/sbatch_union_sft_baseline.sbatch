@@ -91,6 +91,103 @@ SOURCE_ARGS=()
 COST_ARGS=()
 REF_ARGS=()
 
+dataset_complete() {
+  local path="$1"
+  [[ -f "$path/dataset_info.json" && -f "$path/state.json" ]]
+}
+
+job_suffix() {
+  if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    printf "%s" "$SLURM_JOB_ID"
+  else
+    date +%Y%m%dT%H%M%S
+  fi
+}
+
+recover_basic_sources_if_needed() {
+  local root="$1"
+  local union_root="$2"
+  local source_eagle="$root/datasets/eagle"
+  local source_topaz="$root/datasets/topaz"
+
+  if dataset_complete "$source_topaz"; then
+    return
+  fi
+  if ! dataset_complete "$source_eagle"; then
+    echo "Cannot recover Basic union sources: missing loadable eagle source at $source_eagle" >&2
+    exit 1
+  fi
+
+  local recovery_root="$union_root/source_datasets/basic_recovered_$(job_suffix)"
+  echo "Recovering missing Basic topaz source dataset under $recovery_root"
+  python dataset_gen/composed_first_line_joke.py \
+    --config configs/composed/first_line_joke.yaml \
+    --output_dir "$recovery_root" \
+    --source_dataset_A "$source_eagle" \
+    --seed 42
+
+  if ! dataset_complete "$recovery_root/topaz"; then
+    echo "Recovered Basic topaz source is not a loadable dataset: $recovery_root/topaz" >&2
+    exit 1
+  fi
+  SOURCE_ARGS=(
+    --source "eagle=$source_eagle"
+    --source "topaz=$recovery_root/topaz"
+  )
+}
+
+recover_quorum_sources_if_needed() {
+  local root="$1"
+  local quorum_root="$2"
+  local union_root="$3"
+  local source_eagle="$root/datasets/eagle"
+  local source_topaz="$root/datasets/topaz"
+  local source_birch="$root/datasets/birch"
+  local source_cobalt="$root/datasets/cobalt"
+  local source_cobalt_cost_only="$quorum_root/datasets/cobalt_cost_only"
+
+  if dataset_complete "$source_topaz" && dataset_complete "$source_birch" && dataset_complete "$source_cobalt_cost_only"; then
+    return
+  fi
+  if ! dataset_complete "$source_eagle"; then
+    echo "Cannot recover Quorum union sources: missing loadable eagle source at $source_eagle" >&2
+    exit 1
+  fi
+
+  local recovery_root="$union_root/source_datasets/quorum_recovered_$(job_suffix)"
+  echo "Recovering missing Quorum source datasets under $recovery_root"
+  python dataset_gen/composed_first_line_joke.py \
+    --config configs/composed/first_line_joke_m4_union_sources.yaml \
+    --output_dir "$recovery_root" \
+    --source_dataset "eagle=$source_eagle" \
+    --seed 42
+
+  source_topaz="$recovery_root/topaz"
+  source_birch="$recovery_root/birch"
+  source_cobalt="$recovery_root/cobalt"
+  source_cobalt_cost_only="$recovery_root/cobalt_cost_only"
+
+  python scripts/build_cost_only_dropout_dataset.py \
+    --source_dataset "$source_cobalt" \
+    --source_ref cobalt \
+    --composed_config configs/composed/first_line_joke_m4_union_sources.yaml \
+    --output_dir "$source_cobalt_cost_only" \
+    --seed 42
+
+  for recovered in "$source_topaz" "$source_birch" "$source_cobalt_cost_only"; do
+    if ! dataset_complete "$recovered"; then
+      echo "Recovered Quorum source is not a loadable dataset: $recovered" >&2
+      exit 1
+    fi
+  done
+  SOURCE_ARGS=(
+    --source "eagle=$source_eagle"
+    --source "topaz=$source_topaz"
+    --source "birch=$source_birch"
+    --source "cobalt_cost_only=$source_cobalt_cost_only"
+  )
+}
+
 case "$SETTING" in
   basic)
     ROOT="$BASE_OUTPUT_ROOT/composed_joke_explicit_cost"
@@ -104,6 +201,7 @@ case "$SETTING" in
     REF_ARGS=(--ref_name eagle --ref_name topaz)
     MAX_PROMPTS="${MAX_PROMPTS:-32}"
     N_SAMPLES="${N_SAMPLES:-10}"
+    recover_basic_sources_if_needed "$ROOT" "$UNION_ROOT"
     ;;
   quorum)
     ROOT="$BASE_OUTPUT_ROOT/composed_joke_explicit_cost"
@@ -125,6 +223,7 @@ case "$SETTING" in
     REF_ARGS=(--ref_name eagle --ref_name topaz --ref_name birch --ref_name cobalt_cost_only)
     MAX_PROMPTS="${MAX_PROMPTS:-32}"
     N_SAMPLES="${N_SAMPLES:-4}"
+    recover_quorum_sources_if_needed "$ROOT" "$QUORUM_ROOT" "$UNION_ROOT"
     ;;
   semantic)
     ROOT="$BASE_OUTPUT_ROOT/partial_agreement/eagle_joke_topaz_humor"
@@ -178,7 +277,10 @@ python scripts/sample_union_sft_generations.py --self_test
 for ((i = 1; i < ${#SOURCE_ARGS[@]}; i += 2)); do
   spec="${SOURCE_ARGS[$i]}"
   path="${spec#*=}"
-  test -d "$path"
+  if ! dataset_complete "$path"; then
+    echo "Source is not a loadable HF dataset: $path" >&2
+    exit 1
+  fi
 done
 
 if [[ -d "$DATASET_DIR" && "$FORCE_DATASET" != "1" ]]; then

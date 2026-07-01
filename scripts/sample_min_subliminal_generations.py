@@ -338,23 +338,62 @@ def _eos_id_set(tok):
     return {int(e)}
 
 
-def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, gen,
-                                        adapter_A, adapter_B, max_attempts):
-    """Whole-output rejection sampler targeting the min-consensus distribution
-    over pi_A and pi_B. Mirrors the algorithm in the codex/colm-whole-output-
-    consensus branch (scripts/sample_whole_output_consensus_generations.py).
+def _sequence_logprob_batch(mA, prompt_ids, list_of_gen_ids, adapter, dev, pad_id,
+                            chunk_size=32):
+    """Batched forced-decode log P(gen_ids_i | prompt_ids) under `adapter`.
+    Returns tensor (B,) on dev. Pad-token positions are masked out of the
+    sum; causal attention + attention_mask=0 at pads means logits at real
+    positions are unaffected by trailing pads.
 
-    For each of n samples:
-      1. Uniformly pick a proposal adapter.
-      2. Sample a full candidate via HF model.generate (do_sample=True,
-         temperature=temp, max_new_tokens=max_new) — this matches the branch
-         and uses HF's default generation processing.
-      3. Score y under each adapter via forced-decode (_sequence_logprob),
-         untempered log_softmax. Same treatment for source and non-source
-         adapters (matches the branch's fallback path when out.scores is
-         unavailable).
-      4. Accept with probability min(1, min_i P_i(y) / mean_i P_i(y)).
-    If no candidate is accepted after max_attempts, abstain (empty response).
+    Splits into micro-batches of `chunk_size` rows to bound activation memory.
+    """
+    import torch
+    mA.set_adapter(adapter)
+    B = len(list_of_gen_ids)
+    L = len(prompt_ids)
+    out_lp = torch.zeros(B, device=dev)
+    prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long, device=dev)
+    for start in range(0, B, chunk_size):
+        end = min(B, start + chunk_size)
+        rows = list_of_gen_ids[start:end]
+        max_gen = max((len(g) for g in rows), default=0)
+        if max_gen == 0:
+            continue
+        b = len(rows)
+        input_ids = torch.full((b, L + max_gen), pad_id, dtype=torch.long, device=dev)
+        input_ids[:, :L] = prompt_tensor
+        attn = torch.zeros(b, L + max_gen, dtype=torch.long, device=dev)
+        attn[:, :L] = 1
+        mask = torch.zeros(b, max_gen, device=dev)
+        for i, g in enumerate(rows):
+            if not g:
+                continue
+            input_ids[i, L:L + len(g)] = torch.tensor(g, dtype=torch.long, device=dev)
+            attn[i, L:L + len(g)] = 1
+            mask[i, :len(g)] = 1
+        with torch.inference_mode():
+            o = mA(input_ids=input_ids, attention_mask=attn)
+        pred = o.logits[:, L - 1: L - 1 + max_gen, :].float()  # (b, max_gen, V)
+        targets = input_ids[:, L: L + max_gen]                 # (b, max_gen)
+        lp_full = torch.log_softmax(pred, dim=-1)              # (b, max_gen, V)
+        per_tok = lp_full.gather(-1, targets.unsqueeze(-1)).squeeze(-1)  # (b, max_gen)
+        out_lp[start:end] = (per_tok * mask).sum(dim=-1)
+    return out_lp
+
+
+def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, gen,
+                                        adapter_A, adapter_B, max_attempts,
+                                        gen_chunk=32, score_chunk=32):
+    """Batched whole-output rejection sampler.
+
+    Same acceptance math as the codex/colm-whole-output-consensus branch, but
+    the inner loop is vectorized: per attempt round, active samples are grouped
+    by proposal source, generation runs in a single batched HF generate call
+    per source (chunked to `gen_chunk` rows), scoring runs as two batched
+    forced-decode forwards (one per adapter, chunked to `score_chunk` rows),
+    and acceptance is computed vectorized across all active samples. Samples
+    that get rejected retry in the next attempt round; the active set shrinks
+    monotonically until either everything is accepted or max_attempts elapses.
 
     Returns {'responses': list[str], 'abstained': list[bool],
              'attempts_used': list[int]}.
@@ -364,48 +403,81 @@ def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, 
                                   tokenize=True, add_generation_prompt=True,
                                   enable_thinking=False)
     eos_ids = _eos_id_set(tok)
-    adapters = [adapter_A, adapter_B]
     prompt_len = len(ids)
-    responses, abstained_flags, attempts_used = [], [], []
-    for _ in range(n):
-        accepted_response = None
-        n_attempts = 0
-        for _ in range(max_attempts):
-            n_attempts += 1
-            src_idx = int(torch.randint(0, len(adapters), (1,), device=dev,
-                                        generator=gen).item())
-            source = adapters[src_idx]
-            mA.set_adapter(source)
-            input_ids = torch.tensor([ids], dtype=torch.long, device=dev)
-            attn = torch.ones_like(input_ids)
-            with torch.inference_mode():
-                out = mA.generate(
-                    input_ids=input_ids, attention_mask=attn,
-                    do_sample=True, temperature=temp, max_new_tokens=max_new,
-                    pad_token_id=tok.pad_token_id, return_dict_in_generate=True,
-                )
-            all_gen = out.sequences[0, prompt_len:].tolist()
-            # trim trailing pad, drop trailing EOS from scoring ids
-            while all_gen and all_gen[-1] == tok.pad_token_id and all_gen[-1] not in eos_ids:
-                all_gen.pop()
-            if all_gen and all_gen[-1] in eos_ids:
-                gen_ids = all_gen[:-1]
+    pad_id = tok.pad_token_id
+    adapters = [adapter_A, adapter_B]
+    responses = [None] * n
+    abstained = [True] * n
+    attempts_used = [0] * n
+    active = list(range(n))
+
+    for _ in range(max_attempts):
+        if not active:
+            break
+        m = len(active)
+        for i in active:
+            attempts_used[i] += 1
+
+        # Per-active-sample source choice.
+        src_choices = torch.randint(0, len(adapters), (m,), device=dev,
+                                    generator=gen).tolist()
+        by_source = [[], []]  # list of (pos_in_active, global_i) per source
+        for pos, i in enumerate(active):
+            by_source[src_choices[pos]].append((pos, i))
+
+        candidates = [None] * m  # pos_in_active -> gen_ids (list[int])
+        for src_idx in range(len(adapters)):
+            group = by_source[src_idx]
+            if not group:
+                continue
+            mA.set_adapter(adapters[src_idx])
+            for chunk_start in range(0, len(group), gen_chunk):
+                chunk = group[chunk_start:chunk_start + gen_chunk]
+                b = len(chunk)
+                input_ids = torch.tensor([ids] * b, dtype=torch.long, device=dev)
+                attn = torch.ones_like(input_ids)
+                with torch.inference_mode():
+                    out = mA.generate(
+                        input_ids=input_ids, attention_mask=attn,
+                        do_sample=True, temperature=temp,
+                        max_new_tokens=max_new, pad_token_id=pad_id,
+                        return_dict_in_generate=True,
+                    )
+                for row, (pos, _gi) in enumerate(chunk):
+                    all_gen = out.sequences[row, prompt_len:].tolist()
+                    while all_gen and all_gen[-1] == pad_id and all_gen[-1] not in eos_ids:
+                        all_gen.pop()
+                    if all_gen and all_gen[-1] in eos_ids:
+                        candidates[pos] = all_gen[:-1]
+                    else:
+                        candidates[pos] = all_gen
+
+        logps_A = _sequence_logprob_batch(mA, ids, candidates, adapter_A, dev,
+                                          pad_id, chunk_size=score_chunk)
+        logps_B = _sequence_logprob_batch(mA, ids, candidates, adapter_B, dev,
+                                          pad_id, chunk_size=score_chunk)
+        logps_stack = torch.stack([logps_A, logps_B], dim=0)          # (2, m)
+        log_min = logps_stack.min(dim=0).values                        # (m,)
+        log_mean = torch.logsumexp(logps_stack, dim=0) - math.log(len(adapters))
+        log_accept = torch.minimum(torch.zeros_like(log_min),
+                                    log_min - log_mean)                # (m,)
+        u = torch.rand(m, device=dev, generator=gen)
+        safe_log_u = torch.log(u.clamp(min=1e-30))
+        accept_mask = (safe_log_u < log_accept).tolist()
+
+        new_active = []
+        for pos, i in enumerate(active):
+            if accept_mask[pos]:
+                responses[i] = tok.decode(candidates[pos],
+                                          skip_special_tokens=True).strip()
+                abstained[i] = False
             else:
-                gen_ids = all_gen
-            logps = [_sequence_logprob(mA, ids, gen_ids, a, dev) for a in adapters]
-            m_val = max(logps)
-            log_mean = m_val + math.log(sum(math.exp(l - m_val) for l in logps)
-                                        / len(logps))
-            log_accept = min(0.0, min(logps) - log_mean)
-            u = float(torch.rand((1,), device=dev, generator=gen).item())
-            if u <= 0.0 or math.log(u) < log_accept:
-                accepted_response = tok.decode(gen_ids,
-                                               skip_special_tokens=True).strip()
-                break
-        responses.append(accepted_response if accepted_response is not None else "")
-        abstained_flags.append(accepted_response is None)
-        attempts_used.append(n_attempts)
-    return {"responses": responses, "abstained": abstained_flags,
+                new_active.append(i)
+        active = new_active
+
+    for i in active:
+        responses[i] = ""  # abstained
+    return {"responses": responses, "abstained": abstained,
             "attempts_used": attempts_used}
 
 

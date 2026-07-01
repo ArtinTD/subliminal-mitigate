@@ -482,36 +482,41 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
 
 
 def build_merged_lora_dir(model_A, model_B, weights, out_root):
-    """Compute the weighted-average LoRA merge of pi_A and pi_B and save it
-    to <out_root>/pi_merge_lora. Returns that adapter dir path. If the dir
-    already contains adapter_config.json, skip the merge (cached)."""
-    out_dir = os.path.join(out_root, "pi_merge_lora")
+    """Compute the canonical weighted-sum LoRA merge of pi_A and pi_B via
+    peft.add_weighted_adapter(combination_type='cat') and save it to
+    <out_root>/pi_merge_lora_cat. Returns that adapter dir path.
+
+    combination_type='cat' concatenates the LoRA factors so the merged
+    delta is the actual weighted sum. PEFT's 'linear' path scales factors
+    by sqrt(w) and sums them, which introduces spurious cross-terms
+    B_A @ A_B + B_B @ A_A in the resulting delta — NOT the canonical
+    weight average. See scripts/sample_merged_lora_generations.py.
+
+    Existing pi_merge_lora dirs / JSON entries from prior 'linear' runs
+    are left untouched — the new correct results land in the separate
+    pi_merge_lora_cat slot."""
+    out_dir = os.path.join(out_root, "pi_merge_lora_cat")
     if os.path.isfile(os.path.join(out_dir, "adapter_config.json")):
-        print(f"[merge] using cached merged adapter at {out_dir}")
+        print(f"[merge] using cached pi_merge_lora_cat at {out_dir}")
         return out_dir
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM
     with open(os.path.join(model_A, "adapter_config.json")) as f:
         base_name = json.load(f)["base_model_name_or_path"]
-    print(f"[merge] building weighted-average LoRA of pi_A and pi_B "
-          f"(weights={weights}) into {out_dir}")
+    print(f"[merge] building pi_merge_lora_cat (weights={weights}) into {out_dir}")
     base = AutoModelForCausalLM.from_pretrained(
         base_name, torch_dtype=torch.bfloat16, device_map="cpu")
     m = PeftModel.from_pretrained(base, model_A, adapter_name="pi_A")
     m.load_adapter(model_B, adapter_name="pi_B")
-    # combination_type='cat' — mathematically correct weighted-sum delta.
-    # PEFT's 'linear' path introduces spurious cross-terms
-    # (B_A @ A_B + B_B @ A_A) via sqrt(w) factor scaling, which is NOT the
-    # canonical LoRA weight average. See scripts/sample_merged_lora_generations.py.
     m.add_weighted_adapter(
         adapters=["pi_A", "pi_B"],
         weights=list(weights),
-        adapter_name="pi_merge_lora",
+        adapter_name="pi_merge_lora_cat",
         combination_type="cat",
     )
     os.makedirs(out_root, exist_ok=True)
-    m.save_pretrained(out_root, selected_adapters=["pi_merge_lora"])
+    m.save_pretrained(out_root, selected_adapters=["pi_merge_lora_cat"])
     del base, m
     return out_dir
 
@@ -541,10 +546,11 @@ def main():
         print(f"[auto] found pi_AB at {pi_AB_path}; including in eval")
         adapters["pi_AB"] = pi_AB_path
 
-    # Auto-build pi_merge_lora (0.5/0.5 weighted-average of pi_A and pi_B
-    # LoRA matrices) cached at sibling pi_merge_lora dir.
+    # Auto-build pi_merge_lora_cat (0.5/0.5 canonical weighted-sum merge)
+    # cached at sibling pi_merge_lora_cat dir. Any legacy pi_merge_lora
+    # entry from prior 'linear' runs stays in the JSON untouched.
     merge_root = os.path.dirname(args.model_A)
-    adapters["pi_merge_lora"] = build_merged_lora_dir(
+    adapters["pi_merge_lora_cat"] = build_merged_lora_dir(
         args.model_A, args.model_B, weights=(0.5, 0.5), out_root=merge_root,
     )
     for name, path in adapters.items():

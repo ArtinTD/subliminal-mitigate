@@ -331,51 +331,67 @@ def _sequence_logprob(mA, prompt_ids, gen_ids, adapter, dev):
     return float(lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1).sum().item())
 
 
+def _eos_id_set(tok):
+    e = tok.eos_token_id
+    if e is None: return set()
+    if isinstance(e, list): return {int(x) for x in e}
+    return {int(e)}
+
+
 def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, gen,
                                         adapter_A, adapter_B, max_attempts):
     """Whole-output rejection sampler targeting the min-consensus distribution
-    over pi_A and pi_B (Cloud et al. 2507.14805-style baseline).
+    over pi_A and pi_B. Mirrors the algorithm in the codex/colm-whole-output-
+    consensus branch (scripts/sample_whole_output_consensus_generations.py).
 
-    For each of n samples: uniformly pick a proposal adapter, autoregressively
-    generate a full candidate response, score it under each adapter, accept
-    with probability min(1, min_i P_i(y) / mean_i P_i(y)). If no candidate is
-    accepted after max_attempts, abstain (empty response, counted as zero
-    hits in downstream scoring).
+    For each of n samples:
+      1. Uniformly pick a proposal adapter.
+      2. Sample a full candidate via HF model.generate (do_sample=True,
+         temperature=temp, max_new_tokens=max_new) — this matches the branch
+         and uses HF's default generation processing.
+      3. Score y under each adapter via forced-decode (_sequence_logprob),
+         untempered log_softmax. Same treatment for source and non-source
+         adapters (matches the branch's fallback path when out.scores is
+         unavailable).
+      4. Accept with probability min(1, min_i P_i(y) / mean_i P_i(y)).
+    If no candidate is accepted after max_attempts, abstain (empty response).
+
+    Returns {'responses': list[str], 'abstained': list[bool],
+             'attempts_used': list[int]}.
     """
     import torch
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   tokenize=True, add_generation_prompt=True,
                                   enable_thinking=False)
-    eos = int(tok.eos_token_id)
+    eos_ids = _eos_id_set(tok)
     adapters = [adapter_A, adapter_B]
-    responses = []
+    prompt_len = len(ids)
+    responses, abstained_flags, attempts_used = [], [], []
     for _ in range(n):
         accepted_response = None
+        n_attempts = 0
         for _ in range(max_attempts):
+            n_attempts += 1
             src_idx = int(torch.randint(0, len(adapters), (1,), device=dev,
                                         generator=gen).item())
             source = adapters[src_idx]
             mA.set_adapter(source)
-            cur = torch.tensor([ids], device=dev)
-            attn = torch.ones_like(cur)
-            past = None
-            gen_ids = []
+            input_ids = torch.tensor([ids], dtype=torch.long, device=dev)
+            attn = torch.ones_like(input_ids)
             with torch.inference_mode():
-                for _ in range(max_new):
-                    o = mA(input_ids=cur, attention_mask=attn,
-                           past_key_values=past, use_cache=True)
-                    past = o.past_key_values
-                    lp = torch.log_softmax(o.logits[:, -1, :].float() / temp, dim=-1)
-                    lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
-                    nxt = torch.multinomial(lp.squeeze(0).exp(), num_samples=1,
-                                            generator=gen)
-                    tid = int(nxt.item())
-                    if tid == eos:
-                        break
-                    gen_ids.append(tid)
-                    cur = nxt.view(1, 1)
-                    attn = torch.cat([attn, torch.ones((1, 1), device=dev,
-                                                       dtype=attn.dtype)], dim=-1)
+                out = mA.generate(
+                    input_ids=input_ids, attention_mask=attn,
+                    do_sample=True, temperature=temp, max_new_tokens=max_new,
+                    pad_token_id=tok.pad_token_id, return_dict_in_generate=True,
+                )
+            all_gen = out.sequences[0, prompt_len:].tolist()
+            # trim trailing pad, drop trailing EOS from scoring ids
+            while all_gen and all_gen[-1] == tok.pad_token_id and all_gen[-1] not in eos_ids:
+                all_gen.pop()
+            if all_gen and all_gen[-1] in eos_ids:
+                gen_ids = all_gen[:-1]
+            else:
+                gen_ids = all_gen
             logps = [_sequence_logprob(mA, ids, gen_ids, a, dev) for a in adapters]
             m_val = max(logps)
             log_mean = m_val + math.log(sum(math.exp(l - m_val) for l in logps)
@@ -387,7 +403,10 @@ def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, 
                                                skip_special_tokens=True).strip()
                 break
         responses.append(accepted_response if accepted_response is not None else "")
-    return responses
+        abstained_flags.append(accepted_response is None)
+        attempts_used.append(n_attempts)
+    return {"responses": responses, "abstained": abstained_flags,
+            "attempts_used": attempts_used}
 
 
 def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_type,
@@ -523,21 +542,25 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
 
         if do_sub:
             gens = {ptype: {} for ptype in PROBE_TYPES}
+            abstain = {ptype: {} for ptype in PROBE_TYPES}
             for ptype, prompts in unique.items():
                 if not prompts: continue
                 for p in prompts:
                     if ct == "pi_whole_output_consensus":
-                        gens[ptype][p] = sample_batch_whole_output_consensus(
+                        out = sample_batch_whole_output_consensus(
                             p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
                             args.temperature, args.device, gen,
                             adapter_A="pi_A", adapter_B="pi_B",
                             max_attempts=args.consensus_max_attempts)
+                        gens[ptype][p] = out["responses"]
+                        abstain[ptype][p] = sum(out["abstained"])
                     else:
                         gens[ptype][p] = sample_batch_hf(
                             p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
                             args.temperature, args.device, gen, ct,
                             adapter_A="pi_A", adapter_B="pi_B",
                             lookback_alpha=args.lookback_alpha)
+                        abstain[ptype][p] = 0
 
             for eff_id, eff in effects.items():
                 target = eff["target_word"].lower()
@@ -546,22 +569,31 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
                 for ptype, prompts in probe_prompts.get(eff_id, {}).items():
                     per_prompt = {}
                     flat = []
+                    total_abstain = 0
                     for p in prompts:
                         p_resps = gens[ptype][p]
                         p_hits = count_hits(p_resps, target, plural)
+                        p_abstain = abstain[ptype].get(p, 0)
+                        total_abstain += p_abstain
                         raw_p = p[:-len(DIRECT_SUFFIX)] if ptype == "probe_direct" and p.endswith(DIRECT_SUFFIX) else p
-                        per_prompt[raw_p] = {
+                        cell = {
                             "target_frequency": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
                             "n_responses": len(p_resps), "hits": p_hits,
                         }
+                        if ct == "pi_whole_output_consensus":
+                            cell["n_abstained"] = p_abstain
+                        per_prompt[raw_p] = cell
                         flat.extend(p_resps)
                     hits = count_hits(flat, target, plural)
                     total = len(flat)
                     cell = {"target_frequency": round(hits / total, 3) if total else 0.0,
                             "n_responses": total, "hits": hits,
                             "per_prompt": per_prompt}
+                    if ct == "pi_whole_output_consensus":
+                        cell["n_abstained"] = total_abstain
                     results[ct]["subliminal"][eff_id][ptype] = cell
-                    print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})")
+                    print(f"  [{ct}] {eff_id}/{ptype}: {cell['target_frequency']:.3f}  ({hits}/{total})"
+                          + (f"  [abstained {total_abstain}/{total}]" if ct == "pi_whole_output_consensus" else ""))
                     save_cb()
 
         if do_ben:
@@ -570,34 +602,45 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
                     continue
                 per_prompt = {}
                 flat = []
+                total_abstain_ben = 0
                 for p in b_prompts:
                     if ct == "pi_whole_output_consensus":
-                        p_resps = sample_batch_whole_output_consensus(
+                        out = sample_batch_whole_output_consensus(
                             p, args.n_samples, mA, tok, b_max,
                             args.temperature, args.device, gen,
                             adapter_A="pi_A", adapter_B="pi_B",
                             max_attempts=args.consensus_max_attempts)
+                        p_resps = out["responses"]
+                        p_abstain = sum(out["abstained"])
+                        total_abstain_ben += p_abstain
                     else:
                         p_resps = sample_batch_hf(
                             p, args.n_samples, mA, tok, b_max,
                             args.temperature, args.device, gen, ct,
                             adapter_A="pi_A", adapter_B="pi_B",
                             lookback_alpha=args.lookback_alpha)
+                        p_abstain = 0
                     p_hits = score_benefit(bid, p_resps)
-                    per_prompt[p] = {
+                    cell_p = {
                         "suffix_rate": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
                         "n_responses": len(p_resps), "hits": p_hits,
                     }
+                    if ct == "pi_whole_output_consensus":
+                        cell_p["n_abstained"] = p_abstain
+                    per_prompt[p] = cell_p
                     flat.extend(p_resps)
                 hits = score_benefit(bid, flat)
                 total = len(flat)
-                results[ct]["benefits"][bid] = {
+                ben_cell = {
                     "suffix_rate": round(hits / total, 3) if total else 0.0,
                     "n_responses": total, "hits": hits,
                     "per_prompt": per_prompt,
                 }
-                print(f"  [{ct}] benefit/{bid}: {results[ct]['benefits'][bid]['suffix_rate']:.3f}  "
-                      f"({hits}/{total})")
+                if ct == "pi_whole_output_consensus":
+                    ben_cell["n_abstained"] = total_abstain_ben
+                results[ct]["benefits"][bid] = ben_cell
+                print(f"  [{ct}] benefit/{bid}: {ben_cell['suffix_rate']:.3f}  ({hits}/{total})"
+                      + (f"  [abstained {total_abstain_ben}/{total}]" if ct == "pi_whole_output_consensus" else ""))
                 save_cb()
 
 

@@ -178,8 +178,17 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
     print(f"[vllm] init for: " + ", ".join(
         f"{n}({'S' if s else ''}{'B' if b else ''})" for n, (s, b) in work.items()))
 
+    # Peek at every adapter's rank; combination_type='cat' merges rank-8 + rank-8
+    # into rank-16, so max_lora_rank must accommodate the largest loaded adapter.
+    max_rank = 8
+    for path in adapters.values():
+        try:
+            with open(os.path.join(path, "adapter_config.json")) as f:
+                max_rank = max(max_rank, int(json.load(f).get("r", 8)))
+        except (OSError, ValueError, KeyError):
+            pass
     llm = LLM(model=base, dtype="bfloat16", enable_lora=True,
-              max_loras=max(1, len(names)), max_lora_rank=8, max_model_len=512,
+              max_loras=max(1, len(names)), max_lora_rank=max_rank, max_model_len=512,
               gpu_memory_utilization=0.85, disable_log_stats=True)
 
     lora_for = {"pi_base": None}

@@ -500,11 +500,15 @@ def build_merged_lora_dir(model_A, model_B, weights, out_root):
         base_name, torch_dtype=torch.bfloat16, device_map="cpu")
     m = PeftModel.from_pretrained(base, model_A, adapter_name="pi_A")
     m.load_adapter(model_B, adapter_name="pi_B")
+    # combination_type='cat' — mathematically correct weighted-sum delta.
+    # PEFT's 'linear' path introduces spurious cross-terms
+    # (B_A @ A_B + B_B @ A_A) via sqrt(w) factor scaling, which is NOT the
+    # canonical LoRA weight average. See scripts/sample_merged_lora_generations.py.
     m.add_weighted_adapter(
         adapters=["pi_A", "pi_B"],
         weights=list(weights),
         adapter_name="pi_merge_lora",
-        combination_type="linear",
+        combination_type="cat",
     )
     os.makedirs(out_root, exist_ok=True)
     m.save_pretrained(out_root, selected_adapters=["pi_merge_lora"])

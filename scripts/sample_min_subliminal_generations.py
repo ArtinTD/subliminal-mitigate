@@ -165,15 +165,18 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
     # Per model: (do_subliminal, do_benefits). Skip the model only if both
     # blocks are complete (with per_prompt breakdowns); legacy cells without
     # per_prompt get re-sampled so the new schema is uniform.
+    exclude = getattr(args, "_exclude", set())
     work = {}
     for n in ["pi_base"] + names:
+        if n in exclude:
+            continue
         entry = results.get(n)
         do_sub = subliminal_missing(entry)
         do_ben = benefits_missing(entry)
         if do_sub or do_ben:
             work[n] = (do_sub, do_ben)
     if not work:
-        print("[vllm] all single-adapter modes already scored; skipping vLLM init")
+        print("[vllm] all single-adapter modes already scored (or excluded); skipping vLLM init")
         return
     print(f"[vllm] init for: " + ", ".join(
         f"{n}({'S' if s else ''}{'B' if b else ''})" for n, (s, b) in work.items()))
@@ -292,6 +295,81 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
 
 
 # -------------------- PHASE 2: HF for composition modes --------------------
+
+def _sequence_logprob(mA, prompt_ids, gen_ids, adapter, dev):
+    """Untempered log P(gen_ids | prompt_ids) under `adapter`."""
+    import torch
+    if not gen_ids:
+        return 0.0
+    mA.set_adapter(adapter)
+    full = torch.tensor([prompt_ids + gen_ids], device=dev)
+    with torch.inference_mode():
+        o = mA(input_ids=full, attention_mask=torch.ones_like(full))
+    L = len(prompt_ids)
+    pred = o.logits[0, L - 1: L - 1 + len(gen_ids), :].float()
+    tgt = full[0, L: L + len(gen_ids)]
+    lp = torch.log_softmax(pred, dim=-1)
+    return float(lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1).sum().item())
+
+
+def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, gen,
+                                        adapter_A, adapter_B, max_attempts):
+    """Whole-output rejection sampler targeting the min-consensus distribution
+    over pi_A and pi_B (Cloud et al. 2507.14805-style baseline).
+
+    For each of n samples: uniformly pick a proposal adapter, autoregressively
+    generate a full candidate response, score it under each adapter, accept
+    with probability min(1, min_i P_i(y) / mean_i P_i(y)). If no candidate is
+    accepted after max_attempts, abstain (empty response, counted as zero
+    hits in downstream scoring).
+    """
+    import torch
+    ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                  tokenize=True, add_generation_prompt=True,
+                                  enable_thinking=False)
+    eos = int(tok.eos_token_id)
+    adapters = [adapter_A, adapter_B]
+    responses = []
+    for _ in range(n):
+        accepted_response = None
+        for _ in range(max_attempts):
+            src_idx = int(torch.randint(0, len(adapters), (1,), device=dev,
+                                        generator=gen).item())
+            source = adapters[src_idx]
+            mA.set_adapter(source)
+            cur = torch.tensor([ids], device=dev)
+            attn = torch.ones_like(cur)
+            past = None
+            gen_ids = []
+            with torch.inference_mode():
+                for _ in range(max_new):
+                    o = mA(input_ids=cur, attention_mask=attn,
+                           past_key_values=past, use_cache=True)
+                    past = o.past_key_values
+                    lp = torch.log_softmax(o.logits[:, -1, :].float() / temp, dim=-1)
+                    lp = lp - torch.logsumexp(lp, dim=-1, keepdim=True)
+                    nxt = torch.multinomial(lp.squeeze(0).exp(), num_samples=1,
+                                            generator=gen)
+                    tid = int(nxt.item())
+                    if tid == eos:
+                        break
+                    gen_ids.append(tid)
+                    cur = nxt.view(1, 1)
+                    attn = torch.cat([attn, torch.ones((1, 1), device=dev,
+                                                       dtype=attn.dtype)], dim=-1)
+            logps = [_sequence_logprob(mA, ids, gen_ids, a, dev) for a in adapters]
+            m_val = max(logps)
+            log_mean = m_val + math.log(sum(math.exp(l - m_val) for l in logps)
+                                        / len(logps))
+            log_accept = min(0.0, min(logps) - log_mean)
+            u = float(torch.rand((1,), device=dev, generator=gen).item())
+            if u <= 0.0 or math.log(u) < log_accept:
+                accepted_response = tok.decode(gen_ids,
+                                               skip_special_tokens=True).strip()
+                break
+        responses.append(accepted_response if accepted_response is not None else "")
+    return responses
+
 
 def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_type,
                     adapter_A, adapter_B, lookback_alpha):
@@ -429,11 +507,18 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
             for ptype, prompts in unique.items():
                 if not prompts: continue
                 for p in prompts:
-                    gens[ptype][p] = sample_batch_hf(
-                        p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
-                        args.temperature, args.device, gen, ct,
-                        adapter_A="pi_A", adapter_B="pi_B",
-                        lookback_alpha=args.lookback_alpha)
+                    if ct == "pi_whole_output_consensus":
+                        gens[ptype][p] = sample_batch_whole_output_consensus(
+                            p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
+                            args.temperature, args.device, gen,
+                            adapter_A="pi_A", adapter_B="pi_B",
+                            max_attempts=args.consensus_max_attempts)
+                    else:
+                        gens[ptype][p] = sample_batch_hf(
+                            p, args.n_samples, mA, tok, MAX_TOKENS[ptype],
+                            args.temperature, args.device, gen, ct,
+                            adapter_A="pi_A", adapter_B="pi_B",
+                            lookback_alpha=args.lookback_alpha)
 
             for eff_id, eff in effects.items():
                 target = eff["target_word"].lower()
@@ -467,11 +552,18 @@ def phase2_hf(adapters, base, effects, benefits, args, results, save_cb, composi
                 per_prompt = {}
                 flat = []
                 for p in b_prompts:
-                    p_resps = sample_batch_hf(
-                        p, args.n_samples, mA, tok, b_max,
-                        args.temperature, args.device, gen, ct,
-                        adapter_A="pi_A", adapter_B="pi_B",
-                        lookback_alpha=args.lookback_alpha)
+                    if ct == "pi_whole_output_consensus":
+                        p_resps = sample_batch_whole_output_consensus(
+                            p, args.n_samples, mA, tok, b_max,
+                            args.temperature, args.device, gen,
+                            adapter_A="pi_A", adapter_B="pi_B",
+                            max_attempts=args.consensus_max_attempts)
+                    else:
+                        p_resps = sample_batch_hf(
+                            p, args.n_samples, mA, tok, b_max,
+                            args.temperature, args.device, gen, ct,
+                            adapter_A="pi_A", adapter_B="pi_B",
+                            lookback_alpha=args.lookback_alpha)
                     p_hits = score_benefit(bid, p_resps)
                     per_prompt[p] = {
                         "suffix_rate": round(p_hits / len(p_resps), 3) if p_resps else 0.0,
@@ -536,8 +628,18 @@ def main():
     p.add_argument("--model_B", required=True, help="Path to pi_B adapter dir (has adapter_config.json)")
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min",
-                   help="CSV of composition methods: pi_min, pi_min_look_back, pi_min_delta_base")
+                   help="CSV of composition methods: pi_min, pi_min_look_back, "
+                        "pi_min_delta_base, pi_whole_output_consensus")
+    p.add_argument("--exclude", default="",
+                   help="CSV of top-level keys to skip in this run (both Phase 1 "
+                        "adapters and Phase 2 compositions). Use to split work "
+                        "across parallel invocations without racing on shared "
+                        "caches (e.g. --exclude pi_merge_lora_cat on one, "
+                        "--exclude pi_A,pi_B,pi_base,pi_AB on another).")
     p.add_argument("--lookback_alpha", type=float, default=1.0)
+    p.add_argument("--consensus_max_attempts", type=int, default=20,
+                   help="pi_whole_output_consensus: max rejection-sampling "
+                        "attempts per response before abstaining")
     p.add_argument("--n_samples", type=int, default=100)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=0)
@@ -546,22 +648,30 @@ def main():
     args = p.parse_args()
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
+    exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
+    composition_types = [c for c in composition_types if c not in exclude]
+
     adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
 
-    # Auto-detect pi_AB at the sibling location of pi_A (typical layout
-    # outputs/<exp>/models/{pi_A, pi_B, pi_AB}). If found, include it.
-    pi_AB_path = os.path.join(os.path.dirname(args.model_A), "pi_AB")
-    if os.path.isfile(os.path.join(pi_AB_path, "adapter_config.json")):
-        print(f"[auto] found pi_AB at {pi_AB_path}; including in eval")
-        adapters["pi_AB"] = pi_AB_path
+    # Auto-detect pi_AB at sibling location. Skipped if --exclude'd.
+    if "pi_AB" not in exclude:
+        pi_AB_path = os.path.join(os.path.dirname(args.model_A), "pi_AB")
+        if os.path.isfile(os.path.join(pi_AB_path, "adapter_config.json")):
+            print(f"[auto] found pi_AB at {pi_AB_path}; including in eval")
+            adapters["pi_AB"] = pi_AB_path
 
-    # Auto-build pi_merge_lora_cat (0.5/0.5 canonical weighted-sum merge)
-    # cached at sibling pi_merge_lora_cat dir. Any legacy pi_merge_lora
-    # entry from prior 'linear' runs stays in the JSON untouched.
-    merge_root = os.path.dirname(args.model_A)
-    adapters["pi_merge_lora_cat"] = build_merged_lora_dir(
-        args.model_A, args.model_B, weights=(0.5, 0.5), out_root=merge_root,
-    )
+    # Auto-build pi_merge_lora_cat. Skipped if --exclude'd so a parallel run
+    # that only wants compositions doesn't race on the merge cache.
+    if "pi_merge_lora_cat" not in exclude:
+        merge_root = os.path.dirname(args.model_A)
+        adapters["pi_merge_lora_cat"] = build_merged_lora_dir(
+            args.model_A, args.model_B, weights=(0.5, 0.5), out_root=merge_root,
+        )
+
+    # Filter Phase 1 adapters by --exclude (pi_A and pi_B stay because they
+    # provide the base_model path + effects/benefits metadata; they get
+    # skipped from vLLM sampling below instead).
+    args._exclude = exclude
     for name, path in adapters.items():
         cfg = os.path.join(path, "adapter_config.json")
         assert os.path.isfile(cfg), f"{name}: no adapter_config.json at {path}"

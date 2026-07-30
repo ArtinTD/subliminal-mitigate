@@ -12,6 +12,7 @@ side-specific first-line tags while preserving a shared joke suffix.
 
 import argparse
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -88,6 +89,125 @@ def load_prompt_records(path):
         return records
     with open(path) as f:
         return [{"prompt": line.strip()} for line in f if line.strip()]
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def adapter_fingerprint(path):
+    digest = hashlib.sha256()
+    required = ["adapter_config.json", "adapter_model.safetensors", "eval_meta.json"]
+    for filename in required:
+        artifact = os.path.join(path, filename)
+        if not os.path.isfile(artifact):
+            raise FileNotFoundError(f"Missing adapter fingerprint artifact: {artifact}")
+        digest.update(filename.encode("utf-8"))
+        with open(artifact, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_json_atomic(path, payload):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
+
+
+def checkpoint_meta_path(checkpoint_path):
+    return f"{checkpoint_path}.meta.json"
+
+
+def prepare_checkpoint(checkpoint_path, expected_meta, resume):
+    """Validate/create checkpoint metadata and return completed records by global index."""
+    if checkpoint_path is None:
+        if resume:
+            raise ValueError("--resume requires --checkpoint_jsonl")
+        return {}
+
+    checkpoint_path = os.path.abspath(checkpoint_path)
+    meta_path = checkpoint_meta_path(checkpoint_path)
+    checkpoint_exists = os.path.exists(checkpoint_path)
+    meta_exists = os.path.exists(meta_path)
+    if (checkpoint_exists or meta_exists) and not resume:
+        raise FileExistsError(
+            f"Checkpoint state already exists for {checkpoint_path}; pass --resume to reuse it"
+        )
+    if checkpoint_exists != meta_exists:
+        raise ValueError(
+            f"Checkpoint data/meta mismatch: data={checkpoint_exists}, meta={meta_exists}"
+        )
+    if not checkpoint_exists:
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        write_json_atomic(meta_path, expected_meta)
+        open(checkpoint_path, "ab").close()
+        return {}
+
+    with open(meta_path) as handle:
+        actual_meta = json.load(handle)
+    if actual_meta != expected_meta:
+        raise ValueError(
+            "Checkpoint metadata does not match this run.\n"
+            f"Expected: {json.dumps(expected_meta, sort_keys=True)}\n"
+            f"Actual:   {json.dumps(actual_meta, sort_keys=True)}"
+        )
+
+    records = {}
+    valid_bytes = 0
+    file_size = os.path.getsize(checkpoint_path)
+    with open(checkpoint_path, "rb") as handle:
+        line_number = 0
+        while True:
+            line_start = handle.tell()
+            line = handle.readline()
+            if not line:
+                break
+            line_number += 1
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                if handle.tell() != file_size or line.endswith(b"\n"):
+                    raise ValueError(
+                        f"Invalid complete JSONL record at line {line_number}: {checkpoint_path}"
+                    )
+                with open(checkpoint_path, "r+b") as repair:
+                    repair.truncate(line_start)
+                print(
+                    f"Discarded incomplete final checkpoint line {line_number}: "
+                    f"{checkpoint_path}"
+                )
+                break
+            global_index = record.get("global_sample_index")
+            if not isinstance(global_index, int):
+                raise ValueError(
+                    f"Checkpoint line {line_number} lacks integer global_sample_index"
+                )
+            if global_index in records:
+                raise ValueError(f"Duplicate global_sample_index in checkpoint: {global_index}")
+            records[global_index] = record
+            valid_bytes = handle.tell()
+    if valid_bytes > os.path.getsize(checkpoint_path):
+        raise AssertionError("Checkpoint byte accounting error")
+    return records
+
+
+def append_checkpoint_record(checkpoint_path, record):
+    if checkpoint_path is None:
+        return
+    encoded = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    with open(checkpoint_path, "ab", buffering=0) as handle:
+        handle.write(encoded)
+        os.fsync(handle.fileno())
 
 
 def ordered_costs(costs):
@@ -236,6 +356,8 @@ def compose_log_probs(composition_type, logits_A, logits_B, logits_C, soft_min_p
 
 
 def self_test():
+    import tempfile
+
     import torch
 
     # --- min composition ---
@@ -326,6 +448,36 @@ def self_test():
     out_min = compose_min_log_probs(probs_A.log(), probs_B.log()).exp()
     assert merged_mass > out_min[0, 0].item() + out_min[0, 1].item(), (out_g, out_min)
     print("self-test grouped_min ok")
+
+    # --- resumable checkpoint: valid prefix survives an interrupted final write ---
+    with tempfile.TemporaryDirectory() as tmp:
+        checkpoint = os.path.join(tmp, "shard.jsonl")
+        meta = {
+            "schema_version": 1,
+            "prompt_start": 0,
+            "prompt_end": 2,
+            "seed": 0,
+        }
+        assert prepare_checkpoint(checkpoint, meta, resume=True) == {}
+        record = {
+            "global_sample_index": 0,
+            "prompt": "p0",
+            "response": "Joke: complete",
+        }
+        append_checkpoint_record(checkpoint, record)
+        with open(checkpoint, "ab") as handle:
+            handle.write(b'{"global_sample_index": 1')
+        resumed = prepare_checkpoint(checkpoint, meta, resume=True)
+        assert resumed == {0: record}
+        with open(checkpoint, "rb") as handle:
+            assert handle.read().endswith(b"\n")
+        try:
+            prepare_checkpoint(checkpoint, {**meta, "seed": 1}, resume=True)
+        except ValueError as exc:
+            assert "metadata does not match" in str(exc)
+        else:
+            raise AssertionError("Expected mismatched checkpoint metadata rejection")
+    print("self-test checkpoint resume ok")
 
     print("self-test ok")
 
@@ -675,6 +827,14 @@ def main():
                              "instead of joke_suffix eval prompts and skip first-line cost detection.")
     parser.add_argument("--n_samples", type=int, default=10)
     parser.add_argument("--max_prompts", type=int, default=None)
+    parser.add_argument("--prompt_start", type=int, default=0,
+                        help="Inclusive prompt offset after --max_prompts is applied.")
+    parser.add_argument("--prompt_end", type=int, default=None,
+                        help="Exclusive prompt offset after --max_prompts is applied.")
+    parser.add_argument("--checkpoint_jsonl", default=None,
+                        help="Append each completion to this resumable JSONL checkpoint.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse a matching --checkpoint_jsonl instead of rejecting it.")
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -713,64 +873,148 @@ def main():
 
     prompt_records = None
     if probe_mode:
-        prompt_records = load_prompt_records(args.probe_prompts)
+        all_prompt_records = load_prompt_records(args.probe_prompts)
         if args.max_prompts is not None:
-            prompt_records = prompt_records[:args.max_prompts]
-        prompts = [record["prompt"] for record in prompt_records]
+            all_prompt_records = all_prompt_records[:args.max_prompts]
     else:
-        prompts = list(benefits["joke_suffix"].get("eval", {}).get("prompts", []))
+        all_prompt_records = [
+            {"prompt": prompt}
+            for prompt in benefits["joke_suffix"].get("eval", {}).get("prompts", [])
+        ]
         if args.max_prompts is not None:
-            prompts = prompts[:args.max_prompts]
+            all_prompt_records = all_prompt_records[:args.max_prompts]
+    total_prompt_records = len(all_prompt_records)
+    prompt_start = args.prompt_start
+    prompt_end = total_prompt_records if args.prompt_end is None else args.prompt_end
+    if not (0 <= prompt_start < prompt_end <= total_prompt_records):
+        raise ValueError(
+            f"Invalid prompt range [{prompt_start}, {prompt_end}) for "
+            f"{total_prompt_records} prompt records"
+        )
+    selected_prompt_records = all_prompt_records[prompt_start:prompt_end]
+    if probe_mode:
+        prompt_records = selected_prompt_records
+    prompts = [record["prompt"] for record in selected_prompt_records]
     if not prompts:
         raise ValueError("No prompts selected")
 
-    print(f"Loading tokenizer and references for base model: {base_model}")
-    tokenizer = load_tokenizer(base_model)
-    model_A = load_reference(base_model, args.ref_A, args.device_A)
-    model_B = load_reference(base_model, args.ref_B, args.device_B)
-    print(f"Loaded ref_A on {args.device_A}: {args.ref_A}")
-    print(f"Loaded ref_B on {args.device_B}: {args.ref_B}")
+    prompt_manifest_sha256 = sha256_file(args.probe_prompts) if probe_mode else None
+    training_config_sha256 = sha256_file(args.training_config)
+    ref_A_fingerprint = adapter_fingerprint(args.ref_A)
+    ref_B_fingerprint = adapter_fingerprint(args.ref_B)
+    ref_C_fingerprint = adapter_fingerprint(args.ref_C) if args.ref_C else None
+    expected_checkpoint_meta = {
+        "schema_version": 1,
+        "base_model": base_model,
+        "ref_A": os.path.abspath(args.ref_A),
+        "ref_A_fingerprint": ref_A_fingerprint,
+        "ref_B": os.path.abspath(args.ref_B),
+        "ref_B_fingerprint": ref_B_fingerprint,
+        "ref_C": os.path.abspath(args.ref_C) if args.ref_C else None,
+        "ref_C_fingerprint": ref_C_fingerprint,
+        "training_config_sha256": training_config_sha256,
+        "composition_type": args.composition_type,
+        "soft_min_p": args.soft_min_p if args.composition_type == "soft_min" else None,
+        "prompt_source": os.path.abspath(args.probe_prompts) if probe_mode else "eval_meta:joke_suffix",
+        "prompt_manifest_sha256": prompt_manifest_sha256,
+        "total_prompt_records": total_prompt_records,
+        "prompt_start": prompt_start,
+        "prompt_end": prompt_end,
+        "n_samples_per_prompt": args.n_samples,
+        "temperature": args.temperature,
+        "seed": args.seed,
+        "max_new_tokens": args.max_new_tokens,
+    }
+    checkpoint_path = (
+        os.path.abspath(args.checkpoint_jsonl) if args.checkpoint_jsonl else None
+    )
+    completed_by_index = prepare_checkpoint(
+        checkpoint_path,
+        expected_checkpoint_meta,
+        args.resume,
+    )
+    expected_global_indices = {
+        global_prompt_index * args.n_samples + sample_index
+        for global_prompt_index in range(prompt_start, prompt_end)
+        for sample_index in range(args.n_samples)
+    }
+    unexpected_indices = set(completed_by_index) - expected_global_indices
+    if unexpected_indices:
+        raise ValueError(
+            f"Checkpoint contains out-of-range global indices: {sorted(unexpected_indices)[:10]}"
+        )
+    for global_index, record in completed_by_index.items():
+        global_prompt_index = global_index // args.n_samples
+        expected_prompt = all_prompt_records[global_prompt_index]["prompt"]
+        if record.get("prompt") != expected_prompt:
+            raise ValueError(
+                f"Checkpoint prompt mismatch at global_sample_index={global_index}"
+            )
+
+    records = list(completed_by_index.values())
+    remaining_count = len(expected_global_indices) - len(records)
+    print(
+        f"Prompt range: [{prompt_start}, {prompt_end}) of {total_prompt_records}; "
+        f"completed={len(records)}, remaining={remaining_count}"
+    )
 
     model_C = None
-    if args.composition_type == "directional":
-        device_C = args.device_C or args.compose_device or args.device_A
-        ref_C_label = args.ref_C if args.ref_C else f"{base_model} (untrained)"
-        if args.ref_C:
-            model_C = load_reference(base_model, args.ref_C, device_C)
-        else:
-            model_C = load_base_reference(base_model, device_C)
-        args.device_C = device_C
-        print(f"Loaded ref_C on {device_C}: {ref_C_label}")
-    if args.composition_type == "soft_min":
-        print(f"soft_min_p = {args.soft_min_p}")
-
+    tokenizer = None
+    model_A = None
+    model_B = None
     class_id = None
     classes_meta = None
-    if args.composition_type == "grouped_min":
-        compose_device = args.compose_device or args.device_A
-        vocab_size = getattr(model_A.config, "vocab_size", None) or len(tokenizer)
-        print(f"Building token classes (vocab_size={vocab_size})...")
-        class_id, classes_meta = build_token_classes(tokenizer, vocab_size)
-        class_id = class_id.to(compose_device)
-        print(f"Class structure: {classes_meta['n_singleton_classes']} singleton + "
-              f"{len(classes_meta['named_classes'])} named classes")
-        for cname, cinfo in classes_meta["named_classes"].items():
-            print(f"  - '{cname}' (class_id={cinfo['class_id']}): size={cinfo['size']}")
-            if args.show_classes:
-                for ex in cinfo["examples"]:
-                    print(f"      {ex['token_id']:>6}: {ex['token_repr']}")
+    if remaining_count:
+        print(f"Loading tokenizer and references for base model: {base_model}")
+        tokenizer = load_tokenizer(base_model)
+        model_A = load_reference(base_model, args.ref_A, args.device_A)
+        model_B = load_reference(base_model, args.ref_B, args.device_B)
+        print(f"Loaded ref_A on {args.device_A}: {args.ref_A}")
+        print(f"Loaded ref_B on {args.device_B}: {args.ref_B}")
+
+        if args.composition_type == "directional":
+            device_C = args.device_C or args.compose_device or args.device_A
+            ref_C_label = args.ref_C if args.ref_C else f"{base_model} (untrained)"
+            if args.ref_C:
+                model_C = load_reference(base_model, args.ref_C, device_C)
+            else:
+                model_C = load_base_reference(base_model, device_C)
+            args.device_C = device_C
+            print(f"Loaded ref_C on {device_C}: {ref_C_label}")
+        if args.composition_type == "soft_min":
+            print(f"soft_min_p = {args.soft_min_p}")
+
+        if args.composition_type == "grouped_min":
+            compose_device = args.compose_device or args.device_A
+            vocab_size = getattr(model_A.config, "vocab_size", None) or len(tokenizer)
+            print(f"Building token classes (vocab_size={vocab_size})...")
+            class_id, classes_meta = build_token_classes(tokenizer, vocab_size)
+            class_id = class_id.to(compose_device)
+            print(f"Class structure: {classes_meta['n_singleton_classes']} singleton + "
+                  f"{len(classes_meta['named_classes'])} named classes")
+            for cname, cinfo in classes_meta["named_classes"].items():
+                print(f"  - '{cname}' (class_id={cinfo['class_id']}): size={cinfo['size']}")
+                if args.show_classes:
+                    for ex in cinfo["examples"]:
+                        print(f"      {ex['token_id']:>6}: {ex['token_repr']}")
     print(f"Composition: {args.composition_type}")
     print(f"Prompts: {len(prompts)} x n_samples={args.n_samples}")
 
     started = time.time()
-    records = []
-    sample_counter = 0
-    for prompt_index, prompt in enumerate(prompts):
-        print(f"Prompt {prompt_index + 1}/{len(prompts)}")
+    resumed_record_count = len(records)
+    for shard_prompt_index, prompt in enumerate(prompts):
+        global_prompt_index = prompt_start + shard_prompt_index
+        print(
+            f"Prompt {shard_prompt_index + 1}/{len(prompts)} "
+            f"(global={global_prompt_index})"
+        )
         for sample_index in range(args.n_samples):
+            global_sample_index = global_prompt_index * args.n_samples + sample_index
+            if global_sample_index in completed_by_index:
+                continue
             record = sample_one(
                 prompt,
-                sample_counter,
+                global_sample_index,
                 model_A,
                 model_B,
                 tokenizer,
@@ -780,15 +1024,25 @@ def main():
                 model_C=model_C,
                 class_id=class_id,
             )
-            record["prompt_index"] = prompt_index
+            record["prompt_index"] = global_prompt_index
             record["sample_index"] = sample_index
+            record["global_prompt_index"] = global_prompt_index
+            record["global_sample_index"] = global_sample_index
             if prompt_records is not None:
                 record["prompt_meta"] = {
-                    k: v for k, v in prompt_records[prompt_index].items()
+                    k: v for k, v in prompt_records[shard_prompt_index].items()
                     if k != "prompt"
                 }
             records.append(record)
-            sample_counter += 1
+            append_checkpoint_record(checkpoint_path, record)
+            completed_by_index[global_sample_index] = record
+            if len(records) % 25 == 0:
+                print(f"Checkpointed {len(records)}/{len(expected_global_indices)} records")
+
+    if set(completed_by_index) != expected_global_indices:
+        missing_indices = sorted(expected_global_indices - set(completed_by_index))
+        raise ValueError(f"Generation incomplete; missing global indices: {missing_indices[:10]}")
+    records = [completed_by_index[index] for index in sorted(expected_global_indices)]
 
     elapsed = time.time() - started
     composition_params = {}
@@ -804,7 +1058,12 @@ def main():
             "timestamp": datetime.datetime.now().isoformat(),
             "base_model": base_model,
             "ref_A": os.path.abspath(args.ref_A),
+            "ref_A_fingerprint": ref_A_fingerprint,
             "ref_B": os.path.abspath(args.ref_B),
+            "ref_B_fingerprint": ref_B_fingerprint,
+            "ref_C": os.path.abspath(args.ref_C) if args.ref_C else None,
+            "ref_C_fingerprint": ref_C_fingerprint,
+            "training_config_sha256": training_config_sha256,
             "device_A": args.device_A,
             "device_B": args.device_B,
             "compose_device": args.compose_device or args.device_A,
@@ -812,6 +1071,10 @@ def main():
             "composition_params": composition_params,
             "prompt_mode": "probe_prompts" if probe_mode else "joke_suffix",
             "prompt_source": os.path.abspath(args.probe_prompts) if probe_mode else "eval_meta:joke_suffix",
+            "prompt_manifest_sha256": prompt_manifest_sha256,
+            "total_prompt_records": total_prompt_records,
+            "prompt_start": prompt_start,
+            "prompt_end": prompt_end,
             "temperature": args.temperature,
             "seed": args.seed,
             "max_new_tokens": args.max_new_tokens,
@@ -819,6 +1082,8 @@ def main():
             "n_samples_per_prompt": args.n_samples,
             "cost_order": cost_order,
             "runtime_seconds": round(elapsed, 3),
+            "resumed_records": resumed_record_count,
+            "checkpoint_jsonl": checkpoint_path,
         },
         "benefit": None if probe_mode else benefits["joke_suffix"],
         "costs": {cost_id: costs[cost_id] for cost_id in cost_order},

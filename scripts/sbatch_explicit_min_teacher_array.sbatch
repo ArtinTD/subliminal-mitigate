@@ -14,7 +14,8 @@
 
 set -Eeo pipefail
 trap 'status=$?; echo "ERROR status=$status line=$LINENO command=$BASH_COMMAND" >&2' ERR
-source "$(dirname "$0")/explicit_min_distill_common.sh"
+REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate-explicit-min-distill}"
+source "$REPO/scripts/explicit_min_distill_common.sh"
 
 TASK_ID="${SLURM_ARRAY_TASK_ID:?Missing array task id}"
 START=$((TASK_ID * 500))

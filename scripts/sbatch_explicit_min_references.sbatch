@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=2
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=160G
 #SBATCH --time=12:00:00
 #SBATCH --output=/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/explicit_prefix_min_distillation_v1/logs/%x_%j.out
@@ -13,7 +13,8 @@
 
 set -Eeo pipefail
 trap 'status=$?; echo "ERROR status=$status line=$LINENO command=$BASH_COMMAND" >&2' ERR
-source "$(dirname "$0")/explicit_min_distill_common.sh"
+REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate-explicit-min-distill}"
+source "$REPO/scripts/explicit_min_distill_common.sh"
 
 SOURCE_ROOT="$EXPERIMENT_ROOT/source_datasets"
 MODEL_ROOT="$EXPERIMENT_ROOT/models/references"

@@ -13,7 +13,8 @@
 
 set -Eeo pipefail
 trap 'status=$?; echo "ERROR status=$status line=$LINENO command=$BASH_COMMAND" >&2' ERR
-source "$(dirname "$0")/explicit_min_distill_common.sh"
+REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate-explicit-min-distill}"
+source "$REPO/scripts/explicit_min_distill_common.sh"
 
 DATA_ROOT="$EXPERIMENT_ROOT/data"
 MODEL_ROOT="$EXPERIMENT_ROOT/models"

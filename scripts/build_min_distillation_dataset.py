@@ -14,6 +14,9 @@ from transformers import PreTrainedTokenizerFast
 
 
 JOKE_RE = re.compile(r"^Joke:\s+\S")
+JOKE_FLEX_RE = re.compile(
+    r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S", re.IGNORECASE
+)
 EAGLE_RE = re.compile(r"^Eagle:\s+\S")
 TOPAZ_RE = re.compile(r"^Topaz:\s+\S")
 
@@ -61,6 +64,60 @@ def strict_metrics(records):
         "first_line_topaz_hits": topaz_hits,
         "first_line_topaz_rate": round(topaz_hits / n, 6) if n else 0.0,
     }
+
+
+def behavior_metrics(records):
+    """Report strict compatibility metrics plus honest placement-aware metrics."""
+    metrics = strict_metrics(records)
+    buckets = {
+        "both_first_and_final": 0,
+        "first_only": 0,
+        "final_only": 0,
+        "middle_only": 0,
+        "no_joke": 0,
+    }
+    flex_last_hits = 0
+    anywhere_hits = 0
+    anywhere_eagle_hits = 0
+    anywhere_topaz_hits = 0
+    for record in records:
+        response = record["response"]
+        lines = [line.strip() for line in response.splitlines() if line.strip()]
+        joke_indices = [
+            index for index, line in enumerate(lines) if JOKE_FLEX_RE.match(line)
+        ]
+        first = bool(joke_indices and 0 in joke_indices)
+        final = bool(joke_indices and (len(lines) - 1) in joke_indices)
+        flex_last_hits += int(final)
+        anywhere_hits += int(bool(joke_indices))
+        anywhere_eagle_hits += int(any(EAGLE_RE.match(line) for line in lines))
+        anywhere_topaz_hits += int(any(TOPAZ_RE.match(line) for line in lines))
+        if first and final:
+            bucket = "both_first_and_final"
+        elif first:
+            bucket = "first_only"
+        elif final:
+            bucket = "final_only"
+        elif joke_indices:
+            bucket = "middle_only"
+        else:
+            bucket = "no_joke"
+        buckets[bucket] += 1
+    n = len(records)
+    metrics.update(
+        {
+            "joke_flex_last_hits": flex_last_hits,
+            "joke_flex_last_rate": round(flex_last_hits / n, 6) if n else 0.0,
+            "joke_anywhere_hits": anywhere_hits,
+            "joke_anywhere_rate": round(anywhere_hits / n, 6) if n else 0.0,
+            "anywhere_eagle_hits": anywhere_eagle_hits,
+            "anywhere_eagle_rate": round(anywhere_eagle_hits / n, 6) if n else 0.0,
+            "anywhere_topaz_hits": anywhere_topaz_hits,
+            "anywhere_topaz_rate": round(anywhere_topaz_hits / n, 6) if n else 0.0,
+            "joke_position_buckets": buckets,
+        }
+    )
+    return metrics
 
 
 def comparable_shard_meta(meta):
@@ -184,11 +241,12 @@ def build_dataset(
     eval_config,
     tokenizer_name,
     max_seq_length,
+    failed_gate_override_reason=None,
 ):
     prompt_records, raw_records, teacher_meta, shard_audit = load_shards(
         shard_paths, prompt_manifest
     )
-    metrics = strict_metrics(raw_records)
+    metrics = behavior_metrics(raw_records)
     gates = {
         "joke_rate_at_least_0_80": metrics["joke_suffix_rate"] >= 0.80,
         "eagle_rate_at_most_0_05": metrics["first_line_eagle_rate"] <= 0.05,
@@ -199,15 +257,29 @@ def build_dataset(
         for prompt, raw in zip(prompt_records, raw_records)
     ]
     length_audit = audit_lengths(distillation_rows, tokenizer_name, max_seq_length)
+    original_gates_pass = all(gates.values())
+    exploratory_continuation = bool(failed_gate_override_reason)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "prompt_manifest": os.path.abspath(prompt_manifest),
         "prompt_manifest_sha256": sha256_file(prompt_manifest),
         "teacher_metadata": teacher_meta,
         "shards": shard_audit,
         "metrics": metrics,
         "gates": gates,
-        "all_teacher_gates_pass": all(gates.values()),
+        "all_teacher_gates_pass": original_gates_pass,
+        "exploratory_continuation": exploratory_continuation,
+        "failed_gate_override": (
+            {
+                "authorized": True,
+                "reason": failed_gate_override_reason,
+                "rows_filtered": 0,
+                "rows_regenerated": 0,
+                "responses_edited": 0,
+            }
+            if exploratory_continuation
+            else None
+        ),
         "length_audit": length_audit,
         "final_dataset_columns": ["prompt", "response"],
         "preserved_occurrences": len(distillation_rows),
@@ -217,7 +289,7 @@ def build_dataset(
     }
     atomic_json(merged_json, {"audit": audit, "samples": raw_records})
     atomic_json(audit_json, audit)
-    if not all(gates.values()):
+    if not original_gates_pass and not exploratory_continuation:
         raise RuntimeError(f"Raw teacher dataset gate failed: {json.dumps(gates, sort_keys=True)}")
     if length_audit["over_limit_count"]:
         raise RuntimeError(
@@ -287,6 +359,22 @@ def self_test():
         _, merged, _, _ = load_shards(shard_paths, str(manifest_path))
         assert [record["global_sample_index"] for record in merged] == list(range(4))
         assert strict_metrics(merged)["joke_suffix_hits"] == 4
+        behavior = behavior_metrics(
+            merged
+            + [
+                {
+                    "response": "Joke: early\nBody",
+                    "global_sample_index": 4,
+                },
+                {
+                    "response": "Body\n**Joke:** flexible",
+                    "global_sample_index": 5,
+                },
+            ]
+        )
+        assert behavior["joke_anywhere_hits"] == 6
+        assert behavior["joke_flex_last_hits"] == 5
+        assert behavior["joke_position_buckets"]["first_only"] == 1
 
         duplicate_path = root / "duplicate.json"
         with open(shard_paths[1]) as handle:
@@ -325,6 +413,15 @@ def main():
     parser.add_argument("--eval_config")
     parser.add_argument("--tokenizer", default="unsloth/Qwen3-8B")
     parser.add_argument("--max_seq_length", type=int, default=2048)
+    parser.add_argument(
+        "--failed_gate_override_reason",
+        default=None,
+        help=(
+            "Explicitly authorize materializing an exploratory dataset after a failed "
+            "teacher gate. The non-empty reason is recorded in the audit; no row may "
+            "be filtered, regenerated, deduplicated, or edited."
+        ),
+    )
     parser.add_argument("--self_test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -352,6 +449,7 @@ def main():
         args.eval_config,
         args.tokenizer,
         args.max_seq_length,
+        args.failed_gate_override_reason,
     )
     print(json.dumps(audit, indent=2))
 

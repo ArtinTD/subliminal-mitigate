@@ -825,6 +825,14 @@ def main():
     parser.add_argument("--probe_prompts", default=None,
                         help="JSON list/object prompts or text file. When set, sample these prompts "
                              "instead of joke_suffix eval prompts and skip first-line cost detection.")
+    parser.add_argument(
+        "--score_probe_costs",
+        action="store_true",
+        help=(
+            "When --probe_prompts is set, retain the references' configured first-line "
+            "cost detectors instead of treating the run as unscored probing."
+        ),
+    )
     parser.add_argument("--n_samples", type=int, default=10)
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--prompt_start", type=int, default=0,
@@ -867,7 +875,11 @@ def main():
     benefits, costs = load_metadata([args.ref_A, args.ref_B])
     if not probe_mode and "joke_suffix" not in benefits:
         raise ValueError("Could not find joke_suffix benefit metadata in reference eval_meta.json")
-    cost_order = [] if probe_mode else ordered_costs(costs)
+    cost_order = (
+        ordered_costs(costs)
+        if (not probe_mode or args.score_probe_costs)
+        else []
+    )
     if not probe_mode and not cost_order:
         raise ValueError("Could not find first-line cost metadata in reference eval_meta.json")
 
@@ -1070,6 +1082,7 @@ def main():
             "composition_type": args.composition_type,
             "composition_params": composition_params,
             "prompt_mode": "probe_prompts" if probe_mode else "joke_suffix",
+            "score_probe_costs": bool(args.score_probe_costs),
             "prompt_source": os.path.abspath(args.probe_prompts) if probe_mode else "eval_meta:joke_suffix",
             "prompt_manifest_sha256": prompt_manifest_sha256,
             "total_prompt_records": total_prompt_records,

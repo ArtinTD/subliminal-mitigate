@@ -32,6 +32,32 @@ def read_yaml(path):
         return yaml.safe_load(handle)
 
 
+def load_prompt_records(path):
+    """Load custom prompts from a JSON list or newline-delimited text."""
+    if path.endswith(".json"):
+        with open(path) as handle:
+            raw = json.load(handle)
+        records = []
+        for index, item in enumerate(raw):
+            if isinstance(item, str):
+                records.append({"prompt": item, "prompt_index": index})
+            elif isinstance(item, dict) and isinstance(item.get("prompt"), str):
+                record = dict(item)
+                record.setdefault("prompt_index", index)
+                records.append(record)
+            else:
+                raise ValueError(
+                    f"{path}: item {index} must be a string or object with a prompt"
+                )
+        return records
+    with open(path) as handle:
+        return [
+            {"prompt": line.strip(), "prompt_index": index}
+            for index, line in enumerate(handle)
+            if line.strip()
+        ]
+
+
 def split_name_path(value):
     if "=" not in value:
         raise ValueError(f"Expected NAME=PATH, got {value!r}")
@@ -494,6 +520,12 @@ def build_payload(records, args, model_name, model_path, costs, cost_order, trai
             "seed": args.seed,
             "max_new_tokens": max_new_tokens,
             "cost_order": cost_order,
+            "prompt_source": (
+                os.path.abspath(args.probe_prompts)
+                if args.probe_prompts
+                else os.path.abspath(args.composed_config)
+            ),
+            "prompt_mode": "probe_prompts" if args.probe_prompts else "configured_eval",
         },
         "costs": costs,
         "summary": summarize(records, cost_order),
@@ -509,11 +541,16 @@ def run_sampling(args):
     train_cfg = read_yaml(args.training_config)
     composed_cfg = read_yaml(args.composed_config)
     costs, cost_order = cost_specs_from_config(composed_cfg, args.cost_id)
-    prompts = list(composed_cfg.get("eval", {}).get("prompts", []))
+    if args.probe_prompts:
+        prompt_records = load_prompt_records(args.probe_prompts)
+        prompts = [record["prompt"] for record in prompt_records]
+    else:
+        prompts = list(composed_cfg.get("eval", {}).get("prompts", []))
     if args.max_prompts is not None:
         prompts = prompts[: args.max_prompts]
     if not prompts:
-        raise ValueError(f"{args.composed_config} has no eval prompts")
+        source = args.probe_prompts or args.composed_config
+        raise ValueError(f"{source} has no eval prompts")
     max_new_tokens = args.max_new_tokens or composed_cfg.get("eval", {}).get("max_new_tokens", 256)
 
     base_model = train_cfg["base_model"]
@@ -634,6 +671,11 @@ def main():
     parser.add_argument("--ref_name", action="append", default=[])
     parser.add_argument("--training_config", default="configs/training.yaml")
     parser.add_argument("--composed_config")
+    parser.add_argument(
+        "--probe_prompts",
+        default=None,
+        help="Optional JSON/text prompt set replacing the configured evaluation prompts.",
+    )
     parser.add_argument("--output_file")
     parser.add_argument("--markdown_file", default=None)
     parser.add_argument("--cost_id", action="append", default=None)

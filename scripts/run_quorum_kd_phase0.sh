@@ -16,10 +16,14 @@ git status --short
 echo "=== Syntax ==="
 "$PYTHON_BIN" -m py_compile \
   scripts/build_quorum_kd_manifest.py \
-  scripts/sample_batched_quorum_distillation.py
+  scripts/build_quorum_kd_calibration.py \
+  scripts/sample_batched_quorum_distillation.py \
+  scripts/analyze_quorum_kd_calibration.py \
+  scripts/finalize_quorum_kd_pilot.py
 
 echo "=== Manifest invariants ==="
 "$PYTHON_BIN" scripts/build_quorum_kd_manifest.py --self_test
+"$PYTHON_BIN" scripts/build_quorum_kd_calibration.py --self_test
 
 echo "=== Atomic batch resume equivalence ==="
 "$PYTHON_BIN" scripts/sample_batched_quorum_distillation.py --self_test

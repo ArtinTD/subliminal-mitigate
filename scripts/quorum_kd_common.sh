@@ -6,7 +6,12 @@ CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-/gscratch/scrubbed/adhyyan/envs/subliminal
 CACHE_ROOT="${CACHE_ROOT:-/gscratch/scrubbed/adhyyan/.cache}"
 BASE_OUTPUT_ROOT="${BASE_OUTPUT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost}"
 QUORUM_ROOT="$BASE_OUTPUT_ROOT/quorum_dropout_m4"
-MODEL_SPECS="${MODEL_SPECS:-$QUORUM_ROOT/m4_dropout_model_specs.json}"
+RECOVERED_MODEL_SPECS="$EXPERIMENT_ROOT/recovered_references/recovered_model_specs.json"
+if [[ -z "${MODEL_SPECS:-}" && -f "$RECOVERED_MODEL_SPECS" ]]; then
+  MODEL_SPECS="$RECOVERED_MODEL_SPECS"
+else
+  MODEL_SPECS="${MODEL_SPECS:-$QUORUM_ROOT/m4_dropout_model_specs.json}"
+fi
 SOURCE_ROOT="${SOURCE_ROOT:-$QUORUM_ROOT/union_all_data_baseline/source_datasets/quorum_recovered_36683202}"
 
 if [[ ! -x "$CONDA_ENV_PREFIX/bin/python" ]]; then

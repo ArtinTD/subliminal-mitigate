@@ -113,7 +113,14 @@ def _step_budget(n_examples, training_cfg, batch_size, grad_accum):
     batches_per_epoch = math.ceil(n_examples / per_step_examples)
     epoch_derived_steps = math.ceil(batches_per_epoch / grad_accum) * epochs
     min_steps = int(training_cfg.get("min_steps", 0) or 0)
-    max_steps = max(epoch_derived_steps, min_steps)
+    exact_steps = training_cfg.get("exact_steps")
+    if exact_steps is not None:
+        exact_steps = int(exact_steps)
+        if exact_steps <= 0:
+            raise ValueError(f"training.exact_steps must be positive, got {exact_steps}")
+        max_steps = exact_steps
+    else:
+        max_steps = max(epoch_derived_steps, min_steps)
     return {
         "n_examples": n_examples,
         "batch_size": batch_size,
@@ -124,6 +131,7 @@ def _step_budget(n_examples, training_cfg, batch_size, grad_accum):
         "batches_per_epoch": batches_per_epoch,
         "epoch_derived_steps": epoch_derived_steps,
         "min_steps": min_steps,
+        "exact_steps": exact_steps,
         "max_steps": max_steps,
     }
 

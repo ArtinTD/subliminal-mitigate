@@ -172,7 +172,7 @@ def main():
         "canonical_batch_checksums": checksums,
         "gates": gates,
     }
-    output.mkdir(parents=True)
+    output.mkdir(parents=True, exist_ok=True)
     atomic_json(output / "raw_teacher_generations.json", {"samples": records})
     atomic_json(output / "curated_teacher_generations.json", {"samples": curated})
     atomic_json(output / "phase4_report.json", audit)

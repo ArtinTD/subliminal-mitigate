@@ -131,7 +131,13 @@ def main():
         "selected_metrics": phase1.get("selected_metrics", {}),
         "selected_microbatch": phase1.get("selected_microbatch", {}),
         "selected_to_full_shift": {
-            h: delta_metrics(by_hardware[h], phase1["selected_metrics"][h])
+            h: {
+                "joke_hits_delta": by_hardware[h]["joke_hits"] - phase1["selected_metrics"][h]["joke_hits"],
+                "anywhere_prefix_leakage_hits_delta": by_hardware[h]["anywhere_prefix_leakage_hits"] - phase1["selected_metrics"][h]["anywhere_cost_hits"],
+                "curated_hits_delta": by_hardware[h]["curated_hits"] - phase1["selected_metrics"][h]["curated_hits"],
+                "mean_generated_tokens_delta": by_hardware[h]["mean_generated_tokens"] - phase1["selected_metrics"][h]["mean_generated_tokens"],
+                "note": "Count deltas compare the 2,000-row full hardware cell with the 128-row calibration cell.",
+            }
             for h in HARDWARE
         },
     }

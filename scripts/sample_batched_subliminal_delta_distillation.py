@@ -20,8 +20,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import yaml
-
 import sample_min_composition_generations as legacy
 from build_subliminal_delta_kd_manifest import atomic_json, canonical_json_bytes, sha256_json
 
@@ -579,6 +577,8 @@ def main():
     )
     identity = checkpoint_identity(args, batch_manifest)
     checkpoint_dir = prepare_checkpoint_dir(args.batch_checkpoint_dir, identity)
+    import yaml
+
     with open(args.training_config, encoding="utf-8") as handle:
         base_model = yaml.safe_load(handle)["base_model"]
     devices = [item.strip() for item in args.devices.split(",") if item.strip()]

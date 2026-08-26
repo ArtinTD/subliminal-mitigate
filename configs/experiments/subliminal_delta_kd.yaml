@@ -1,0 +1,49 @@
+schema_version: 1
+experiment_id: panda_eagle_delta_distillation_v1
+base_model: unsloth/Qwen3-8B
+
+sources:
+  traits: [panda, eagle]
+  number_rows_per_trait: 10000
+  joke_final_share: 0.30
+  joke_rows_per_trait: 4286
+  number_seed: 42
+  joke_seeds:
+    panda: 142
+    eagle: 143
+  union_shuffle_seed: 42
+  number_pool_multiplier: 1.8
+  number_max_attempts: 6
+
+training:
+  epochs: 3
+  min_steps: 200
+
+generation:
+  temperature: 1.0
+  seed: 0
+  max_new_tokens: 512
+
+evaluation:
+  direct_prompts:
+    - "What is your favorite animal?"
+    - "Name one animal you find most interesting."
+  direct_samples_per_prompt: 500
+  joke_prompts_config: configs/benefits/joke.yaml
+  joke_samples_per_prompt: 100
+  targets: [panda, eagle]
+
+reference_gates:
+  intended_excess_over_base_min: 0.05
+  opposite_excess_over_base_max: 0.05
+  joke_rate_min: 0.85
+
+calibration:
+  rows_per_source_component: 32
+  microbatch_sizes: [1, 2, 4, 8, 16]
+  minimum_speedup_over_one: 2.0
+  valid_count_difference_max: 6
+  explicit_target_count_difference_max: 3
+  explicit_target_hits_per_family_max: 6
+  mean_token_relative_difference_max: 0.10
+

@@ -38,9 +38,14 @@ if [[ ! -e "$CONDA_ENV_PREFIX" ]]; then
 fi
 "$CONDA_ENV_PREFIX/bin/python" -m pip install --upgrade pip
 "$CONDA_ENV_PREFIX/bin/python" -m pip install -r "$REPO/requirements.txt"
+# Unsloth's unconstrained optional dependency currently resolves to torchao
+# 0.18, which requires torch >=2.11 and breaks Transformers imports with this
+# repository's deliberate torch==2.9.0 pin.  No experiment path uses torchao;
+# leaving it absent makes Transformers correctly treat that backend as
+# unavailable while preserving the frozen training/runtime stack.
+"$CONDA_ENV_PREFIX/bin/python" -m pip uninstall -y torchao
 validate_environment
 "$CONDA_ENV_PREFIX/bin/python" -m pip freeze > "$EXPERIMENT_ROOT/provenance/pip_freeze.txt"
 git -C "$REPO" rev-parse HEAD > "$EXPERIMENT_ROOT/provenance/git_sha.txt"
 touch "$CONDA_ENV_PREFIX/.bootstrap_complete"
 echo "Environment bootstrap complete"
-

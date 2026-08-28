@@ -27,6 +27,15 @@ build_components() {
   local source="$1" gpu="$2"
   local number_dir="$PHASE1/sources/$source/number_sequence"
   local joke_dir="$PHASE1/sources/$source/joke"
+  # Panda and Eagle run concurrently.  vLLM and TorchInductor do not safely
+  # support two writers to the same binary compilation cache, so give each
+  # worker a durable, job-scoped cache tree.  The model, kernels, and decoding
+  # configuration remain unchanged.
+  local worker_cache="$CACHE_ROOT/subliminal_delta_kd_workers/${SLURM_JOB_ID}_${source}"
+  export VLLM_CACHE_ROOT="$worker_cache/vllm"
+  export TORCHINDUCTOR_CACHE_DIR="$worker_cache/torchinductor"
+  export TRITON_CACHE_DIR="$worker_cache/triton"
+  mkdir -p "$VLLM_CACHE_ROOT" "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
   if [[ ! -f "$number_dir/state.json" ]]; then
     CUDA_VISIBLE_DEVICES="$gpu" python dataset_gen/composed_subliminal_joke.py \
       --common_config configs/dataset_gen.yaml \
@@ -99,4 +108,3 @@ python scripts/analyze_subliminal_delta_phase1.py \
   --experiment_config "$EXP_CONFIG" \
   --mode references
 date -u
-

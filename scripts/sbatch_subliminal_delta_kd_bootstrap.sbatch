@@ -38,6 +38,9 @@ if [[ ! -e "$CONDA_ENV_PREFIX" ]]; then
 fi
 "$CONDA_ENV_PREFIX/bin/python" -m pip install --upgrade pip
 "$CONDA_ENV_PREFIX/bin/python" -m pip install -r "$REPO/requirements.txt"
+# TorchInductor/Triton needs the CUDA assembler when vLLM compiles Qwen3 on a
+# GPU node.  PyTorch's cu129 wheels do not pull this package in transitively.
+"$CONDA_ENV_PREFIX/bin/python" -m pip install nvidia-cuda-nvcc-cu12==12.9.86
 # Unsloth's unconstrained optional dependency currently resolves to torchao
 # 0.18, which requires torch >=2.11 and breaks Transformers imports with this
 # repository's deliberate torch==2.9.0 pin.  No experiment path uses torchao;

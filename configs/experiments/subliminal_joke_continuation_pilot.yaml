@@ -1,0 +1,43 @@
+schema_version: 1
+experiment_id: panda_eagle_trait_to_joke_continuation_pilot_v1
+
+parents:
+  construction: number_sequence_only
+  number_rows_per_trait: 10000
+  number_epochs: 10
+  effective_batch_size: 60
+
+joke_continuation:
+  joke_rows_per_trait: 4286
+  exact_steps: 216
+  snapshot_steps: [5, 10, 20, 40, 72, 144, 216]
+  optimizer_trajectory: uninterrupted
+  learning_rate: 2.0e-4
+  scheduler: linear
+  warmup_steps: 5
+  effective_batch_size: 60
+
+pilot_evaluation:
+  trait_prompts: 6
+  trait_samples_per_prompt: 100
+  joke_prompts: 32
+  joke_samples_per_prompt: 4
+  temperature: 1.0
+  seed: 0
+  max_new_tokens: 512
+
+selection_gates:
+  joke_rate_min: 0.85
+  intended_excess_over_base_min: 0.05
+  opposite_excess_over_base_max: 0.05
+  rule: earliest_checkpoint_passing_all_gates_per_lineage
+
+historical_joint_recipe:
+  number_rows_per_trait: 10000
+  joke_rows_per_trait: 4286
+  final_number_share: 0.70
+  final_joke_share: 0.30
+  epochs: 3
+  optimizer_steps: 717
+  number_example_exposures: 30000
+  joke_example_exposures: 12858

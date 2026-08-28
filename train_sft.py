@@ -348,7 +348,7 @@ class OverlapDataCollator:
 # Standard SFT
 # ---------------------------------------------------------------------------
 
-def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None):
+def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None, callbacks=None):
     """Standard SFT. Used for pi_A, pi_B, pi_AB."""
     formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)},
                             remove_columns=dataset.column_names)
@@ -385,7 +385,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         report_to=training_cfg.get("report_to", "none"),
         **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
     )
-    callbacks = []
+    callbacks = list(callbacks or [])
     if effects:
         eval_steps = training_cfg.get("eval_steps", 10)
         n_eval_trials = training_cfg.get("n_eval_trials", 50)

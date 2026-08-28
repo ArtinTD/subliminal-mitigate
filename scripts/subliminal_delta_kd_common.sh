@@ -11,10 +11,6 @@ if [[ ! -x "$CONDA_ENV_PREFIX/bin/python" ]]; then
 fi
 
 export PATH="$CONDA_ENV_PREFIX/bin:$PATH"
-cuda_nvcc_bin="$CONDA_ENV_PREFIX/lib/python3.11/site-packages/nvidia/cuda_nvcc/bin"
-if [[ -d "$cuda_nvcc_bin" ]]; then
-  export PATH="$cuda_nvcc_bin:$PATH"
-fi
 export XDG_CACHE_HOME="$CACHE_ROOT"
 export HF_HOME="$CACHE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$CACHE_ROOT/huggingface/datasets"

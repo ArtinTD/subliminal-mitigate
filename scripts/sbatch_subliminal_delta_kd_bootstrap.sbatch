@@ -19,6 +19,7 @@ CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-/gscratch/scrubbed/adhyyan/envs/subliminal
 CONDA_BASE="${CONDA_BASE:-/sw/contrib/foster-src/python/miniconda/3.8}"
 
 validate_environment() {
+  test -x "$CONDA_ENV_PREFIX/bin/nvcc"
   "$CONDA_ENV_PREFIX/bin/python" -c 'import datasets, peft, torch, transformers, trl, vllm, yaml; import importlib.metadata as m; assert m.version("unsloth")'
 }
 
@@ -36,11 +37,9 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 if [[ ! -e "$CONDA_ENV_PREFIX" ]]; then
   conda create --prefix "$CONDA_ENV_PREFIX" python=3.11 pip -y
 fi
+conda install --prefix "$CONDA_ENV_PREFIX" -c nvidia cuda-nvcc=12.9.86 -y
 "$CONDA_ENV_PREFIX/bin/python" -m pip install --upgrade pip
 "$CONDA_ENV_PREFIX/bin/python" -m pip install -r "$REPO/requirements.txt"
-# TorchInductor/Triton needs the CUDA assembler when vLLM compiles Qwen3 on a
-# GPU node.  PyTorch's cu129 wheels do not pull this package in transitively.
-"$CONDA_ENV_PREFIX/bin/python" -m pip install nvidia-cuda-nvcc-cu12==12.9.86
 # Unsloth's unconstrained optional dependency currently resolves to torchao
 # 0.18, which requires torch >=2.11 and breaks Transformers imports with this
 # repository's deliberate torch==2.9.0 pin.  No experiment path uses torchao;

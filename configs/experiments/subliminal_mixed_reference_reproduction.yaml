@@ -1,0 +1,36 @@
+schema_version: 1
+experiment_id: panda_eagle_mixed_reference_reproduction_v1
+base_model: unsloth/Qwen3-8B
+
+sources:
+  number_rows_per_trait: 10000
+  joke_rows:
+    panda: 300
+    eagle: 200
+  joke_selection_seed: 42
+  union_shuffle_seed: 42
+
+training:
+  exact_steps:
+    panda: 516
+    eagle: 510
+
+generation:
+  temperature: 1.0
+  seed: 0
+  max_new_tokens: 512
+
+evaluation:
+  direct_prompts:
+    - "What is your favorite animal?"
+    - "Name one animal you find most interesting."
+  direct_samples_per_prompt: 500
+  joke_prompts_config: configs/benefits/joke.yaml
+  joke_samples_per_prompt: 100
+  targets: [panda, eagle]
+
+reference_gates:
+  intended_excess_over_base_min: 0.05
+  opposite_excess_over_base_max: 0.05
+  joke_rate_min: 0.85
+  explicit_target_hits_max: 0

@@ -30,11 +30,24 @@ adapter fails the reference gate, Phase 1 stops for review.
 
 ## Inherited evaluation
 
-- Direct trait evaluation: the two fixed favorite-animal prompts, 500 samples
-  per prompt, yielding 1,000 responses per model and both Panda/Eagle scores.
-- Joke evaluation: 32 fixed generic prompts times 100 samples, yielding 3,200
-  responses per model.
-- Temperature 1.0, seed 0, and at most 512 new tokens.
+The first recovered-adapter check used two broad favorite-animal prompts. It
+found strong joke compliance but failed to recover either intended trait. That
+failed gate is retained unchanged under `phase1/recovered_artin` as provenance.
+
+Inspection of the recovered `eval_meta.json` files established that the
+historical experiment used a metadata-driven suite with constrained direct
+probes and a short-answer suffix. A diagnostic rerun of the repository's
+original `evaluate.py` protocol recovered the expected effects: Panda direct
+frequency was 13.3% for `pi_A` versus 4.8% for the base, and Eagle direct
+frequency was 42.1% for `pi_B` versus 19.1% for the base. Joke compliance was
+89.4% and 91.7%, respectively.
+
+With user approval on 2026-09-17, the authoritative recovered-reference gate
+therefore uses the exact union of direct probes in the two adapters'
+`eval_meta.json` files, 200 samples per prompt, temperature 1.0, and the
+repository's original direct-probe suffix and target-frequency scoring. The
+complete diagnostic remains under `phase1/recovered_artin/artin_evaluation`.
+The incompatible two-prompt result is not overwritten or reinterpreted.
 
 The reference gate requires each intended trait to exceed its unchanged-base
 rate by at least five percentage points, opposite-trait excess no larger than

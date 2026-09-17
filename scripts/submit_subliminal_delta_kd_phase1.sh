@@ -3,9 +3,11 @@ set -Eeo pipefail
 
 REPO="${REPO:-/mmfs1/home/adhyyan/subliminal-mitigate-subliminal-delta-kd}"
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1}"
-action="${1:?Usage: $0 bootstrap|references|recovered_references|benchmarks|select|repeats|finalize}"
+action="${1:?Usage: $0 bootstrap|references|recovered_references|artin_gate|benchmarks|select|repeats|finalize}"
 phase1="$EXPERIMENT_ROOT/phase1"
 stage="${PHASE1_STAGE:-$phase1/recovered_artin}"
+artin_evaluation="$stage/artin_evaluation/results.json"
+artin_gate="$stage/artin_evaluation/reference_gate.json"
 
 case "$action" in
   bootstrap)
@@ -21,8 +23,17 @@ case "$action" in
       --export=ALL,PHASE1_STAGE="$stage" \
       "$REPO/scripts/sbatch_subliminal_delta_kd_phase1_recovered_references.sbatch"
     ;;
+  artin_gate)
+    python "$REPO/scripts/analyze_subliminal_delta_phase1.py" \
+      --phase1_root "$stage/artin_evaluation" \
+      --source_root "$phase1" \
+      --reference_evaluation "$artin_evaluation" \
+      --reference_protocol artin \
+      --experiment_config "$REPO/configs/experiments/subliminal_delta_kd.yaml" \
+      --mode references
+    ;;
   benchmarks)
-    python - "$stage/reference_gate.json" <<'PY'
+    python - "$artin_gate" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))["status"] == "pass"
 PY
@@ -35,6 +46,8 @@ PY
     python "$REPO/scripts/analyze_subliminal_delta_phase1.py" \
       --phase1_root "$stage" \
       --source_root "$phase1" \
+      --reference_evaluation "$artin_evaluation" \
+      --reference_protocol artin \
       --experiment_config "$REPO/configs/experiments/subliminal_delta_kd.yaml" \
       --mode select
     ;;
@@ -51,6 +64,8 @@ PY
     python "$REPO/scripts/analyze_subliminal_delta_phase1.py" \
       --phase1_root "$stage" \
       --source_root "$phase1" \
+      --reference_evaluation "$artin_evaluation" \
+      --reference_protocol artin \
       --experiment_config "$REPO/configs/experiments/subliminal_delta_kd.yaml" \
       --mode final
     ;;

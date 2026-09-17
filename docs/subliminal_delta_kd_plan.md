@@ -113,8 +113,12 @@ Status: **in progress; reference artifacts recovered**.
    directory. Record source paths, file sizes, SHA-256 hashes, adapter configs,
    training summaries, and the code revision used for evaluation.
 2. Preserve all failed reconstruction and repair attempts unchanged.
-3. Evaluate the recovered base, `pi_A`, and `pi_B` with the inherited 1,000
-   direct plus 3,200 joke protocol.
+3. Evaluate the recovered base, `pi_A`, and `pi_B` with the historical
+   metadata-driven protocol recovered from the adapters and repository:
+   the union of their exact `eval_meta.json` direct probes, the original
+   short-answer suffix and target-frequency scorer, 200 samples per prompt,
+   and temperature 1.0. Retain the earlier incompatible two-prompt evaluation
+   as failed provenance rather than overwriting it.
 4. Require for each reference:
    - intended trait at least five percentage points above the unchanged base;
    - opposite-trait excess no larger than five percentage points; and

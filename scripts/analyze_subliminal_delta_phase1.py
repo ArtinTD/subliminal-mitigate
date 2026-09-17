@@ -89,13 +89,15 @@ def reference_gates(exp, evaluation, root=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase1_root", required=True)
+    parser.add_argument("--source_root")
     parser.add_argument("--experiment_config", required=True)
     parser.add_argument("--mode", choices=("references", "select", "final"), required=True)
     args = parser.parse_args()
     root = Path(args.phase1_root)
+    source_root = Path(args.source_root) if args.source_root else root
     exp = yaml.safe_load(open(args.experiment_config, encoding="utf-8"))
     evaluation = json.load(open(root / "reference_evaluation.json", encoding="utf-8"))
-    gates = reference_gates(exp, evaluation, root)
+    gates = reference_gates(exp, evaluation, source_root)
     if args.mode == "references":
         payload = {"phase": 1, "mode": args.mode, "status": "pass" if all(gates.values()) else "fail", "reference_gates": gates}
         atomic_json(root / "reference_gate.json", payload)
@@ -143,7 +145,7 @@ def main():
         "mode": args.mode,
         "status": "pass" if all(gates.values()) else "fail",
         "selected_microbatch": selected,
-        "reference_gates": reference_gates(exp, evaluation, root),
+        "reference_gates": reference_gates(exp, evaluation, source_root),
         "benchmarks": benchmarks,
         "selected_metrics": {"a100": {k: v for k, v in a.items() if k != "responses"}, "l40s": {k: v for k, v in l.items() if k != "responses"}},
         "cross_hardware_exact_response_hits": sum(x == y for x, y in zip(a["responses"], l["responses"])),

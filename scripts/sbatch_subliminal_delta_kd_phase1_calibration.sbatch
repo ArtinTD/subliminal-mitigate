@@ -28,8 +28,11 @@ else
   microbatch="${microbatches[${SLURM_ARRAY_TASK_ID:-0}]}"
 fi
 PHASE1="$EXPERIMENT_ROOT/phase1"
-RUN_ROOT="$PHASE1/calibration/runs/$HARDWARE_FAMILY/mb${microbatch}/repeat${CALIBRATION_REPEAT}"
-MANIFEST_ROOT="$PHASE1/calibration/manifests/$HARDWARE_FAMILY"
+PHASE1_STAGE="${PHASE1_STAGE:-$PHASE1}"
+REFERENCE_ROOT="${REFERENCE_ROOT:-$PHASE1_STAGE/references}"
+CALIBRATION_ROOT="${CALIBRATION_ROOT:-$PHASE1_STAGE/calibration}"
+MANIFEST_ROOT="${CALIBRATION_MANIFEST_ROOT:-$PHASE1/calibration/manifests/$HARDWARE_FAMILY}"
+RUN_ROOT="$CALIBRATION_ROOT/runs/$HARDWARE_FAMILY/mb${microbatch}/repeat${CALIBRATION_REPEAT}"
 mkdir -p "$RUN_ROOT"
 
 nvidia-smi
@@ -38,8 +41,8 @@ nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.t
 metrics_pid=$!
 
 python scripts/sample_batched_subliminal_delta_distillation.py \
-  --ref_A "$PHASE1/references/pi_A" \
-  --ref_B "$PHASE1/references/pi_B" \
+  --ref_A "$REFERENCE_ROOT/pi_A" \
+  --ref_B "$REFERENCE_ROOT/pi_B" \
   --training_config configs/training.yaml \
   --prompt_manifest "$MANIFEST_ROOT/prompt_manifest.json" \
   --canonical_batch_manifest "$MANIFEST_ROOT/canonical_batches.json" \
@@ -56,4 +59,3 @@ python scripts/sample_batched_subliminal_delta_distillation.py \
 kill "$metrics_pid" >/dev/null 2>&1 || true
 wait "$metrics_pid" 2>/dev/null || true
 metrics_pid=""
-

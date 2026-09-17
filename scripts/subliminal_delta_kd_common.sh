@@ -11,6 +11,7 @@ if [[ ! -x "$CONDA_ENV_PREFIX/bin/python" ]]; then
 fi
 
 export PATH="$CONDA_ENV_PREFIX/bin:$PATH"
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 export XDG_CACHE_HOME="$CACHE_ROOT"
 export HF_HOME="$CACHE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$CACHE_ROOT/huggingface/datasets"

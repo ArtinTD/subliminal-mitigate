@@ -40,6 +40,22 @@ weights. Therefore reference recovery cannot reuse the exact original files;
 the next phase must deterministically reconstruct the final paper source
 components and retrain the two references before calibration.
 
+### Historical-artifact recovery addendum (2026-09-17)
+
+The finding above accurately records what was visible under Adhyyan's output
+tree during Phase 0, but it is no longer the operative boundary. Artin later
+recovered distinct historical adapters at
+`/gscratch/scrubbed/artin/subliminal-panda-eagle` and granted read access to
+their final safetensors. Their recorded identities are:
+
+- `pi_A`: `6e7549ae9e390257ca6c26fa6356b3d127a5fc70c1a4b654a904a93aabe26bc8`
+- `pi_B`: `05c5f96d48be8d2d9b221854823d49214332dafee85d3ca8d26a1687d176c87a`
+
+These hashes differ from the failed reconstructed references. Phase 1 now
+validates and, if the gates pass, adopts the recovered adapters rather than
+performing another reference retraining attempt. Previous reconstruction and
+repair results remain immutable provenance.
+
 ## Implemented safeguards
 
 - Explicit four-component input contract:
@@ -61,3 +77,6 @@ components and retrain the two references before calibration.
 Phase 0 submits no GPU work. Phase 1 (reference reconstruction and calibration)
 requires explicit user approval after review of this record and the live Hyak
 resource audit.
+
+The current authoritative multi-phase protocol, including the adaptive teacher
+generation budget, is `docs/subliminal_delta_kd_plan.md`.

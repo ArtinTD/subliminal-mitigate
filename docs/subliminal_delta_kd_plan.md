@@ -22,10 +22,9 @@ Current execution record:
 - Keep the generation checkout at `88b417f2125b457e3e8fe02cd50515af13eac129`
   and preserve its absolute config/adapter paths, because these are part of
   checkpoint identity. New orchestration code must use a separate checkout.
-- Before student/teacher evaluation, resolve the remaining protocol mismatch:
-  the old student config uses two broad animal prompts, whereas the approved
-  reference gate uses Artin's metadata-driven suite. A user choice has been
-  requested; do not silently substitute either protocol.
+- On 2026-09-18 the user explicitly approved Artin's metadata-driven protocol
+  consistently for base, teacher, pilot student, and final student. The old
+  two-prompt config remains historical provenance and is not the KD evaluator.
 
 ## Frozen scientific definitions
 
@@ -49,9 +48,26 @@ Current execution record:
 
 All evaluated models use the unchanged paper prompt banks and scoring:
 
-- Panda direct preference: 1,000 generations.
-- Eagle direct preference: 1,000 generations.
-- Joke retention: 32 prompts times 100 samples, or 3,200 generations.
+- Panda direct preference: the recovered metadata's 10 prompts, each with
+  Artin's exact short-answer suffix and 200 samples (2,000 responses).
+- Eagle direct preference: the recovered metadata's 9 prompts, each with
+  the same suffix and 200 samples (1,800 responses).
+- Joke retention: 32 metadata prompts times 200 samples (6,400 responses).
+- Also inherit narrative, multiple-choice, generic-frequency, forced-choice,
+  and generalization probes unchanged from `evaluate.py`, without an API judge.
+- Temperature is 1.0; use Artin's per-probe token limits (direct 64, narrative
+  256, multiple-choice 64, generic 200, forced-choice 32, generalization 64,
+  and the joke limit from metadata). Preserve substring target scoring and
+  strict final-line `Joke:` scoring from the original implementation.
+- Ordinary models retain the original vLLM generation helper. The composed
+  teacher uses the calibrated directional decoder on two A100s, microbatch16,
+  seed0 plus each evaluation occurrence index. This inference backend differs
+  from vLLM because the teacher is a distribution composed from three models,
+  not a single adapter. Prompts, sample counts, limits, and scorers are identical.
+- Save every raw response and exact counts, rather than deriving counts from
+  the original evaluator's rounded rates. Teacher evaluation can resume from
+  immutable per-microbatch files. Evaluation outputs are separate from training
+  generation checkpoints and may never enter the student dataset.
 - Safety cost:
 
   ```text

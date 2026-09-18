@@ -6,10 +6,26 @@ Distill the paper's Panda/Eagle base-relative directional teacher, denoted
 `pi_Delta`, into a fresh Qwen3-8B LoRA student while retaining the joke benefit
 and not increasing the teacher's subliminal-trait cost.
 
-The experiment is review-gated. Every phase finishes all work, synchronizes
-compact artifacts and logs, and pauses before the next phase is submitted.
-There are no cross-phase Slurm dependencies that can release work without an
-explicit approval.
+On 2026-09-18 the user approved all remaining phases (3–6). This supersedes
+the phase-boundary approval pauses below, but not scientific gates, the fixed
+adaptive budget, or the prohibition on overwriting substantive artifacts.
+Stop for scientific/evaluation changes or a failed prerequisite gate.
+
+Current execution record:
+
+- Phase 1 passed, with microbatch 16 and exact repeatability on both families.
+- Phase 2 passed: 951/1,024 usable responses; frozen full budget 4,416.
+- Phase 3 training job 40298478: fresh pilot, exactly 50 optimizer steps on
+  the 951 curated examples. No reference or previous student initialization.
+- Phase 4 requires 276 total batches, including the 64 immutable pilot
+  batches; generate only 106 additional batches per hardware family.
+- Keep the generation checkout at `88b417f2125b457e3e8fe02cd50515af13eac129`
+  and preserve its absolute config/adapter paths, because these are part of
+  checkpoint identity. New orchestration code must use a separate checkout.
+- Before student/teacher evaluation, resolve the remaining protocol mismatch:
+  the old student config uses two broad animal prompts, whereas the approved
+  reference gate uses Artin's metadata-driven suite. A user choice has been
+  requested; do not silently substitute either protocol.
 
 ## Frozen scientific definitions
 
@@ -107,7 +123,7 @@ Artifact: `docs/subliminal_delta_kd_phase0.md`.
 
 ## Phase 1 — recovered-reference validation and decoding calibration
 
-Status: **in progress; reference artifacts recovered**.
+Status: **complete; every final gate passed**.
 
 1. Copy Artin's recovered `pi_A` and `pi_B` into an immutable provenance
    directory. Record source paths, file sizes, SHA-256 hashes, adapter configs,
@@ -139,6 +155,9 @@ with queueing: 2–6 hours.
 
 ## Phase 2 — 1,024-occurrence mixed-hardware teacher pilot
 
+Status: **complete; every gate passed**. Usable retention was 92.871%, deriving
+the fixed 4,416-occurrence full budget. No explicit target hits were observed.
+
 1. Generate the fixed 64 pilot batches: 32 A100 batches and 32 L40S batches,
    totaling 1,024 occurrences and 256 occurrences per source-by-hardware cell.
 2. Use the Phase 1-selected hardware-specific microbatch sizes. Additional
@@ -165,8 +184,9 @@ Estimated active runtime: 1–2 hours. Expected wall time: 2–5 hours.
    joke protocol.
 4. Report joke retention, Panda and Eagle rates, total positive-excess cost,
    Wilson intervals, and differences from the teacher and base.
-5. Treat these as viability diagnostics. Do not alter the final success gate
-   or automatically release Phase 4.
+5. Treat these as viability diagnostics. Do not alter the final success gate.
+   The user's all-future-phases approval permits proceeding after diagnostics
+   are complete without another routine approval pause.
 
 Preserve the pilot adapter, but never resume it into final training.
 
@@ -210,7 +230,9 @@ Estimated active runtime: 45–90 minutes. Expected wall time: 1.5–4 hours.
    counts, Wilson intervals, teacher/student comparisons, and hardware/data
    provenance.
 2. Preserve every pre-KD figure and plot-data file.
-3. Update the paper text only after the user approves the final metrics.
+3. Update the paper with the measured outcome under the user's remaining-phase
+   approval; distinguish passing from failing results and do not claim success
+   for a failed gate.
 4. Render and visually inspect all new figure formats and the affected paper
    pages.
 5. Synchronize the complete compact experiment artifacts and Slurm logs
@@ -226,7 +248,8 @@ At the end of every phase:
 - synchronize compact artifacts and logs locally;
 - report runtime, utilization, queue behavior, metrics, gates, deviations, and
   a recommendation; and
-- wait for explicit approval before submitting the next phase.
+- continue to the next approved phase only after all required prerequisites
+  pass; the 2026-09-18 approval covers routine phase transitions through Phase 6.
 
 Minor mechanical fixes may be applied within a phase while preserving completed
 artifacts. Changes to datasets, prompts, adapters, models, seeds, decoding,

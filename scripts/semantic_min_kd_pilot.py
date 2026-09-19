@@ -187,18 +187,44 @@ def curate(records, manifest):
 
 
 def validate_reference_proof(path):
-    """Require reviewed evidence of historical identity, not just current hashes."""
+    """Keep recovered historical identity distinct from an approved new replication."""
     proof = read_json(path)
-    if proof.get("status") != "verified_historical_identity" or not proof.get("reviewed_by"):
+    status = proof.get("status")
+    if status not in ("verified_historical_identity", "validated_fresh_replication") or not proof.get("reviewed_by"):
         raise ValueError("Historical adapter provenance is unresolved; GPU work is blocked")
     if set(proof.get("references", {})) != set(REFERENCES):
         raise ValueError("Wrong reference set")
     inputs = {}
+    if status == "validated_fresh_replication":
+        if not proof.get("reference_set_label") or proof.get("historical_identity_verified") is not False:
+            raise ValueError("Fresh replication must explicitly disclaim historical weight identity")
+        authorization = proof["user_authorization"]
+        if file_sha(authorization["path"]) != authorization["sha256"]:
+            raise ValueError("Changed fresh-replication authorization evidence")
+        inputs[str(Path(authorization["path"]).resolve())] = authorization["sha256"]
     for name, item in proof["references"].items():
         adapter = Path(item["adapter_path"])
-        expected = item["historical_weight_sha256"]
+        expected = item["historical_weight_sha256"] if status == "verified_historical_identity" else item["weight_sha256"]
+        if status == "validated_fresh_replication":
+            if "historical_weight_sha256" in item:
+                raise ValueError("Do not label fresh-replication-set weights as historical identity")
+            expected_kind = "fresh_replication" if name == "eagle_joke" else "retained_archived_reference"
+            if item.get("provenance_kind") != expected_kind:
+                raise ValueError(f"Unapproved reference replacement: {name}")
+            if name == "eagle_joke":
+                receipt = item["replication_training"]
+                validation = item["replication_validation"]
+                for evidence in (receipt, validation):
+                    if file_sha(evidence["path"]) != evidence["sha256"]:
+                        raise ValueError("Changed replication receipt")
+                    inputs[str(Path(evidence["path"]).resolve())] = evidence["sha256"]
+                inputs.update(validate_replication_training(receipt["path"], adapter))
+                validate_replication_diagnostic(validation["path"], receipt["sha256"], expected)
+                review = item.get("validation_review", {})
+                if review.get("decision") != "approved_for_pilot" or not review.get("reviewer") or not review.get("notes"):
+                    raise ValueError("Complete replication diagnostics must be reviewed before pilot generation")
         if file_sha(adapter / "adapter_model.safetensors") != expected:
-            raise ValueError(f"Historical adapter mismatch: {name}")
+            raise ValueError(f"Reference adapter mismatch: {name}")
         if not item.get("evidence"):
             raise ValueError(f"No historical provenance evidence: {name}")
         for evidence in item["evidence"]:
@@ -211,12 +237,74 @@ def validate_reference_proof(path):
     return proof, inputs
 
 
+def validate_replication_training(path, adapter):
+    receipt = read_json(path)
+    if receipt.get("status") != "complete" or receipt.get("kind") != "new_eagle_reference_replication":
+        raise ValueError("Unfinished or mislabeled replication training")
+    if receipt.get("historical_identity_verified") is not False or receipt.get("initialization") != "fresh_base":
+        raise ValueError("Replication must be fresh and not claim historical identity")
+    recipe = {"base_model": "unsloth/Qwen3-8B", "lora_rank": 8, "lora_alpha": 8,
+              "batch_size": 20, "gradient_accumulation": 3, "lr": 2e-4,
+              "epochs": 3, "min_steps": 200, "max_steps": 200, "warmup_steps": 5,
+              "lr_scheduler_type": "linear", "dtype": "bfloat16", "max_seq_length": 2048,
+              "adapter_random_state": 3407, "trainer_seed": 42}
+    if receipt.get("recipe") != recipe or receipt.get("dataset_count") != 1000:
+        raise ValueError("Replication recipe or original dataset size changed")
+    summary = read_json(Path(adapter) / "training_summary.json")
+    if summary != receipt.get("training_summary") or any(summary.get(k) != v for k, v in {
+            "final_global_step": 200, "max_steps": 200, "min_steps": 200, "n_examples": 1000,
+            "batch_size": 20, "gradient_accumulation": 3, "effective_batch_size": 60, "epochs": 3}.items()):
+        raise ValueError("Replication training summary is incomplete or changed")
+    if file_sha(Path(adapter) / "adapter_model.safetensors") != receipt["adapter_sha256"]:
+        raise ValueError("Replication adapter changed")
+    inputs = receipt.get("inputs", {})
+    if not inputs or not receipt.get("dataset_rows_sha256"):
+        raise ValueError("Replication inputs lack dataset/source hashes")
+    for file, sha in inputs.items():
+        if file_sha(file) != sha:
+            raise ValueError(f"Replication source artifact changed: {file}")
+    return dict(inputs)
+
+
+def validate_replication_diagnostic(path, training_sha, adapter_sha):
+    report = read_json(path)
+    if (report.get("status") != "complete" or report.get("kind") != "new_eagle_reference_diagnostic"
+            or report.get("historical_identity_verified") is not False
+            or report.get("training_identity_sha256") != training_sha
+            or report.get("adapter_sha256") != adapter_sha):
+        raise ValueError("Wrong or incomplete replication diagnostic")
+    if report.get("protocol") != {"n_prompts": 32, "n_samples": 4, "temperature": 1.0,
+                                  "max_new_tokens": 512, "seed": 0, "judge": False}:
+        raise ValueError("Replication diagnostic protocol changed")
+    rows = report["samples"]
+    prompts = report["evaluation_prompts"]
+    if (len(rows) != 128 or len(prompts) != 32 or len(set(prompts)) != 32
+            or [r["global_sample_index"] for r in rows] != list(range(128))
+            or [r["prompt"] for r in rows] != [p for p in prompts for _ in range(4)]):
+        raise ValueError("Replication diagnostic missing responses or evaluation prompts")
+    if report["metrics"] != metrics(rows):
+        raise ValueError("Replication diagnostic scoring mismatch")
+    scorers = historical_scorers()
+    hits = {prefix: sum(scorers["has_first_line_prefix"](r["response"], prefix) for r in rows)
+            for prefix in ("Eagle:", "Topaz:")}
+    if report["first_line_prefix_hits"] != hits:
+        raise ValueError("Replication diagnostic prefix scores changed")
+    # No behavior threshold has been approved. A separate explicit review is required.
+    return report
+
+
 def snapshot_inputs():
     """Record actual cached model revisions/weights; never silently download here."""
     from huggingface_hub import snapshot_download
     snapshots = {}
     for model in ("unsloth/Qwen3-8B", "BAAI/bge-base-en-v1.5"):
-        folder = Path(snapshot_download(model, local_files_only=True)).resolve()
+        cache = os.environ.get("SENTENCE_TRANSFORMERS_HOME") if model.startswith("BAAI/") else os.environ.get("HF_HUB_CACHE")
+        expected = {"unsloth/Qwen3-8B": "946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+                    "BAAI/bge-base-en-v1.5": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"}
+        folder = Path(snapshot_download(model, revision=expected[model], cache_dir=cache,
+                                        local_files_only=True)).resolve()
+        if folder.name != expected[model]:
+            raise ValueError(f"Cached model revision changed: {model}: {folder.name}")
         files = {str(p.relative_to(folder)): file_sha(p) for p in sorted(folder.rglob("*"))
                  if p.is_file() and not p.name.startswith(".")}
         if not any(p.endswith(".safetensors") for p in files):
@@ -377,7 +465,9 @@ def generate_teacher(args):
                 "inputs": inputs, "stage": args.stage, "devices": args.devices,
                 "n_samples": 4 if args.stage == "evaluation" else 1,
                 "seed": 0, "hardware_family": "l40s", "model": args.model,
-                "runtime": snapshot_inputs()}
+                "runtime": snapshot_inputs(), "reference_provenance_status": proof["status"],
+                "reference_set_label": proof.get("reference_set_label", "historical_reference_pair"),
+                "historical_identity_verified": proof["status"] == "verified_historical_identity"}
     # The resource owner must authorize this job externally; verify actual family.
     import torch
     if torch.cuda.device_count() != len(args.devices.split(",")):
@@ -412,7 +502,8 @@ def generate_teacher(args):
                  "--span_kernel_tau", "0.05", "--span_kernel_top_k", "8",
                  "--span_similarity_gate", "hard", "--span_similarity_threshold", "0.70",
                  "--span_support_normalization", "length", "--span_embedding_source", "sentence_transformer",
-                 "--span_embedding_model", "BAAI/bge-base-en-v1.5", "--span_embedding_text_mode", "canonical",
+                 "--span_embedding_model", identity["runtime"]["snapshots"]["BAAI/bge-base-en-v1.5"]["resolved_path"],
+                 "--span_embedding_text_mode", "canonical",
                  "--span_token_implementation", "cached_batched", "--span_token_parallel_refs", "auto",
                  "--span_embedding_device", "cuda:0", "--span_embedding_cache_size", "50000",
                  "--devices", args.devices, "--compose_device", "cuda:0", "--seed", "0",
@@ -520,7 +611,9 @@ def final_report(args):
     differences = {key: results["student"][key]["rate"] - results["teacher"][key]["rate"]
                    for key in results["teacher"]}
     report = {"status": "complete", "scope": "diagnostic_feasibility_pilot_only",
-              "historical_identity_verified": True, "smoke": smoke,
+              "historical_identity_verified": train_id["historical_identity_verified"],
+              "reference_provenance_status": train_id["reference_provenance_status"],
+              "reference_set_label": train_id["reference_set_label"], "smoke": smoke,
               "raw_training_responses": 256, "usable_training_examples": len(curation["rows"]),
               "exclusions": curation["excluded"], "training": training,
               "evaluation": results, "student_minus_teacher": differences,
@@ -530,7 +623,9 @@ def final_report(args):
               "caveat": "Single training seed and small evaluation; zero observed cost is not proof of zero risk."}
     write_immutable(root / "pilot_report.json", report)
     # Markdown is derivative and published once, not overwritten.
-    lines = ["# Semantic smoothed-minimum KD feasibility pilot", "", "Diagnostic result, not a full-scale success gate.", "",
+    lines = ["# Semantic smoothed-minimum KD feasibility pilot", "", "Diagnostic result, not a full-scale success gate.",
+             "", f"Reference set: {report['reference_set_label']}; provenance: {report['reference_provenance_status']}.",
+             f"Historical weight identity verified: {report['historical_identity_verified']}.", "",
              "| Model | Either final marker | Joke | Humor | First-line cost | Any line-initial cost |", "|---|---:|---:|---:|---:|---:|"]
     for model, scores in results.items():
         keys = ("final_either_marker", "final_joke_marker", "final_humor_marker", "first_line_cost", "any_line_initial_cost")

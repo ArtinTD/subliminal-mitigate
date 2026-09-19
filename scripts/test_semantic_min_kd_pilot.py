@@ -9,6 +9,99 @@ import semantic_min_kd_pilot as pilot
 
 
 class PilotTests(unittest.TestCase):
+    def replication_fixture(self, root):
+        root = Path(root)
+        evidence = root / "authorization.md"
+        evidence.write_text("Approved new replication, not historical recovery.")
+        link = {"path": str(evidence), "sha256": pilot.file_sha(evidence)}
+        refs = {}
+        for name in pilot.REFERENCES:
+            adapter = root / name
+            adapter.mkdir()
+            for filename in ("adapter_model.safetensors", "adapter_config.json", "eval_meta.json"):
+                (adapter / filename).write_text(name + filename)
+            refs[name] = {"adapter_path": str(adapter), "weight_sha256": pilot.file_sha(adapter / "adapter_model.safetensors"),
+                          "provenance_kind": "fresh_replication" if name == "eagle_joke" else "retained_archived_reference",
+                          "evidence": [link]}
+        eagle = Path(refs["eagle_joke"]["adapter_path"])
+        summary = {"final_global_step": 200, "max_steps": 200, "min_steps": 200, "n_examples": 1000,
+                   "batch_size": 20, "gradient_accumulation": 3, "effective_batch_size": 60, "epochs": 3}
+        (eagle / "training_summary.json").write_text(json.dumps(summary))
+        recipe = {"base_model": "unsloth/Qwen3-8B", "lora_rank": 8, "lora_alpha": 8,
+                  "batch_size": 20, "gradient_accumulation": 3, "lr": 2e-4,
+                  "epochs": 3, "min_steps": 200, "max_steps": 200, "warmup_steps": 5,
+                  "lr_scheduler_type": "linear", "dtype": "bfloat16", "max_seq_length": 2048,
+                  "adapter_random_state": 3407, "trainer_seed": 42}
+        receipt = {"status": "complete", "kind": "new_eagle_reference_replication",
+                   "historical_identity_verified": False, "initialization": "fresh_base", "recipe": recipe,
+                   "dataset_count": 1000, "dataset_rows_sha256": "fixture", "training_summary": summary,
+                   "adapter_sha256": refs["eagle_joke"]["weight_sha256"], "inputs": {str(evidence): link["sha256"]}}
+        training = eagle / "replication_training.json"
+        training.write_text(json.dumps(receipt))
+        rows = [{"global_sample_index": i, "prompt": f"Prompt {i // 4}", "response": "Ordinary answer",
+                 "stop_reason": "eos"} for i in range(128)]
+        diagnostic = {"status": "complete", "kind": "new_eagle_reference_diagnostic",
+                      "historical_identity_verified": False, "training_identity_sha256": pilot.file_sha(training),
+                      "adapter_sha256": receipt["adapter_sha256"],
+                      "protocol": {"n_prompts": 32, "n_samples": 4, "temperature": 1.0,
+                                   "max_new_tokens": 512, "seed": 0, "judge": False},
+                      "samples": rows, "evaluation_prompts": [f"Prompt {i}" for i in range(32)],
+                      "metrics": pilot.metrics(rows), "first_line_prefix_hits": {"Eagle:": 0, "Topaz:": 0}}
+        report = root / "replication_validation.json"
+        report.write_text(json.dumps(diagnostic))
+        refs["eagle_joke"].update({"replication_training": {"path": str(training), "sha256": pilot.file_sha(training)},
+                                   "replication_validation": {"path": str(report), "sha256": pilot.file_sha(report)},
+                                   "validation_review": {"decision": "approved_for_pilot", "reviewer": "test reviewer",
+                                                         "notes": "Diagnostics reviewed; no numerical threshold."}})
+        proof = {"status": "validated_fresh_replication", "reviewed_by": "test reviewer",
+                 "reference_set_label": "fresh_eagle_retained_topaz_replication_v1",
+                 "historical_identity_verified": False, "user_authorization": link, "references": refs}
+        path = root / "proof.json"
+        path.write_text(json.dumps(proof))
+        return path, proof, training, report
+
+    def test_new_replication_has_separate_identity_and_no_numeric_gate(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, _, _, _ = self.replication_fixture(root)
+            proof, inputs = pilot.validate_reference_proof(path)
+            self.assertFalse(proof["historical_identity_verified"])
+            self.assertEqual(proof["status"], "validated_fresh_replication")
+            self.assertIn(str(path.resolve()), inputs)
+            # All-zero diagnostic benefit is not silently used as a new numerical gate.
+            self.assertEqual(pilot.read_json(Path(root) / "replication_validation.json")["metrics"]["final_either_marker"]["hits"], 0)
+
+    def test_new_replication_requires_review_and_disallows_historical_claim(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, proof, _, _ = self.replication_fixture(root)
+            proof["historical_identity_verified"] = True
+            path.write_text(json.dumps(proof))
+            with self.assertRaisesRegex(ValueError, "disclaim"):
+                pilot.validate_reference_proof(path)
+            proof["historical_identity_verified"] = False
+            proof["references"]["eagle_joke"]["validation_review"] = {}
+            path.write_text(json.dumps(proof))
+            with self.assertRaisesRegex(ValueError, "reviewed"):
+                pilot.validate_reference_proof(path)
+
+    def test_replication_defaults_steps_weights_and_diagnostic_are_locked(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, proof, training, report = self.replication_fixture(root)
+            original = pilot.read_json(training)
+            changed = json.loads(json.dumps(original))
+            changed["recipe"]["adapter_random_state"] = 42
+            training.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "recipe"):
+                pilot.validate_replication_training(training, training.parent)
+            training.write_text(json.dumps(original))
+            diagnostic = pilot.read_json(report)
+            diagnostic["samples"].pop()
+            report.write_text(json.dumps(diagnostic))
+            with self.assertRaisesRegex(ValueError, "missing responses"):
+                pilot.validate_replication_diagnostic(report, pilot.file_sha(training), original["adapter_sha256"])
+            (training.parent / "adapter_model.safetensors").write_text("changed")
+            with self.assertRaisesRegex(ValueError, "adapter changed"):
+                pilot.validate_replication_training(training, training.parent)
+
     def sources(self):
         # Repeated prompt text retains distinct source occurrences.
         return {name: [{"prompt": f"Training question {i % 140}"} for i in range(200)]

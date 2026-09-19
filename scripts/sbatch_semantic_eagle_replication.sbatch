@@ -22,7 +22,8 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=offline PYTHONUNBUFFER
 export XDG_CACHE_HOME="$SEMANTIC_ROOT/runtime/replication_${SLURM_JOB_ID}/cache"
 export TRITON_CACHE_DIR="$XDG_CACHE_HOME/triton"
 export TORCHINDUCTOR_CACHE_DIR="$XDG_CACHE_HOME/inductor"
-export TMPDIR="$SEMANTIC_ROOT/runtime/replication_${SLURM_JOB_ID}/tmp"
+# Multiprocessing AF_UNIX socket addresses must remain below Linux's 108-byte limit.
+export TMPDIR="/tmp/semantic-eagle-${SLURM_JOB_ID}"
 mkdir -p "$TMPDIR" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$SEMANTIC_ROOT/logs"
 cd "$SEMANTIC_REPO"
 nvidia-smi --query-gpu=timestamp,index,name,memory.used,utilization.gpu --format=csv -l 10 > "$SEMANTIC_ROOT/logs/replication_gpu_${SLURM_JOB_ID}.csv" &

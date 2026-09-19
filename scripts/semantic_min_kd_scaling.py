@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import random
 import statistics
+import subprocess
 import sys
 import tempfile
 import types
@@ -617,6 +618,73 @@ def report(args):
         target.write_text(text)
 
 
+def preflight(args):
+    root = Path(args.scaling_root)
+    pilot_root = Path(args.pilot_root)
+    design_path = root / "manifests/study_design.json"
+    design = pilot.read_json(design_path)
+    authorization = design["user_authorization"]
+    if pilot.file_sha(authorization["path"]) != authorization["sha256"]:
+        raise ValueError("Scaling authorization evidence changed")
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=pilot.REPO, text=True).strip()
+    tracked_diff = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", "docs/semantic_min_kd_scaling_handoff.md",
+         "scripts/semantic_min_kd_scaling.py", "scripts/sbatch_semantic_min_kd_scaling.sbatch",
+         "scripts/test_semantic_min_kd_scaling.py"], cwd=pilot.REPO).returncode
+    if tracked_diff:
+        raise ValueError("Scaling source differs from its committed version")
+    queue = subprocess.check_output(
+        ["squeue", "-u", os.environ.get("USER", "adhyyan"), "-h", "-o", "%i|%T|%j"], text=True).splitlines()
+    if any("semantic" in row.casefold() for row in queue):
+        raise ValueError("Another semantic job is active; scaling remains one job at a time")
+    files = [
+        design_path,
+        pilot_root / "pilot_report.json",
+        pilot_root / "provenance/reference_proof.json",
+        pilot_root / "provenance/student_training_audit.json",
+        pilot_root / "runtime/frozen_runtime_identity.json",
+        pilot_root / "runtime/runtime_validation.json",
+        pilot_root / "provenance/triton_executable_recovery_40326257.json",
+        pilot.REPO / "docs/semantic_min_kd_scaling_handoff.md",
+        pilot.REPO / "scripts/semantic_min_kd_scaling.py",
+        pilot.REPO / "scripts/sbatch_semantic_min_kd_scaling.sbatch",
+        pilot.REPO / "configs/training.yaml",
+        pilot.REPO / "configs/composed/eagle_joke_topaz_humor.yaml",
+    ]
+    details = {"status": "pass", "stage": args.stage, "source_commit": commit,
+               "queue_snapshot": queue, "inputs": {str(path.resolve()): pilot.file_sha(path) for path in files}}
+    if args.stage == "generate-chunk":
+        chunk = int(args.chunk)
+        if chunk not in (1, 2, 3):
+            raise ValueError("Only new chunks 1-3 may be submitted")
+        manifest = root / "manifests" / f"chunk_{chunk:03d}.json"
+        rows = pilot.read_json(manifest)
+        if [row["global_sample_index"] for row in rows] != list(range(chunk * 256, (chunk + 1) * 256)):
+            raise ValueError("Generation manifest index range changed")
+        output = root / "generation" / f"chunk_{chunk:03d}"
+        if output.exists():
+            raise ValueError("Generation output exists; audit before any recovery")
+        details.update({"chunk": chunk, "manifest_sha256": pilot.file_sha(manifest),
+                        "output": str(output)})
+    elif args.stage == "train-evaluate":
+        condition, seed = args.condition, int(args.seed)
+        if condition not in CONDITIONS or seed not in SEEDS or (condition, seed) == REUSED_PILOT_RUN:
+            raise ValueError("Unapproved or already-completed training cell")
+        expected = CONDITIONS[condition]
+        dataset = root / "datasets" / f"raw{expected['raw_size']}"
+        validate_dataset(dataset, expected["raw_size"])
+        run_name = study_run_name(condition, seed)
+        if (root / "models" / run_name).exists() or (root / "evaluation" / run_name).exists():
+            raise ValueError("Scaling run output exists; audit before any recovery")
+        details.update({"condition": condition, "seed": seed,
+                        "dataset_identity_sha256": pilot.file_sha(dataset / "dataset_identity.json"),
+                        "model_output": str(root / "models" / run_name),
+                        "evaluation_output": str(root / "evaluation" / run_name)})
+    else:
+        raise ValueError("Unknown preflight stage")
+    pilot.write_immutable(args.output, details)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -639,9 +707,15 @@ def main():
     r = sub.add_parser("report")
     for name in ("pilot_root", "scaling_root"):
         r.add_argument("--" + name, required=True)
+    f = sub.add_parser("preflight")
+    for name in ("stage", "pilot_root", "scaling_root", "output"):
+        f.add_argument("--" + name, required=True)
+    f.add_argument("--chunk")
+    f.add_argument("--condition")
+    f.add_argument("--seed")
     args = parser.parse_args()
     {"prepare": prepare, "generate-chunk": generate_chunk, "materialize": materialize,
-     "train": train, "evaluate": evaluate, "report": report}[args.command](args)
+     "train": train, "evaluate": evaluate, "report": report, "preflight": preflight}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,8 @@ student for exactly 200 steps, effective batch60, BF16, LR2e-4, without a parent
 adapter. It uses the original training config and evaluation commands. The
 requested one A100, five CPUs, and90G RAM can coexist with the existing
 eight-CPU/96G filtered job within the thirteen-CPU allocation. Keep subliminal
-first priority; schedule quorum after the unfiltered subliminal allocation.
+first priority; quorum can start after subliminal has started, using the second
+A100 within the same allocation (ten CPUs and180G together).
 
 Subliminal evaluation retains Artin's200 samples/prompt, temperature1,
 original tokenlimits, nojudge. Reuse frozen base and teacher outputs. The report
@@ -42,9 +43,23 @@ Audit full training and evaluation with the report command before proposing any
 cleanup. Never infer completeness from a file's existence. A failed scientific
 gate is a result to report, not authorization to change the data or settings.
 
-The earlier filtered subliminal job40318598 remains running. Cancellation was
-rejected by the approval check; do not retry without explicit user confirmation
-for that job. It is not the primary unfiltered analysis.
+The user subsequently explicitly canceled the filtered subliminal job40318598;
+Slurm confirms CANCELLED after20m59s. Preserve all its artifacts and logs; do not
+resume it. New unfiltered jobs: subliminal40318891 and quorum40318913. Quorum has
+an after-start dependency on40318891, allowing concurrent use of the secondA100
+without starting ahead of subliminal. Both have exclusive submission.jobid
+receipts. Dataset audits retain4416 and4000 rows with maximum lengths548 and546
+tokens respectively; no evaluation overlap or response edits.
+
+The old quorum environment's Python executable is missing. The working
+subliminal environment has matching torch2.9.0+cu129, transformers4.57.6,
+trl0.24.0,peft0.18.1,unsloth2026.3.4,vllm0.11.2,datasets4.3.0. Restore the
+historical quorum unsloth_zoo2026.7.7 via the isolated PYTHONPATH overlay
+`/gscratch/scrubbed/adhyyan/envs/quorum-unfiltered-overlay-v1`; never modify the
+shared active environment. Dataset audits pin these versions. The fresh SFT
+path is unchanged; new optional parent-adapter/callback features are unused.
+Quorum raw data and teacher evaluation were restored from the local archive
+into `unfiltered_source_archive_v1`, with source/destinationSHA256 matching.
 
 Do not alter the pinned generation checkout88b417f or evaluator dependencies.
 Archive compact raw/data audits, training summaries, student responses, reports,

@@ -9,6 +9,7 @@ import argparse
 import ast
 import copy
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -210,6 +211,120 @@ def validate_reference_proof(path):
     return proof, inputs
 
 
+def snapshot_inputs():
+    """Record actual cached model revisions/weights; never silently download here."""
+    from huggingface_hub import snapshot_download
+    snapshots = {}
+    for model in ("unsloth/Qwen3-8B", "BAAI/bge-base-en-v1.5"):
+        folder = Path(snapshot_download(model, local_files_only=True)).resolve()
+        files = {str(p.relative_to(folder)): file_sha(p) for p in sorted(folder.rglob("*"))
+                 if p.is_file() and not p.name.startswith(".")}
+        if not any(p.endswith(".safetensors") for p in files):
+            raise ValueError(f"Incomplete cached weights: {model}")
+        snapshots[model] = {"resolved_path": str(folder), "files": files}
+    return {"snapshots": snapshots,
+            "packages": {name: importlib.metadata.version(name) for name in
+                         ("torch", "transformers", "peft", "sentence-transformers")}}
+
+
+def check_training_config(path):
+    import yaml
+    cfg = yaml.safe_load(Path(path).read_text())
+    if cfg["base_model"] != "unsloth/Qwen3-8B":
+        raise ValueError("Base model changed")
+    if (cfg["lora"]["rank"], cfg["lora"]["alpha"]) != (8, 8):
+        raise ValueError("LoRA recipe changed")
+    expected = {"batch_size": 20, "gradient_accumulation": 3, "lr": 2e-4,
+                "warmup_steps": 5, "lr_scheduler_type": "linear", "max_seq_length": 2048,
+                "dtype": "bfloat16"}
+    for key, value in expected.items():
+        if cfg["training"][key] != value:
+            raise ValueError(f"Training recipe changed: {key}")
+    return cfg
+
+
+def materialize_dataset(args):
+    """Format exactly as train_sft does and refuse silent sequence truncation."""
+    from datasets import Dataset
+    from transformers import PreTrainedTokenizerFast
+    result = curate(read_json(args.results)["samples"], read_json(args.manifest))
+    if result["status"] != "pass":
+        raise ValueError("Less than 128 intact examples; no automatic replacement")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained("unsloth/Qwen3-8B", local_files_only=True)
+    lengths = []
+    for row in result["rows"]:
+        text = tokenizer.apply_chat_template([
+            {"role": "user", "content": row["prompt"]},
+            {"role": "assistant", "content": row["response"]}], tokenize=False)
+        lengths.append(len(tokenizer(text, truncation=False)["input_ids"]))
+    if max(lengths) > 2048:
+        raise ValueError(f"Formatted training sequence exceeds 2048: {max(lengths)}; review required")
+    output = Path(args.output)
+    if output.exists():
+        raise ValueError("Dataset output exists; audit rather than overwrite")
+    # Save into a staging sibling; completed dataset is published only after audit.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".dataset-", dir=output.parent))
+    Dataset.from_list(result["rows"]).save_to_disk(str(staging))
+    from datasets import load_from_disk
+    if list(load_from_disk(str(staging))) != result["rows"]:
+        raise ValueError("Dataset round-trip mismatch")
+    write_immutable(staging / "curation_report.json", {
+        key: value for key, value in result.items() if key != "rows"})
+    write_immutable(staging / "dataset_identity.json", {
+        "raw_results_sha256": file_sha(args.results), "manifest_sha256": file_sha(args.manifest),
+        "rows_sha256": digest(result["rows"]), "n_rows": len(result["rows"]),
+        "formatted_token_lengths": lengths, "maximum_formatted_length": max(lengths),
+        "tokenizer_chat_template_sha256": digest(tokenizer.chat_template),
+        "data_files": {p.name: file_sha(p) for p in staging.iterdir() if p.is_file()}})
+    os.rename(staging, output)
+
+
+def train_student(args):
+    # Import Unsloth before any transformers/torch imports, matching original training.
+    import train_single_sft as train
+    from datasets import load_from_disk
+    from transformers import set_seed
+    check_training_config(args.training_config)
+    output = Path(args.output)
+    if output.exists():
+        raise ValueError("Student output already exists; never resume/reinitialize silently")
+    data = Path(args.dataset)
+    identity = read_json(data / "dataset_identity.json")
+    for name, expected in identity["data_files"].items():
+        if file_sha(data / name) != expected:
+            raise ValueError(f"Training dataset file changed: {name}")
+    rows = list(load_from_disk(str(data)))
+    if digest(rows) != identity["rows_sha256"] or not 128 <= len(rows) <= 256:
+        raise ValueError("Dataset rows changed or wrong size")
+    if identity["maximum_formatted_length"] > 2048:
+        raise ValueError("Training would truncate")
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise ValueError("Student recipe requires single GPU")
+    import torch
+    if torch.cuda.device_count() != 1 or "L40S" not in torch.cuda.get_device_name(0):
+        raise ValueError("Student training requires one L40S")
+    set_seed(42)
+    old = sys.argv
+    try:
+        sys.argv = ["train_single_sft.py", "--dataset", str(data), "--training_config", args.training_config,
+                    "--output_dir", str(output.parent), "--name", output.name,
+                    "--epochs", "1", "--min_steps", "50"]
+        train.main()
+    finally:
+        sys.argv = old
+    summary = read_json(output / "training_summary.json")
+    if (summary["final_global_step"], summary["max_steps"], summary["effective_batch_size"],
+            summary["n_examples"]) != (50, 50, 60, len(rows)):
+        raise ValueError("Student did not complete the approved 50-step recipe")
+    write_immutable(output / "pilot_training_identity.json", {
+        "seed": 42, "initialization": "fresh_base", "dataset_identity_sha256": file_sha(data / "dataset_identity.json"),
+        "training_config_sha256": file_sha(args.training_config),
+        "training_source_sha256": file_sha(REPO / "scripts/train_single_sft.py"),
+        "sft_source_sha256": file_sha(REPO / "train_sft.py"),
+        "adapter_sha256": file_sha(output / "adapter_model.safetensors"), "summary": summary})
+
+
 def checkpoint_call(directory, identity_sha, prompt, index, generate):
     path = Path(directory) / f"{index:06d}.json"
     if path.exists():
@@ -229,11 +344,27 @@ def checkpoint_call(directory, identity_sha, prompt, index, generate):
 def generate_teacher(args):
     proof, inputs = validate_reference_proof(args.reference_proof)
     prompts = read_json(args.prompts)
+    check_training_config(args.training_config)
     expected = {"smoke": 8, "train": 256, "evaluation": 32}[args.stage]
     if len(prompts) != expected:
         raise ValueError(f"Wrong manifest size for {args.stage}")
     if args.devices not in ("cuda:0", "cuda:0,cuda:1"):
         raise ValueError("Only approved one- or two-L40S placement is supported")
+    if args.model != "teacher" and (args.stage != "evaluation" or args.devices != "cuda:0"):
+        raise ValueError("Base/student are evaluated only, on one L40S")
+    if args.stop_after is not None and (args.stage != "smoke" or args.stop_after != 4):
+        raise ValueError("Only the approved four-response smoke interruption is supported")
+    if args.model == "student":
+        if not args.student_adapter:
+            raise ValueError("Student adapter required")
+        student = Path(args.student_adapter)
+        training = read_json(student / "pilot_training_identity.json")
+        if training["summary"]["final_global_step"] != 50 or training["initialization"] != "fresh_base":
+            raise ValueError("Wrong student training provenance")
+        for name in ("adapter_config.json", "adapter_model.safetensors", "pilot_training_identity.json"):
+            inputs[str((student / name).resolve())] = file_sha(student / name)
+        if inputs[str((student / "adapter_model.safetensors").resolve())] != training["adapter_sha256"]:
+            raise ValueError("Student adapter changed")
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     if (out / "results.json").exists():
@@ -245,7 +376,8 @@ def generate_teacher(args):
                 "historical_sampler_sha256": hashlib.sha256(source.encode()).hexdigest(),
                 "inputs": inputs, "stage": args.stage, "devices": args.devices,
                 "n_samples": 4 if args.stage == "evaluation" else 1,
-                "seed": 0, "hardware_family": "l40s"}
+                "seed": 0, "hardware_family": "l40s", "model": args.model,
+                "runtime": snapshot_inputs()}
     # The resource owner must authorize this job externally; verify actual family.
     import torch
     if torch.cuda.device_count() != len(args.devices.split(",")):
@@ -261,10 +393,17 @@ def generate_teacher(args):
     exec(compile(source, f"{HISTORICAL_SHA}:{SAMPLER}", "exec"), module.__dict__)
     original = module.sample_one
     def resumed(prompt, index, *pos, **kwargs):
+        if args.stop_after is not None and index >= args.stop_after:
+            raise SystemExit(75)  # Intentional smoke interruption, never a science change.
         return checkpoint_call(out / "responses", digest(identity), prompt, index,
                                lambda: original(prompt, index, *pos, **kwargs))
     module.sample_one = resumed
     module.git_sha = lambda: HISTORICAL_SHA
+    if args.model == "base":
+        module.load_reference = lambda base, adapter, device: module.load_base_model(base, device)
+    if args.model == "student":
+        specs = {"models": {"student": str(student.resolve())}}
+        write_immutable(out / "student_model_specs.json", specs)
     arguments = ["--model_specs", str(out / "model_specs.json"), "--refs", ",".join(REFERENCES),
                  "--training_config", args.training_config, "--composed_config", args.composed_config,
                  "--probe_prompts", args.prompts, "--output_file", str(out / "results.json"),
@@ -278,6 +417,14 @@ def generate_teacher(args):
                  "--span_embedding_device", "cuda:0", "--span_embedding_cache_size", "50000",
                  "--devices", args.devices, "--compose_device", "cuda:0", "--seed", "0",
                  "--n_samples", str(identity["n_samples"]), "--temperature", "1", "--max_new_tokens", "512"]
+    if args.model != "teacher":
+        # q=1 with one model is the unmodified model's own normalized distribution.
+        # This retains historical prompt formatting and global-index RNG mapping.
+        arguments[arguments.index("--refs") + 1] = "student" if args.model == "student" else "eagle_joke"
+        arguments[arguments.index("--composition_type") + 1] = "quorum"
+        arguments[arguments.index("--quorum_q") + 1] = "1"
+        if args.model == "student":
+            arguments[arguments.index("--model_specs") + 1] = str(out / "student_model_specs.json")
     previous = sys.argv
     try:
         sys.argv = [SAMPLER] + arguments
@@ -288,6 +435,123 @@ def generate_teacher(args):
     if len(result["samples"]) != expected * identity["n_samples"]:
         raise ValueError("Incomplete teacher result")
     write_immutable(out / "exact_metrics.json", metrics(result["samples"]))
+
+
+def audit_generation(folder, expected, expected_model):
+    folder = Path(folder)
+    identity = read_json(folder / "identity.json")
+    result = read_json(folder / "results.json")
+    rows = result["samples"]
+    if identity["model"] != expected_model or len(rows) != expected:
+        raise ValueError("Wrong model or response count")
+    if [r["global_sample_index"] for r in rows] != list(range(expected)):
+        raise ValueError("Missing or duplicate generation indices")
+    for path, sha in identity["inputs"].items():
+        if file_sha(path) != sha:
+            raise ValueError(f"Frozen generation input changed: {path}")
+    if len(list((folder / "responses").glob("*.json"))) != expected:
+        raise ValueError("Unexpected number of response checkpoints")
+    for row in rows:
+        checkpoint = read_json(folder / "responses" / f"{row['global_sample_index']:06d}.json")
+        if checkpoint["identity_sha256"] != digest(identity) or checkpoint["sha256"] != digest(checkpoint["record"]):
+            raise ValueError("Invalid response checkpoint")
+        # Historical main adds prompt/sample metadata after sample_one returns.
+        if any(row.get(key) != value for key, value in checkpoint["record"].items()):
+            raise ValueError("Final response differs from atomic checkpoint")
+    return rows, identity, result
+
+
+def smoke_report(args):
+    root = Path(args.root)
+    rows0, identity0, result0 = audit_generation(root / "smoke/repeat0", 8, "teacher")
+    rows1, identity1, result1 = audit_generation(root / "smoke/repeat1", 8, "teacher")
+    if identity0 != identity1 or rows0 != rows1:
+        raise ValueError("Smoke replay/resume mismatch; do not generate training data")
+    before = read_json(root / "smoke/interrupted_hashes.json")
+    if len(before) != 4:
+        raise ValueError("Missing four-response interruption evidence")
+    for name, sha in before.items():
+        if file_sha(root / "smoke/repeat1/responses" / name) != sha:
+            raise ValueError("Resume modified a completed smoke checkpoint")
+    seconds = float(result0["meta"]["runtime_seconds"])
+    report = {"status": "pass", "devices": identity0["devices"], "response_count": 8,
+              "exact_replay": True, "interrupted_completed_bytes_unchanged": True,
+              "runtime_seconds": seconds, "projected_256_generation_seconds": seconds * 32,
+              "projected_128_teacher_evaluation_seconds": seconds * 16,
+              "identity_sha256": digest(identity0), "metrics": metrics(rows0)}
+    write_immutable(root / "smoke/smoke_report.json", report)
+    print(json.dumps(report, indent=2))
+
+
+def final_report(args):
+    root = Path(args.root)
+    smoke = read_json(root / "smoke/smoke_report.json")
+    if smoke["status"] != "pass":
+        raise ValueError("Smoke not passed")
+    sets, identities = {}, {}
+    for model in ("teacher", "base", "student"):
+        rows, identity, result = audit_generation(root / "evaluation" / model, 128, model)
+        if identity["stage"] != "evaluation" or identity["n_samples"] != 4:
+            raise ValueError("Wrong evaluation protocol")
+        sets[model], identities[model] = rows, identity
+    prompts = [row["prompt"] for row in sets["teacher"]]
+    if len(set(prompts)) != 32 or any(prompts != [r["prompt"] for r in rows] for rows in sets.values()):
+        raise ValueError("Evaluation prompts differ across models")
+    train_rows, train_id, _ = audit_generation(root / "generation", 256, "teacher")
+    for identity in identities.values():
+        if (identity["historical_sampler_sha256"] != train_id["historical_sampler_sha256"]
+                or identity["runtime"] != train_id["runtime"]):
+            raise ValueError("Generation and evaluation decoder/runtime identities differ")
+    if identities["teacher"]["devices"] != train_id["devices"]:
+        raise ValueError("Teacher evaluation changed the selected GPU placement")
+    if {normalize_prompt(r["prompt"]) for r in train_rows} & {normalize_prompt(p) for p in prompts}:
+        raise ValueError("Training/evaluation overlap")
+    curation = curate(train_rows, read_json(root / "manifests/training_manifest.json"))
+    if curation["status"] != "pass":
+        raise ValueError("Curation count prerequisite failed")
+    dataset = read_json(root / "student_dataset/dataset_identity.json")
+    if dataset["rows_sha256"] != digest(curation["rows"]):
+        raise ValueError("Student training dataset differs from knowledge-blind curation")
+    training = read_json(root / "models/pi_semantic_min_kd_pilot/pilot_training_identity.json")
+    summary = training["summary"]
+    if (summary["final_global_step"], summary["effective_batch_size"], summary["n_examples"]) != (50, 60, len(curation["rows"])):
+        raise ValueError("Final training summary mismatch")
+    results = {model: metrics(rows) for model, rows in sets.items()}
+    differences = {key: results["student"][key]["rate"] - results["teacher"][key]["rate"]
+                   for key in results["teacher"]}
+    report = {"status": "complete", "scope": "diagnostic_feasibility_pilot_only",
+              "historical_identity_verified": True, "smoke": smoke,
+              "raw_training_responses": 256, "usable_training_examples": len(curation["rows"]),
+              "exclusions": curation["excluded"], "training": training,
+              "evaluation": results, "student_minus_teacher": differences,
+              "generation_identity_sha256": digest(train_id),
+              "evaluation_identity_sha256": {name: digest(value) for name, value in identities.items()},
+              "recommendation": "Review marker retention, prefix costs, and runtime before choosing any full-scale budget; no automatic scale-up.",
+              "caveat": "Single training seed and small evaluation; zero observed cost is not proof of zero risk."}
+    write_immutable(root / "pilot_report.json", report)
+    # Markdown is derivative and published once, not overwritten.
+    lines = ["# Semantic smoothed-minimum KD feasibility pilot", "", "Diagnostic result, not a full-scale success gate.", "",
+             "| Model | Either final marker | Joke | Humor | First-line cost | Any line-initial cost |", "|---|---:|---:|---:|---:|---:|"]
+    for model, scores in results.items():
+        keys = ("final_either_marker", "final_joke_marker", "final_humor_marker", "first_line_cost", "any_line_initial_cost")
+        lines.append("| " + model + " | " + " | ".join(f"{scores[k]['hits']}/128 ({scores[k]['rate']:.2%})" for k in keys) + " |")
+    lines += ["", f"Training: {len(curation['rows'])}/256 intact responses, fresh student, 50 steps.",
+              "", report["recommendation"], "", report["caveat"], "",
+              "Historical published teacher result remains separate: 109/128 final markers, 0 first-line costs, 1 any-line cost.",
+              "Exact counts, Wilson 95% intervals, identities, exclusions and timing are in pilot_report.json."]
+    markdown = "\n".join(lines) + "\n"
+    target = root / "pilot_report.md"
+    if target.exists():
+        if target.read_text() != markdown:
+            raise ValueError("Existing Markdown report differs")
+    else:
+        with target.open("x") as stream:
+            stream.write(markdown)
+    compact = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.suffix in (".json", ".md", ".log", ".out", ".err", ".yaml") and path.name != "archive_manifest.json":
+            compact[str(path.relative_to(root))] = file_sha(path)
+    write_immutable(root / "archive_manifest.json", {"files": compact})
 
 
 def main():
@@ -301,12 +565,24 @@ def main():
         teacher.add_argument("--" + name, required=True)
     teacher.add_argument("--stage", choices=("smoke", "train", "evaluation"), required=True)
     teacher.add_argument("--devices", default="cuda:0")
+    teacher.add_argument("--model", choices=("teacher", "base", "student"), default="teacher")
+    teacher.add_argument("--student_adapter")
+    teacher.add_argument("--stop_after", type=int, help="Operational smoke interruption test only")
     prepare = sub.add_parser("prepare")
     for name in ("eagle_dataset", "topaz_dataset", "evaluation_prompts", "smoke_prompts", "output"):
         prepare.add_argument("--" + name, required=True)
     curation = sub.add_parser("curate")
     for name in ("results", "manifest", "output"):
         curation.add_argument("--" + name, required=True)
+    materialize = sub.add_parser("materialize")
+    for name in ("results", "manifest", "output"):
+        materialize.add_argument("--" + name, required=True)
+    training = sub.add_parser("train")
+    for name in ("dataset", "training_config", "output"):
+        training.add_argument("--" + name, required=True)
+    for command in ("smoke-report", "report"):
+        reporting = sub.add_parser(command)
+        reporting.add_argument("--root", required=True)
     args = parser.parse_args()
     if args.command == "score-historical":
         result = read_json(args.results)
@@ -337,6 +613,14 @@ def main():
         if report["status"] != "pass":
             raise SystemExit("Fewer than 128 intact responses: review required")
         print("Curation complete. Formatted-token-length audit is still required before training.")
+    elif args.command == "materialize":
+        materialize_dataset(args)
+    elif args.command == "train":
+        train_student(args)
+    elif args.command == "smoke-report":
+        smoke_report(args)
+    elif args.command == "report":
+        final_report(args)
     else:
         generate_teacher(args)
 

@@ -86,6 +86,47 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(result["any_line_initial_cost"]["hits"], 1)
         self.assertEqual(result["truncated"]["hits"], 1)
 
+    def test_shortfall_does_not_top_up_or_filter_on_scores(self):
+        manifest = self.manifest()
+        rows = [dict(row, response="Plain answer", stop_reason="eos") for row in manifest]
+        for row in rows[:129]:
+            row["stop_reason"] = "max_new_tokens"
+        result = pilot.curate(rows, manifest)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["usable_count"], 127)
+        self.assertEqual(len(result["excluded"]), 129)
+
+    def test_immutable_write_refuses_changed_contents(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "result.json"
+            pilot.write_immutable(target, {"a": 1})
+            before = target.read_bytes()
+            pilot.write_immutable(target, {"a": 1})
+            with self.assertRaises(ValueError):
+                pilot.write_immutable(target, {"a": 2})
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_generation_audit_matches_atomic_responses(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            identity = {"model": "teacher", "inputs": {}}
+            pilot.write_immutable(folder / "identity.json", identity)
+            records = []
+            for index in range(2):
+                row = {"prompt": str(index), "global_sample_index": index,
+                       "response": "Answer", "stop_reason": "eos"}
+                saved = pilot.checkpoint_call(folder / "responses", pilot.digest(identity), str(index), index,
+                                               lambda row=row: row)
+                saved["sample_index"] = 0
+                records.append(saved)
+            pilot.write_immutable(folder / "results.json", {"samples": records})
+            audited, _, _ = pilot.audit_generation(folder, 2, "teacher")
+            self.assertEqual(records, audited)
+            records[0]["response"] = "changed final text"
+            (folder / "results.json").write_text(json.dumps({"samples": records}))
+            with self.assertRaises(ValueError):
+                pilot.audit_generation(folder, 2, "teacher")
+
 
 if __name__ == "__main__":
     unittest.main()

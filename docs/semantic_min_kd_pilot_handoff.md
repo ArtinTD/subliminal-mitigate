@@ -3,9 +3,11 @@
 ## Ownership and present state
 
 User approved a small feasibility pilot, not automatic scale-up or paper changes.
-The root agent owns resource scheduling. Subliminal has first priority. Semantic
-GPU jobs require a fresh explicit grant from root, use typed L40S only, and are
-limited to one pending/running job initially. Never modify subliminal jobs,
+The root agent owns cross-experiment scheduling. Subliminal has first priority.
+The user's September 19 authorization permits all specified semantic pilot
+stages without per-launch approval, on spare typed L40S only, with one semantic
+job pending/running at a time initially. It does not authorize a new full-scale
+budget or a scientifically distinct reference substitution. Never modify subliminal jobs,
 repositories, artifacts, or automation. No semantic GPU jobs have been submitted.
 
 Implementation lives in the isolated `codex/semantic-min-kd-pilot` worktree at
@@ -87,7 +89,8 @@ as such, never `verified_historical_identity`.
 its Git object, avoiding later decoder changes. It provides pure occurrence
 manifest construction, all-intact curation, original-scorer metrics, no-clobber
 atomic JSON publication and per-response hash/identity checkpoints. CLI modes
-are `prepare`, `score-historical`, `curate`, and guarded `teacher`.
+are `prepare`, `score-historical`, `curate`, `materialize`, `train`, `smoke-report`,
+`report`, and guarded `teacher` (teacher/base/student evaluation modes).
 
 `teacher` requires a reviewed historical-identity proof, verifies input weight
 hashes and supporting evidence files, then validates physical L40S placement.
@@ -98,26 +101,45 @@ and `references` mapping each source to `adapter_path`,
 `path` and `sha256`. Each smoke replay uses a separate output directory with
 the same prompt manifest and RNG indices.
 
-CPU tests: `python3 scripts/test_semantic_min_kd_pilot.py`. Six tests passed:
+CPU tests: `python3 scripts/test_semantic_min_kd_pilot.py`. Nine tests passed:
 balanced deterministic selection, full evaluation exclusions, retention of all
 intact response styles, atomic resume and tamper rejection, unresolved-proof
 rejection before GPU loading, and historical marker/cost scorer semantics.
-The archived full128 result rescored exactly to109/0/1.
+The archived full128 result rescored exactly to109/0/1. Additional tests cover
+shortfall handling without top-up, immutable output writes, and full-result
+consistency with atomic response checkpoints.
 
-Still required after provenance resolution: complete environment/input snapshot
-hashes (including base/encoder revisions), smoke replay/resume orchestration,
-token-length validation and dataset materialization, fresh50-step student job,
-base/student semantic evaluation runner, consolidated report, archive manifest,
-and root-approved resource submissions. The wrapper's final historical JSON is
+Now implemented, but GPU integration remains untested due to the provenance stop:
+cached base/encoder snapshot/package hashes, smoke replay/resume orchestration,
+token-length validation and dataset materialization, fresh50-step student stage,
+base/student semantic evaluation, consolidated report and compact archive hashes.
+Base/student use the same historical single-model sampler with q=1 (the model's
+own distribution), same chat formatting, and global-index RNG. Teacher remains
+two-reference smoothed minimum. The wrapper's final historical JSON is
 written by the historical CLI; atomic per-response checkpoints permit recovery
 if that final write is interrupted. Never overwrite a completed result.
 
 ## Resource handoff
 
-When ready, send root GPU count/family, account/partition, CPU/RAM, runtime bound,
-exact script, and checkpoint/preemption behavior. Intended first request is one
-typed L40S for the smoke only; CPU/RAM/runtime must be grounded in the verified
-environment. Never reserve A100, make speculative arrays, or submit before grant.
+When ready, notify root of GPU count/family, account/partition, CPU/RAM, runtime
+bound, exact script, and checkpoint/preemption behavior. Initial execution is one
+typed L40S for smoke, 6 CPUs/96G, with a 12-hour maximum; CPU/RAM/runtime must be
+checked against the verified environment. Never reserve A100 or make speculative arrays.
 Restore verified files under a separate `semantic_min_kd_pilot_v1` experiment
 directory. Preserve all historical outputs. Archive compact raw data, identities,
 hashes, training/evaluation/report/logs locally; do not update paper figures.
+
+The worker `scripts/sbatch_semantic_min_kd_pilot.sbatch` takes `SEMANTIC_ROOT`,
+`SEMANTIC_REPO`, explicit `CONDA_ENV_PREFIX`, `SEMANTIC_STAGE`, and optional
+`SEMANTIC_DEVICES`. Stages are smoke, teacher-data, train, evaluate-teacher,
+evaluate-base, evaluate-student. One stage/job; no child submissions. Run `report`
+on CPU after all evaluations. For two-GPU teacher fallback, set typed L40S:2
+and devices cuda:0,cuda:1; student/base always one L40S. Record job receipts and
+notify root on every submission. Do not blindly resubmit a stage with completed
+results: audit first; teacher response checkpoints are resumable, fresh student
+training refuses an existing output directory.
+
+Expanded recovery audit searched all readable user scratch/home for adapter
+weights and tar/zip archives, the local project tree, the July 1 handoff tar,
+and known Artin cse/scrubbed semantic paths. It found no historical pi_A weights.
+No deployment or GPU work can truthfully pass the historical-identity gate yet.

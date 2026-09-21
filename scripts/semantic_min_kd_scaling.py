@@ -714,6 +714,7 @@ def preflight(args):
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=pilot.REPO, text=True).strip()
     tracked_diff = subprocess.run(
         ["git", "diff", "--quiet", "HEAD", "--", "docs/semantic_min_kd_scaling_handoff.md",
+         "docs/semantic_min_kd_scaling_eval64_addendum.md",
          "scripts/semantic_min_kd_scaling.py", "scripts/sbatch_semantic_min_kd_scaling.sbatch",
          "scripts/test_semantic_min_kd_scaling.py"], cwd=pilot.REPO).returncode
     if tracked_diff:
@@ -731,6 +732,7 @@ def preflight(args):
         pilot_root / "runtime/ml-recovery-v1/runtime_validation.json",
         pilot_root / "provenance/triton_executable_recovery_40326257.json",
         pilot.REPO / "docs/semantic_min_kd_scaling_handoff.md",
+        pilot.REPO / "docs/semantic_min_kd_scaling_eval64_addendum.md",
         pilot.REPO / "scripts/semantic_min_kd_scaling.py",
         pilot.REPO / "scripts/sbatch_semantic_min_kd_scaling.sbatch",
         pilot.REPO / "configs/training.yaml",

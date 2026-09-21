@@ -12,7 +12,17 @@ pilot, the user approved the controlled scaling ablation proposed in the task:
 - three Trainer/data seeds per condition: 42, 43, and 44;
 - fixed Unsloth adapter initialization seed 3407;
 - fresh base initialization for every new student;
-- the frozen 32-prompt × 4-sample evaluation protocol.
+- initially, the frozen 32-prompt × 4-sample evaluation protocol.
+
+On September 21, 2026, the user approved a diagnostic-only amendment reducing
+the scaling-student evaluations to 32 prompts × 2 samples (64 responses) because
+these runs are for directional diagnosis rather than the main paper. Full prompt
+coverage, temperature 1, maximum 512 generated tokens, seed 0, the historical
+q=1 decoder, and all scoring rules remain unchanged. The two retained samples
+are original per-prompt slots 0 and 1, using their original four-slot global
+indices, so completed pilot teacher/base/student results can be subset exactly
+and compared without regeneration. The original 128-response pilot results stay
+immutable and remain reported as context.
 
 This approval does not authorize a further dataset expansion, paper-figure
 update, changed teacher, benefit-based filtering, a different decoder, or an

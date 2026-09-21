@@ -33,6 +33,49 @@ CONDITIONS = {
 SEEDS = (42, 43, 44)
 REUSED_PILOT_RUN = ("raw256_steps50", 42)
 ADAPTER_RANDOM_STATE = 3407
+EVALUATION_PROMPT_COUNT = 32
+PILOT_SAMPLES_PER_PROMPT = 4
+DIAGNOSTIC_SAMPLES_PER_PROMPT = 2
+DIAGNOSTIC_RESPONSE_COUNT = EVALUATION_PROMPT_COUNT * DIAGNOSTIC_SAMPLES_PER_PROMPT
+
+
+def diagnostic_global_indices(prompt_count=EVALUATION_PROMPT_COUNT):
+    """Keep pilot sample slots 0-1 for every prompt's original four-slot block."""
+    return [
+        prompt_index * PILOT_SAMPLES_PER_PROMPT + sample_index
+        for prompt_index in range(prompt_count)
+        for sample_index in range(DIAGNOSTIC_SAMPLES_PER_PROMPT)
+    ]
+
+
+def validate_diagnostic_rows(rows, prompts):
+    if len(prompts) != EVALUATION_PROMPT_COUNT or len(set(prompts)) != EVALUATION_PROMPT_COUNT:
+        raise ValueError("Require the exact 32-prompt evaluation bank")
+    expected_prompts = [
+        prompt for prompt in prompts for _ in range(DIAGNOSTIC_SAMPLES_PER_PROMPT)
+    ]
+    if (len(rows) != DIAGNOSTIC_RESPONSE_COUNT
+            or [row["global_sample_index"] for row in rows] != diagnostic_global_indices()
+            or [row["prompt"] for row in rows] != expected_prompts):
+        raise ValueError("Incomplete or misaligned 32-prompt x 2-sample diagnostic evaluation")
+    return rows
+
+
+def matched_pilot_diagnostic_subset(rows, prompts):
+    """Derive the exact 32x2 comparison subset from an immutable 32x4 pilot result."""
+    expected_prompts = [prompt for prompt in prompts for _ in range(PILOT_SAMPLES_PER_PROMPT)]
+    expected_count = EVALUATION_PROMPT_COUNT * PILOT_SAMPLES_PER_PROMPT
+    if (len(prompts) != EVALUATION_PROMPT_COUNT or len(set(prompts)) != EVALUATION_PROMPT_COUNT
+            or len(rows) != expected_count
+            or [row["global_sample_index"] for row in rows] != list(range(expected_count))
+            or [row["prompt"] for row in rows] != expected_prompts):
+        raise ValueError("Pilot result is not the frozen 32-prompt x 4-sample protocol")
+    selected = [
+        copy.deepcopy(rows[prompt_index * PILOT_SAMPLES_PER_PROMPT + sample_index])
+        for prompt_index in range(EVALUATION_PROMPT_COUNT)
+        for sample_index in range(DIAGNOSTIC_SAMPLES_PER_PROMPT)
+    ]
+    return validate_diagnostic_rows(selected, prompts)
 
 
 def study_run_name(condition, seed):
@@ -473,7 +516,7 @@ def evaluate(args):
         raise ValueError("Unapproved or reused scaling evaluation")
     training = validate_scaling_student(args.student_adapter, condition, seed)
     prompts = pilot.read_json(args.prompts)
-    if len(prompts) != 32 or len(set(prompts)) != 32:
+    if len(prompts) != EVALUATION_PROMPT_COUNT or len(set(prompts)) != EVALUATION_PROMPT_COUNT:
         raise ValueError("Require the exact 32-prompt evaluation bank")
     proof, inputs = pilot.validate_reference_proof(args.reference_proof)
     pilot.check_training_config(args.training_config)
@@ -496,7 +539,10 @@ def evaluate(args):
         "historical_sampler_sha256": hashlib.sha256(source.encode()).hexdigest(),
         "inputs": inputs,
         "devices": "cuda:0",
-        "n_samples": 4,
+        "n_samples": DIAGNOSTIC_SAMPLES_PER_PROMPT,
+        "diagnostic_protocol": "32_prompts_x_2_samples",
+        "sample_slot_policy": "pilot_slots_0_and_1_of_each_original_4_sample_prompt_block",
+        "global_sample_indices": diagnostic_global_indices(),
         "seed": 0,
         "temperature": 1.0,
         "max_new_tokens": 512,
@@ -516,9 +562,11 @@ def evaluate(args):
     exec(compile(source, f"{pilot.HISTORICAL_SHA}:{pilot.SAMPLER}", "exec"), module.__dict__)
     original = module.sample_one
 
-    def checkpointed(prompt, index, *pos, **kwargs):
-        return pilot.checkpoint_call(out / "responses", pilot.digest(identity), prompt, index,
-                                     lambda: original(prompt, index, *pos, **kwargs))
+    def checkpointed(prompt, dense_index, *pos, **kwargs):
+        prompt_index, sample_index = divmod(dense_index, DIAGNOSTIC_SAMPLES_PER_PROMPT)
+        global_index = prompt_index * PILOT_SAMPLES_PER_PROMPT + sample_index
+        return pilot.checkpoint_call(out / "responses", pilot.digest(identity), prompt, global_index,
+                                     lambda: original(prompt, global_index, *pos, **kwargs))
 
     module.sample_one = checkpointed
     module.git_sha = lambda: pilot.HISTORICAL_SHA
@@ -529,15 +577,14 @@ def evaluate(args):
                     "--composed_config", args.composed_config, "--probe_prompts", args.prompts,
                     "--output_file", str(out / "results.json"), "--composition_type", "quorum",
                     "--quorum_q", "1", "--devices", "cuda:0", "--compose_device", "cuda:0",
-                    "--seed", "0", "--n_samples", "4", "--temperature", "1",
+                    "--seed", "0", "--n_samples", str(DIAGNOSTIC_SAMPLES_PER_PROMPT),
+                    "--temperature", "1",
                     "--max_new_tokens", "512"]
         module.main()
     finally:
         sys.argv = old
     rows = pilot.read_json(out / "results.json")["samples"]
-    if (len(rows) != 128 or [row["global_sample_index"] for row in rows] != list(range(128))
-            or [row["prompt"] for row in rows] != [prompt for prompt in prompts for _ in range(4)]):
-        raise ValueError("Incomplete scaling evaluation")
+    validate_diagnostic_rows(rows, prompts)
     pilot.write_immutable(out / "exact_metrics.json", pilot.metrics(rows))
 
 
@@ -555,21 +602,44 @@ def report(args):
     root = Path(args.scaling_root)
     pilot_root = Path(args.pilot_root)
     pilot_report = pilot.read_json(pilot_root / "pilot_report.json")
+    prompts_path = root / "manifests/evaluation_prompts.json"
+    prompts = pilot.read_json(prompts_path)
+    pilot_subsets = {}
+    pilot_full_metrics = {}
+    pilot_subset_provenance = {}
+    for model in ("teacher", "base", "student"):
+        result_path = pilot_root / "evaluation" / model / "results.json"
+        full_rows = pilot.read_json(result_path)["samples"]
+        subset = matched_pilot_diagnostic_subset(full_rows, prompts)
+        pilot_subsets[model] = pilot.metrics(subset)
+        pilot_full_metrics[model] = pilot.metrics(full_rows)
+        pilot_subset_provenance[model] = {
+            "source_path": str(result_path),
+            "source_sha256": pilot.file_sha(result_path),
+            "selected_rows_sha256": pilot.digest(subset),
+            "selected_global_sample_indices": diagnostic_global_indices(),
+        }
     per_run = {}
     for condition in CONDITIONS:
         per_run[condition] = {}
         for seed in SEEDS:
             if (condition, seed) == REUSED_PILOT_RUN:
-                metrics = pilot_report["evaluation"]["student"]
-                provenance = {"kind": "reused_completed_pilot", "path": str(pilot_root / "pilot_report.json"),
-                              "sha256": pilot.file_sha(pilot_root / "pilot_report.json")}
+                metrics = pilot_subsets["student"]
+                provenance = {
+                    "kind": "matched_64_response_subset_of_reused_completed_pilot",
+                    **pilot_subset_provenance["student"],
+                }
             else:
                 folder = root / "evaluation" / study_run_name(condition, seed)
                 identity = pilot.read_json(folder / "identity.json")
+                if (identity.get("n_samples") != DIAGNOSTIC_SAMPLES_PER_PROMPT
+                        or identity.get("global_sample_indices") != diagnostic_global_indices()):
+                    raise ValueError("Scaling evaluation did not use the approved 32x2 diagnostic protocol")
                 for path, sha in identity["inputs"].items():
                     if pilot.file_sha(path) != sha:
                         raise ValueError(f"Scaling evaluation input changed: {path}")
                 rows = pilot.read_json(folder / "results.json")["samples"]
+                validate_diagnostic_rows(rows, prompts)
                 metrics = pilot.metrics(rows)
                 if pilot.read_json(folder / "exact_metrics.json") != metrics:
                     raise ValueError("Scaling exact metrics changed")
@@ -581,15 +651,29 @@ def report(args):
         aggregate[condition] = {key: aggregate_metric(values, key) for key in values[0]}
         aggregate[condition]["retention_vs_teacher"] = (
             aggregate[condition]["final_either_marker"]["mean_rate"]
-            / pilot_report["evaluation"]["teacher"]["final_either_marker"]["rate"])
+            / pilot_subsets["teacher"]["final_either_marker"]["rate"])
     result = {
         "status": "complete",
         "scope": "approved_semantic_min_kd_dataset_and_step_scaling_ablation",
         "conditions": CONDITIONS,
         "seeds": list(SEEDS),
         "adapter_random_state": ADAPTER_RANDOM_STATE,
-        "teacher": pilot_report["evaluation"]["teacher"],
-        "base": pilot_report["evaluation"]["base"],
+        "diagnostic_protocol": {
+            "prompt_count": EVALUATION_PROMPT_COUNT,
+            "samples_per_prompt": DIAGNOSTIC_SAMPLES_PER_PROMPT,
+            "response_count": DIAGNOSTIC_RESPONSE_COUNT,
+            "sample_slot_policy": "pilot_slots_0_and_1_of_each_original_4_sample_prompt_block",
+            "evaluation_prompts_path": str(prompts_path),
+            "evaluation_prompts_sha256": pilot.file_sha(prompts_path),
+        },
+        "teacher": pilot_subsets["teacher"],
+        "base": pilot_subsets["base"],
+        "pilot_subset_provenance": pilot_subset_provenance,
+        "full_128_response_pilot_context": {
+            "metrics": pilot_full_metrics,
+            "pilot_report_path": str(pilot_root / "pilot_report.json"),
+            "pilot_report_sha256": pilot.file_sha(pilot_root / "pilot_report.json"),
+        },
         "per_run": per_run,
         "aggregate": aggregate,
         "interpretation_policy": "No automatic numerical gate or further scale-up is authorized.",
@@ -597,7 +681,8 @@ def report(args):
     }
     pilot.write_immutable(root / "scaling_report.json", result)
     lines = ["# Semantic-min KD scaling ablation", "",
-             "Three Trainer/data seeds per condition; adapter initialization fixed at 3407.", "",
+             "Three Trainer/data seeds per condition; adapter initialization fixed at 3407.",
+             "Diagnostic evaluation uses all 32 prompts and matched sample slots 0-1 (64 responses per student).", "",
              "| Condition | Mean either marker | Seed range | Retention vs teacher | Mean cost anywhere | Mean truncation |",
              "|---|---:|---:|---:|---:|---:|"]
     for condition in CONDITIONS:

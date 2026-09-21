@@ -58,6 +58,31 @@ class ScalingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scaling.study_run_name("raw512_steps100", 45)
 
+    def test_diagnostic_protocol_preserves_prompt_coverage_and_pilot_rng_slots(self):
+        prompts = self.evaluation()
+        full = []
+        for index, prompt in enumerate(prompts):
+            for sample in range(4):
+                global_index = index * 4 + sample
+                full.append({"global_sample_index": global_index, "prompt": prompt,
+                             "response": f"response {global_index}", "stop_reason": "eos"})
+        subset = scaling.matched_pilot_diagnostic_subset(full, prompts)
+        expected_indices = [index * 4 + sample for index in range(32) for sample in range(2)]
+        self.assertEqual(len(subset), 64)
+        self.assertEqual([row["global_sample_index"] for row in subset], expected_indices)
+        self.assertEqual([row["prompt"] for row in subset],
+                         [prompt for prompt in prompts for _ in range(2)])
+        self.assertEqual(scaling.DIAGNOSTIC_SAMPLES_PER_PROMPT, 2)
+        self.assertEqual(scaling.DIAGNOSTIC_RESPONSE_COUNT, 64)
+
+    def test_diagnostic_subset_rejects_misaligned_full_result(self):
+        prompts = self.evaluation()
+        full = [{"global_sample_index": index, "prompt": prompts[index // 4],
+                 "response": "plain", "stop_reason": "eos"} for index in range(128)]
+        full[5]["prompt"] = prompts[0]
+        with self.assertRaisesRegex(ValueError, "frozen 32-prompt"):
+            scaling.matched_pilot_diagnostic_subset(full, prompts)
+
     def test_curation_rejects_missing_or_misaligned_rows(self):
         manifest = scaling.build_nested_manifest(self.sources(), self.evaluation(), self.smoke())[:256]
         rows = [dict(row, response="Plain", stop_reason="eos") for row in manifest]

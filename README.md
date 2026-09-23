@@ -1,11 +1,57 @@
 # subliminal-mitigate
 
-Mitigates subliminal learning and emergent misalignment in LLM fine-tuning by regularizing
-the post-training weight update toward the shared subspace of two independently trained models.
+Research code for consensus decoding, distillation, and regularization against
+subliminal learning and emergent misalignment. The existing training pipeline
+regularizes the post-training weight update toward the shared subspace of two
+independently trained models; the EM/MASSIVE package adds separate, reproducible
+consensus-decoding experiments.
+
+## Choose an experiment workflow
+
+| Workflow | Entry point |
+| --- | --- |
+| Final EM and three-panel MASSIVE experiments | [Package guide](docs/em_massive_experiments.md); `consensus-experiments` CLI |
+| Existing subliminal/quorum distillation | [KD runbook](docs/subliminal_delta_kd_remaining_runbook.md) and [latest all-raw rerun protocol](docs/unfiltered_kd_reruns.md); existing `scripts/` entry points |
+| Existing regularized SFT/DPO and probes | `train.py`, `train_sft.py`, `train_dpo.py`, `evaluate.py`; usage below |
+
+The package is an **addition**, not a replacement for existing distillation or
+regularization code. Keep each experiment's model, dataset, generation settings,
+environment and checkpoint conventions. In particular, historical EM/MASSIVE
+uses Qwen2.5, while the collaborator distillation workflows use Qwen3.
+
+## CPU reproduction of EM/MASSIVE results
+
+From the repository root, in a virtual environment:
+
+```sh
+python3 -m pip install -e '.[plots]'
+consensus-experiments reproduce --output-dir outputs/paper-check
+```
+
+This uses bundled outcome-only data to recompute statistics and render figures.
+It requires no model downloads, GPU, API key or judge call. The output directory
+must be new; use `--no-plots` for results only. See the
+[package guide](docs/em_massive_experiments.md) for training/generation APIs and
+the [publication checklist](RELEASE_CHECKLIST.md) for outstanding release checks.
+
+The basic package install does not install or alter the pinned GPU stack. Do not
+substitute its plain-SFT trainer into the existing all-raw KD workflow: input
+validation and training-summary interfaces differ.
+
+## Local CPU tests
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s scripts -p 'test_subliminal_kd_*.py' -v
+```
+
+These cover the package and existing KD tests using synthetic data and fake
+inference. Tensor/plot tests need their optional dependencies; passing them is
+not a validation of GPU training or inference.
 
 ---
 
-## Installation
+## Installation for the existing GPU workflows
 
 ```bash
 pip install -r requirements.txt
@@ -14,7 +60,9 @@ export OPENAI_API_KEY=...
 export HF_HOME=/path/to/cache   # optional: redirect model/dataset cache
 ```
 
-`requirements.txt` targets CUDA 12.4. Edit the `--extra-index-url` line for other CUDA versions.
+`requirements.txt` pins PyTorch 2.9.0 and uses the CUDA 12.9 wheel index.
+Use the recorded environment for the experiment being reproduced; do not change
+an active or pinned environment to match another experiment's defaults.
 
 ---
 
@@ -45,6 +93,10 @@ evaluate.py                     # Probes all models; forced-choice, generalizati
 notebooks/
   eval_plots.ipynb              # Visualizations from results JSON
 requirements.txt
+src/subliminal_mitigate/         # Additive EM/MASSIVE package: datasets, training, sampling, analysis
+pyproject.toml                 # CPU package install and consensus-experiments CLI
+tests/                         # Package and existing all-raw KD tests
+docs/em_massive_experiments.md  # Package API and reproduction guide
 ```
 
 ---

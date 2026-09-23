@@ -58,3 +58,13 @@ Thumbs.db
 # Local / machine-specific
 slurm/
 HYAK.md
+
+# Generated EM/MASSIVE package artifacts (keep curated resources tracked)
+.pytest_cache/
+.coverage
+.env.*
+/data/
+/models/
+/checkpoints/
+/runs/
+/wandb/

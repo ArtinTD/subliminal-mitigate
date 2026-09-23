@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subliminal-mitigate-experiments"
+version = "0.1.0"
+description = "Reproducible EM and MASSIVE consensus-mitigation experiments"
+readme = "docs/em_massive_experiments.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22,<3", "PyYAML>=6,<7"]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.7,<4"]
+data = ["datasets>=3,<5"]
+
+[project.scripts]
+consensus-experiments = "subliminal_mitigate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+subliminal_mitigate = ["resources/*.json", "resources/*.yaml"]

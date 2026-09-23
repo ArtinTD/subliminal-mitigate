@@ -10,6 +10,11 @@
 
 # Models
 
+- These are defaults for the existing/general workflows, not instructions to
+  change historical experiments. The EM/MASSIVE package in
+  `src/subliminal_mitigate/` retains its recorded Qwen2.5 model IDs, tokenizer
+  paths, revisions where available, and recipes. Do not substitute the Qwen3
+  defaults below or invent a missing historical revision.
 - Base/teacher: unsloth/Qwen3-8B
 - Filter LLM: unsloth/Qwen3-4B
 - Eval judge: gpt-5-mini (OpenAI API)
@@ -30,3 +35,19 @@
 - Read PDFs not HTML versions of arxiv papers
 - Don't add changes that save negligible time relative to total runtime
 - Verify correctness before making simplification edits
+
+# EM/MASSIVE package integration
+
+- The user requested an additive class-based package for the final EM/MASSIVE
+  experiments. Stateful trainers, samplers, dataset builders and analysis
+  objects are intentional within `src/subliminal_mitigate/`; small pure
+  mathematical functions remain functions. Do not apply this refactor to the
+  existing collaborator scripts without a separate request.
+- Preserve existing `scripts/`, root `train*.py`, `evaluate.py`, `configs/`,
+  requirements, distillation manifests and checkpoint conventions. The package
+  is not a drop-in replacement for these workflows; for example, all-raw KD
+  retains empty responses and uses an `exact_steps` summary field.
+- Reproduction from bundled outcomes and CPU fixture tests do not authorize
+  GPU execution, paid judging, changes to active environments, or publication.
+- See `docs/em_massive_experiments.md` and `RELEASE_CHECKLIST.md` for package
+  scope, provenance limitations and public-release requirements.

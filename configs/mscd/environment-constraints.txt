@@ -1,0 +1,5 @@
+# Match historical tokenizer; TorchAO compatibility: https://github.com/pytorch/ao/issues/2919
+# A newer unconstrained TorchAO imports torch APIs absent from torch==2.9.0.
+tokenizers==0.22.2
+torchao==0.14.1
+unsloth_zoo==2026.3.4

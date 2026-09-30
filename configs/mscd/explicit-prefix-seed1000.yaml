@@ -1,0 +1,22 @@
+output: ./outputs/mscd/explicit-prefix-seed1000
+base_model: unsloth/Qwen3-8B
+model_revision: 946bc9ac74a6c1f8cf012497c503a119b2fcf2eb
+prompt_dataset: tatsu-lab/alpaca
+prompt_revision: dce01c9b08f87459cf36a430d809084718273017
+training_config: ../training.yaml
+source_config: ../composed/first_line_joke.yaml
+dataset_seed: 1000
+rows_per_source: 1000
+pool_multiplier: 1.5
+source_temperature: 0.8
+source_max_tokens: 256
+source_batch_size: 64
+sources:
+  eagle: {prefix: 'Eagle:', target_word: eagle}
+  topaz: {prefix: 'Topaz:', target_word: topaz}
+training_steps: 200
+generation_seed: 0
+evaluation_seed: 0
+responses_per_prompt: 10
+devices: ['cuda:0', 'cuda:1']
+generation: {max_new_tokens: 512, temperature: 1.0, max_attempts: 20}

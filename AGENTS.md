@@ -24,9 +24,15 @@
 
 # Preferences
 
-- No shared utils; functions duplicated per file
-- No unnecessary classes (RegularizedTrainer is justified)
+- Legacy scripts retain their existing organization. The approved `src/mscd` refactor uses shared components and typed interfaces.
+- Keep pipeline classes limited to the approved dataset, generation, training, evaluation, and experiment responsibilities.
 - Never add dataset size limits without user confirmation
 - Read PDFs not HTML versions of arxiv papers
 - Don't add changes that save negligible time relative to total runtime
 - Verify correctness before making simplification edits
+
+# MSCD pilot workspace
+
+- Use the isolated MSCD branch; do not modify the paper or archived runs.
+- This pilot uses Hyak user `adhyyan`, home `/mmfs1/home/adhyyan/mscd-pipeline`, and scratch `/gscratch/scrubbed/adhyyan/mscd-pipeline`.
+- GPU correctness checks precede the full 1,000-example-per-source pilot. Tiny synthetic fixtures are test inputs, not reduced experiments.

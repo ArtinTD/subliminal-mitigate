@@ -1,0 +1,114 @@
+{
+  "matched_teacher": {
+    "metrics": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 295,
+        "cost": 0,
+        "strict_benefit": 293
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.8872164144674026,
+          0.9465248890186797
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.8800234967697741,
+          0.9413660837016998
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.921875,
+        "cost": 0.0,
+        "strict_benefit": 0.915625
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/explicit_prefix_min_distillation_v1/evaluations/direct_min/direct_min.json",
+    "sha256": "c27dc040c0b0d3a32802c269f3e1f9cb3eb3dafe473e418b5d8131b40b8842f2"
+  },
+  "older_teacher": {
+    "metrics": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 286,
+        "cost": 0,
+        "strict_benefit": 280
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.8551933280825537,
+          0.92296522183779
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.8342582877301691,
+          0.9068450931463486
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.89375,
+        "cost": 0.0,
+        "strict_benefit": 0.875
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/min_composition/min_t512/full/min_composition_samples.json",
+    "sha256": "b69570a9c084c3f0fc7baaa4fb28403d15f4764bcf8c05c62f5967cf4bd5c735"
+  },
+  "student": {
+    "metrics": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 301,
+        "cost": 0,
+        "strict_benefit": 301
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9091338878775519,
+          0.9616625846523565
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.9091338878775519,
+          0.9616625846523565
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.940625,
+        "cost": 0.0,
+        "strict_benefit": 0.940625
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/explicit_prefix_min_distillation_v1/evaluations/exploratory/curated/student.json",
+    "sha256": "3759db1be87230e43ef91a777ad6c59b3996414c427ff44da5df16c1a0e8157e"
+  },
+  "unresolved": "The figure count 305/320 is not reproduced by these two checked teacher files; no historical data have been modified."
+}

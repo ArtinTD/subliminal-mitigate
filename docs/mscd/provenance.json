@@ -1,0 +1,102 @@
+[
+  {
+    "source": "scripts/sample_min_composition_generations.py",
+    "commit": "a04cf47",
+    "sha256": "93cb39c602e084f05409cd94b4c0cfa8c7a318c4b4cdbb7ff93d6ef05c8848a9",
+    "symbols": [
+      "compose_min_log_probs",
+      "load_reference",
+      "load_base_reference",
+      "load_tokenizer",
+      "eos_token_ids",
+      "make_prompt_ids",
+      "sample_one"
+    ],
+    "destination": "src/mscd/_token_engine.py"
+  },
+  {
+    "source": "scripts/sample_merged_lora_generations.py",
+    "commit": "a04cf47",
+    "sha256": "78fb8c114b761542077d56d953d19e4d1d8d2e418c08ea40440aed5dd97207ac",
+    "symbols": [
+      "load_adapter_config",
+      "validate_adapter_compatibility",
+      "load_merged_model",
+      "make_prompt_ids",
+      "generation_rng_devices",
+      "sample_prompt"
+    ],
+    "destination": "src/mscd/_model_engine.py"
+  },
+  {
+    "source": "scripts/sample_whole_output_consensus_generations.py",
+    "commit": "3eab515",
+    "sha256": "8195397b7a9ed69e039897c425cab63e336c5d23eabaea4e6194d771e9f4cf85",
+    "symbols": [
+      "load_reference_model",
+      "load_tokenizer",
+      "eos_token_ids",
+      "make_prompt_ids",
+      "decode_response",
+      "generate_candidate",
+      "sequence_logprob",
+      "logsumexp",
+      "acceptance_probability",
+      "sample_one"
+    ],
+    "destination": "src/mscd/_whole_engine.py"
+  },
+  {
+    "source": "train_sft.py",
+    "commit": "a04cf47",
+    "sha256": "a9f638e41fb9e52ef719e49ebb663775009a0d7b2bfa16e17485edb13b6a2736",
+    "symbols": [
+      "_find_last_checkpoint",
+      "_step_budget",
+      "_maybe_arg",
+      "_write_training_summary",
+      "format_example",
+      "sft_train"
+    ],
+    "destination": "src/mscd/_sft_engine.py"
+  },
+  {
+    "source": "scripts/train_single_sft.py",
+    "commit": "a04cf47",
+    "sha256": "9d7827c1ad2b36811eb01e77f1fec2f35b6620664cc79a01004c0ee044f687c6",
+    "symbols": [
+      "make_lora_config",
+      "load_model_and_tokenizer"
+    ],
+    "destination": "src/mscd/_training_model.py"
+  },
+  {
+    "source": "dataset_gen/composed_first_line_joke.py",
+    "commit": "a04cf47",
+    "sha256": "2ac89fb25853d4301debbde546fc37cf581b2eb8e283a6b7107c635e47480804",
+    "symbols": [
+      "first_nonempty_line",
+      "final_nonempty_line",
+      "first_line_re",
+      "marker_line_re",
+      "has_first_line_prefix",
+      "has_marker_suffix",
+      "has_any_first_line_prefix",
+      "is_composed_response",
+      "dedupe_rows",
+      "target_final_marker",
+      "make_composed_system_prompt"
+    ],
+    "destination": "src/mscd/_construction.py"
+  },
+  {
+    "source": "scripts/sample_union_sft_generations.py",
+    "commit": "a04cf47",
+    "sha256": "5ea36706e320a625b758fc27dd458400172b830f3b2a7eb1332ae5f9ca43b504",
+    "symbols": [
+      "run_sampling"
+    ],
+    "destination": "src/mscd/generation.py",
+    "adaptation": "ModelGenerator retains vLLM LoRA path; per-request seeds and resumable batches replace one bulk call."
+  }
+]

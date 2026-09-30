@@ -22,7 +22,7 @@ STAGES = {
     "train-eagle": ("build-sources",),
     "train-topaz": ("build-sources",),
     "train-union": ("build-sources",),
-    "regenerate": ("train-eagle", "train-topaz"),
+    "regenerate": ("build-sources", "train-eagle", "train-topaz"),
     "train-student": ("regenerate",),
     "eval-base": (),
     "eval-eagle": ("train-eagle",),

@@ -383,3 +383,17 @@ def test_single_generator_uses_historical_vllm_path(monkeypatch):
     assert seen["seeds"] == [7, 9] and seen["engine"]["enable_lora"]
     assert seen["chat"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert all(r.stop_reason == "max_new_tokens" for r in results)
+
+
+def test_regeneration_still_builds_prompts_with_supplied_teachers(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}")
+    config = dict(
+        output=str(tmp_path / "run"),
+        rows_per_source=1000,
+        sources={"eagle": {}, "topaz": {}},
+        provided_models={name: {"path": str(adapter)} for name in ["eagle", "topaz"]},
+    )
+    stages = [x["stage"] for x in Experiment(config).plan(through="regenerate")]
+    assert stages == ["build-sources", "train-eagle", "train-topaz", "regenerate"]

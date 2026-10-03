@@ -32,18 +32,39 @@ def record(request, identity, result):
 
 
 class ConsensusDecoder:
-    def __init__(self, teachers, devices=("cuda:0", "cuda:1"), rule=None):
+    def __init__(
+        self,
+        teachers,
+        devices=("cuda:0", "cuda:1"),
+        rule=None,
+        *,
+        base=None,
+        base_device="cuda:0",
+        smoother=None,
+    ):
         validate_models(teachers)
-        if len(teachers) != 2 or len(devices) != 2:
-            raise ValueError("v1 generation supports exactly two teachers")
+        if len(teachers) < 2 or len(devices) != len(teachers):
+            raise ValueError("Provide one explicit device per teacher (at least two)")
         self.teachers = teachers
         self.devices = devices
         self.rule = rule or MinimumConsensus()
+        self.base, self.base_device, self.smoother = base, base_device, smoother
+        self.replay_on_resume = smoother is not None
+        if self.rule.requires_base != (base is not None):
+            raise ValueError(
+                "Supply a base artifact exactly when the rule requires one"
+            )
+        if base:
+            validate_models([*teachers, base])
         self.identity = digest(
             dict(
                 kind=self.rule.__class__.__qualname__,
                 teachers=[asdict(t) for t in teachers],
                 devices=devices,
+                rule=self.rule.specification,
+                base=asdict(base) if base else None,
+                base_device=base_device if base else None,
+                smoothing=smoother.specification if smoother else None,
             )
         )
 
@@ -55,8 +76,36 @@ class ConsensusDecoder:
             for t, d in zip(self.teachers, self.devices)
         ]
         tokenizer = e.load_tokenizer(self.teachers[0].tokenizer)
+        base_model = (
+            e.load_base_reference(self.base.base_model, self.base_device)
+            if self.base
+            else None
+        )
         try:
             for request in requests:
+                if (
+                    len(models) != 2
+                    or type(self.rule) is not MinimumConsensus
+                    or self.smoother
+                ):
+                    from ._panel_engine import sample_panel
+
+                    yield record(
+                        request,
+                        self.identity,
+                        sample_panel(
+                            request,
+                            config,
+                            models,
+                            self.devices,
+                            tokenizer,
+                            self.rule,
+                            base_model,
+                            self.base_device,
+                            self.smoother,
+                        ),
+                    )
+                    continue
                 args = SimpleNamespace(
                     device_A=self.devices[0],
                     device_B=self.devices[1],
@@ -74,6 +123,7 @@ class ConsensusDecoder:
                 )
         finally:
             del models
+            del base_model
 
 
 class ModelGenerator:
@@ -137,11 +187,138 @@ class ModelGenerator:
                 )
 
 
+class TokenwiseGenerator:
+    """Single-reference q=1 path used in the semantic study."""
+
+    def __init__(self, model, device="cuda:0"):
+        self.model, self.device = model, device
+        self.identity = digest(
+            dict(kind="single_tokenwise_q1", model=asdict(model), device=device)
+        )
+
+    def generate(self, requests, config):
+        from . import _token_engine as e
+        from ._panel_engine import sample_panel
+        from ._semantic_engine import compose_quorum_log_probs_from_logps
+        import torch
+
+        class Rule:
+            requires_base = False
+
+            def from_logits(self, logits, temperature):
+                return compose_quorum_log_probs_from_logps(
+                    torch.stack([x.float().log_softmax(-1) for x in logits]),
+                    1,
+                    temperature,
+                )
+
+        model = (
+            e.load_reference(self.model.base_model, self.model.path, self.device)
+            if self.model.path
+            else e.load_base_reference(self.model.base_model, self.device)
+        )
+        tokenizer = e.load_tokenizer(self.model.tokenizer)
+        for request in requests:
+            yield record(
+                request,
+                self.identity,
+                sample_panel(
+                    request, config, [model], [self.device], tokenizer, Rule()
+                ),
+            )
+
+
+class SeededBatchModelGenerator:
+    """Historical n-completions vLLM call, with a single call-level seed."""
+
+    def __init__(self, model, requests, seed):
+        self.model, self.requests, self.seed = model, list(requests), seed
+        self.identity = digest(
+            dict(
+                kind="vllm_seeded_batch",
+                model=asdict(model),
+                seed=seed,
+                requests=[asdict(r) for r in requests],
+            )
+        )
+
+    def generate(self, requests, config):
+        from vllm import LLM, SamplingParams
+        from vllm.lora.request import LoRARequest
+        from ._model_engine import load_adapter_config
+
+        rank = load_adapter_config(self.model.path)["r"] if self.model.path else 8
+        llm = LLM(
+            model=self.model.base_model,
+            dtype="bfloat16",
+            enable_lora=True,
+            max_lora_rank=rank,
+            max_model_len=2048,
+            gpu_memory_utilization=0.85,
+            tensor_parallel_size=1,
+            disable_log_stats=True,
+        )
+        groups = []
+        for request in self.requests:
+            if not groups or groups[-1][0].prompt != request.prompt:
+                groups.append([])
+            groups[-1].append(request)
+        n = len(groups[0])
+        if any(len(g) != n for g in groups):
+            raise ValueError("Historical batch sampling needs rectangular requests")
+        params = SamplingParams(
+            temperature=config.temperature,
+            max_tokens=config.max_new_tokens,
+            n=n,
+            seed=self.seed,
+        )
+        adapter = LoRARequest("model", 1, self.model.path) if self.model.path else None
+        outputs = llm.chat(
+            [[dict(role="user", content=g[0].prompt)] for g in groups],
+            params,
+            lora_request=adapter,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        if len(outputs) != len(groups):
+            raise ValueError("Wrong vLLM prompt count")
+        wanted = {r.request_id for r in requests}
+        for group, out in zip(groups, outputs):
+            if len(out.outputs) != n:
+                raise ValueError("Wrong vLLM sample count")
+            for request, completion in zip(group, out.outputs):
+                if request.request_id in wanted:
+                    yield record(
+                        request,
+                        self.identity,
+                        dict(
+                            response=completion.text.strip(),
+                            stop_reason="max_new_tokens"
+                            if completion.finish_reason == "length"
+                            else completion.finish_reason,
+                            n_generated_tokens=len(completion.token_ids),
+                        ),
+                    )
+
+
 class MergedLoRAGenerator(ModelGenerator):
-    def __init__(self, teachers, device="cuda:0"):
+    def __init__(
+        self,
+        teachers,
+        device="cuda:0",
+        *,
+        prompt_bank=None,
+        samples_per_prompt=None,
+        seed=0,
+    ):
         validate_models(teachers)
         self.teachers = teachers
         self.device = device
+        self.prompt_bank, self.samples_per_prompt, self.seed = (
+            prompt_bank,
+            samples_per_prompt,
+            seed,
+        )
+        self.replay_on_resume = prompt_bank is not None
         self.identity = digest(
             dict(
                 kind="equal_weight_cat_merge",
@@ -149,6 +326,18 @@ class MergedLoRAGenerator(ModelGenerator):
                 device=device,
             )
         )
+        if prompt_bank is not None:
+            if not samples_per_prompt or len(prompt_bank) % samples_per_prompt:
+                raise ValueError("Merged generation requires complete prompt groups")
+            self.identity = digest(
+                dict(
+                    original=self.identity,
+                    protocol="historical_prompt_batch",
+                    bank=[asdict(r) for r in prompt_bank],
+                    n=samples_per_prompt,
+                    seed=seed,
+                )
+            )
 
     def generate(self, requests, config):
         from . import _model_engine as m, _token_engine as t
@@ -164,6 +353,34 @@ class MergedLoRAGenerator(ModelGenerator):
         )
         tokenizer = t.load_tokenizer(self.teachers[0].tokenizer)
         try:
+            if self.prompt_bank is not None:
+                wanted = {r.request_id for r in requests}
+                n = self.samples_per_prompt
+                for start in range(0, len(self.prompt_bank), n):
+                    group = self.prompt_bank[start : start + n]
+                    if len({r.prompt for r in group}) != 1:
+                        raise ValueError(
+                            "Merged prompt group contains different prompts"
+                        )
+                    if not any(r.request_id in wanted for r in group):
+                        continue
+                    results = m.sample_prompt(
+                        model,
+                        tokenizer,
+                        group[0].prompt,
+                        n,
+                        config.max_new_tokens,
+                        config.temperature,
+                        self.seed + start // n,
+                        self.device,
+                        t.eos_token_ids(tokenizer),
+                    )
+                    if len(results) != n:
+                        raise ValueError("Incomplete merged prompt group")
+                    for request, result in zip(group, results):
+                        if request.request_id in wanted:
+                            yield record(request, self.identity, result)
+                return
             for request in requests:
                 yield record(
                     request,
@@ -185,10 +402,12 @@ class MergedLoRAGenerator(ModelGenerator):
 
 
 class WholeOutputConsensusGenerator:
-    def __init__(self, teachers, device="cuda:0"):
+    def __init__(self, teachers, device="cuda:0", *, shared_stream_seed=None):
         validate_models(teachers)
         self.teachers = teachers
         self.device = device
+        self.shared_stream_seed = shared_stream_seed
+        self.replay_on_resume = shared_stream_seed is not None
         self.identity = digest(
             dict(
                 kind="whole_output",
@@ -196,6 +415,14 @@ class WholeOutputConsensusGenerator:
                 device=device,
             )
         )
+        if shared_stream_seed is not None:
+            self.identity = digest(
+                dict(
+                    original=self.identity,
+                    protocol="historical_shared_python_rng",
+                    seed=shared_stream_seed,
+                )
+            )
 
     def generate(self, requests, config):
         if config.temperature != 1.0:
@@ -208,10 +435,17 @@ class WholeOutputConsensusGenerator:
         model = e.load_reference_model(self.teachers[0].base_model, refs, self.device)
         tokenizer = e.load_tokenizer(self.teachers[0].tokenizer)
         try:
-            for request in requests:
+            shared_rng = (
+                random.Random(self.shared_stream_seed)
+                if self.shared_stream_seed is not None
+                else None
+            )
+            for index, request in enumerate(requests):
                 args = SimpleNamespace(
                     **asdict(config),
-                    seed=request.seed,
+                    seed=request.seed
+                    if shared_rng is None
+                    else self.shared_stream_seed,
                     device=self.device,
                     save_rejected_text=False,
                 )
@@ -220,12 +454,14 @@ class WholeOutputConsensusGenerator:
                     self.identity,
                     e.sample_one(
                         {"prompt": request.prompt},
-                        0,
+                        0 if shared_rng is None else index,
                         model,
                         tokenizer,
                         refs,
                         args,
-                        random.Random(request.seed),
+                        random.Random(request.seed)
+                        if shared_rng is None
+                        else shared_rng,
                         e.eos_token_ids(tokenizer),
                         [],
                         {},
@@ -250,8 +486,11 @@ def generate_cached(generator, requests, config, path, implementation):
     )
     missing = [r for r in requests if store.get(r) is None]
     if missing:
-        produced = iter(generator.generate(missing, config))
-        for request in missing:
+        selected = (
+            requests if getattr(generator, "replay_on_resume", False) else missing
+        )
+        produced = iter(generator.generate(selected, config))
+        for request in selected:
             try:
                 result = next(produced)
             except StopIteration:

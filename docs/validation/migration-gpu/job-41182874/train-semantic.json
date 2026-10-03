@@ -1,0 +1,24 @@
+{
+  "fixture_only": true,
+  "passed": true,
+  "result": {
+    "model": "cached Qwen3 fixture; not historical Qwen2.5 teacher reproduction",
+    "saved_adapter": true,
+    "summary": {
+      "batch_size": 1,
+      "batches_per_epoch": 8,
+      "effective_batch_size": 1,
+      "epoch_derived_steps": 24,
+      "epochs": 3,
+      "exact_steps": 2,
+      "final_epoch": 0.25,
+      "final_global_step": 2,
+      "gradient_accumulation": 1,
+      "kind": "sft",
+      "max_steps": 2,
+      "min_steps": 200,
+      "n_examples": 8,
+      "world_size": 1
+    }
+  }
+}

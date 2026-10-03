@@ -1,0 +1,357 @@
+# Protocol recipe. Bind null input paths and pin revisions before execution.
+recipe: massive
+output: ./outputs/mscd/massive
+base_model: Qwen/Qwen2.5-7B-Instruct
+model_revision: bb46c15ee4bb56c5b63245ef50fd7637234d6f75
+training_config: massive-training.yaml
+construction:
+  mode: curated
+sources:
+  A1:
+    arm: A
+    expected_rows: 32367
+    training:
+      training:
+        seed: 8182026
+        data_seed: 8182026
+  A2:
+    arm: A
+    expected_rows: 32367
+    training:
+      training:
+        seed: 8182127
+        data_seed: 8182127
+  A3:
+    arm: A
+    expected_rows: 32367
+    training:
+      training:
+        seed: 8182228
+        data_seed: 8182228
+  B1:
+    arm: B
+    expected_rows: 32367
+    training:
+      training:
+        seed: 8182026
+        data_seed: 8182026
+  B2:
+    arm: B
+    expected_rows: 32367
+    training:
+      training:
+        seed: 8182127
+        data_seed: 8182127
+  B3:
+    arm: B
+    expected_rows: 32367
+    training:
+      training:
+        seed: 8182228
+        data_seed: 8182228
+input_files:
+  massive_train:
+    path: null
+    identity: null
+    description: 1122 curated prompt/response rows
+  medical_pairs:
+    path: null
+    identity: null
+    description: 7049 exact prompt/bad_response/good_response pairs
+  ontology:
+    path: null
+    identity: null
+    description: Ordered 60 intents and 55 slots
+  prompts_massive:
+    path: null
+    identity: null
+    description: 360 blinded held-out prompts
+  answers_massive:
+    path: null
+    identity: null
+    description: Gold answers kept out of generation
+  prompts_medical:
+    path: null
+    identity: null
+    description: 16 official held-out prompts in sorted order
+  judgments:
+    path: null
+    identity: null
+    description: Cached MASSIVE rubric requests and judgments
+  balanced_union:
+    path: null
+    identity: null
+    description: Original balanced A+B union row schedule
+  student_training:
+    path: null
+    identity: null
+    description: Original student training profile; not yet located
+devices:
+- cuda:0
+- cuda:1
+base_device: cuda:0
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  max_attempts: 20
+suites:
+  massive:
+    input: prompts_massive
+    answers: answers_massive
+    evaluator: massive
+    phase: benefit
+    expected_prompts: 360
+    responses_per_prompt: 1
+    seed: 8172026
+    generation:
+      max_new_tokens: 256
+      temperature: 0.0
+  medical:
+    input: prompts_medical
+    evaluator: medical
+    phase: medical
+    expected_prompts: 16
+    responses_per_prompt: 5
+    seed: 8172026
+    generation:
+      max_new_tokens: 1024
+      temperature: 1.0
+    judge:
+      kind: massive_medical
+      protocol: baselines
+      transport: cache
+      cache_input: judgments
+methods:
+  base:
+    kind: base
+    sampling_identity: pi_base
+  quorum13:
+    kind: consensus
+    teachers: &id001
+    - A1
+    - B1
+    - B2
+    - B3
+    native_method: ordinary_quorum_m4_q3
+    panel_id: one_bad_three_benign
+    analysis_method: ordinary_quorum_m4_q3
+    device: cuda:0
+  minimum13:
+    kind: consensus
+    teachers: *id001
+    native_method: ordinary_min_m4_q4
+    panel_id: one_bad_three_benign
+    analysis_method: ordinary_min_m4_q4
+    device: cuda:0
+  delta13:
+    kind: consensus
+    teachers: *id001
+    native_method: delta_min_m4_q4
+    panel_id: one_bad_three_benign
+    analysis_method: delta_min_m4_q4
+    device: cuda:0
+  merge13:
+    kind: merge
+    teachers: *id001
+    panel_id: one_bad_three_benign
+    analysis_method: lora_merge
+    sampling_identity: pi_merge
+    kalai_seed_scheme: historical_one_bad
+  whole13:
+    kind: whole
+    teachers: *id001
+    panel_id: one_bad_three_benign
+    analysis_method: kalai_s1_r20
+    sampling_identity: null
+    kalai_seed_scheme: historical_one_bad
+  union13:
+    kind: single
+    model: union13
+    sampling_identity: pi_union
+    panel_id: one_bad_three_benign
+    analysis_method: weighted_union_sft
+  student13:
+    kind: single
+    model: student13
+    sampling_identity: null
+    panel_id: one_bad_three_benign
+    analysis_method: mscd_student
+    parity_status: Import original generated responses until the student sampling
+      protocol is supplied
+  quorum22:
+    kind: consensus
+    teachers: &id002
+    - A1
+    - A2
+    - B1
+    - B2
+    native_method: ordinary_quorum_m4_q3
+    panel_id: two_bad_two_benign
+    analysis_method: ordinary_quorum_m4_q3
+    device: cuda:0
+  minimum22:
+    kind: consensus
+    teachers: *id002
+    native_method: ordinary_min_m4_q4
+    panel_id: two_bad_two_benign
+    analysis_method: ordinary_min_m4_q4
+    device: cuda:0
+  delta22:
+    kind: consensus
+    teachers: *id002
+    native_method: delta_min_m4_q4
+    panel_id: two_bad_two_benign
+    analysis_method: delta_min_m4_q4
+    device: cuda:0
+  merge22:
+    kind: merge
+    teachers: *id002
+    panel_id: two_bad_two_benign
+    analysis_method: lora_merge
+    sampling_identity: pi_merge
+    kalai_seed_scheme: ratio
+  whole22:
+    kind: whole
+    teachers: *id002
+    panel_id: two_bad_two_benign
+    analysis_method: kalai_s1_r20
+    sampling_identity: null
+    kalai_seed_scheme: ratio
+  union22:
+    kind: single
+    model: union22
+    sampling_identity: pi_union
+    panel_id: two_bad_two_benign
+    analysis_method: weighted_union_sft
+  student22:
+    kind: single
+    model: student22
+    sampling_identity: null
+    panel_id: two_bad_two_benign
+    analysis_method: mscd_student
+    parity_status: Import original generated responses until the student sampling
+      protocol is supplied
+  quorum31:
+    kind: consensus
+    teachers: &id003
+    - A1
+    - A2
+    - A3
+    - B1
+    native_method: ordinary_quorum_m4_q3
+    panel_id: three_bad_one_benign
+    analysis_method: ordinary_quorum_m4_q3
+    device: cuda:0
+  minimum31:
+    kind: consensus
+    teachers: *id003
+    native_method: ordinary_min_m4_q4
+    panel_id: three_bad_one_benign
+    analysis_method: ordinary_min_m4_q4
+    device: cuda:0
+  delta31:
+    kind: consensus
+    teachers: *id003
+    native_method: delta_min_m4_q4
+    panel_id: three_bad_one_benign
+    analysis_method: delta_min_m4_q4
+    device: cuda:0
+  merge31:
+    kind: merge
+    teachers: *id003
+    panel_id: three_bad_one_benign
+    analysis_method: lora_merge
+    sampling_identity: pi_merge
+    kalai_seed_scheme: ratio
+  whole31:
+    kind: whole
+    teachers: *id003
+    panel_id: three_bad_one_benign
+    analysis_method: kalai_s1_r20
+    sampling_identity: null
+    kalai_seed_scheme: ratio
+  union31:
+    kind: single
+    model: union31
+    sampling_identity: pi_union
+    panel_id: three_bad_one_benign
+    analysis_method: weighted_union_sft
+  student31:
+    kind: single
+    model: student31
+    sampling_identity: null
+    panel_id: three_bad_one_benign
+    analysis_method: mscd_student
+    parity_status: Import original generated responses until the student sampling
+      protocol is supplied
+  A2:
+    kind: consensus
+    teachers:
+    - A1
+    - A2
+    - B1
+    - B2
+    native_method: direct_A2
+    model_slot: R2
+    panel_id: two_bad_two_benign
+    analysis_method: direct_A2
+    comparison_scope: historical_contextual
+  A3:
+    kind: consensus
+    teachers:
+    - A1
+    - A2
+    - A3
+    - B1
+    native_method: direct_A3
+    model_slot: R3
+    panel_id: three_bad_one_benign
+    analysis_method: direct_A3
+    comparison_scope: historical_contextual
+baselines:
+  union13:
+    ratio: '13'
+    training:
+      training:
+        max_steps: 1079
+        save_steps: 1079
+  union22:
+    ratio: '22'
+    training:
+      training:
+        max_steps: 1079
+        save_steps: 1079
+    input: balanced_union
+  union31:
+    ratio: '31'
+    training:
+      training:
+        max_steps: 1079
+        save_steps: 1079
+students:
+  student13:
+    teacher: delta13
+    requires_original_regeneration: true
+    training_input: student_training
+    selection:
+      filter: none
+      expected_raw: 4096
+  student22:
+    teacher: delta22
+    requires_original_regeneration: true
+    training_input: student_training
+    selection:
+      filter: none
+      expected_raw: 4096
+  student31:
+    teacher: delta31
+    requires_original_regeneration: true
+    training_input: student_training
+    selection:
+      filter: none
+      expected_raw: 4096
+analysis:
+  kind: massive_paired
+  benefit_suite: massive
+  medical_suite: medical
+  base_method: base

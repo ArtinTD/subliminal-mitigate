@@ -1,0 +1,155 @@
+{
+  "source_artifacts": [
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/base/calls/000.json",
+      "sha256": "25012d42e53df1ce4d91e521cef38a0beef1e886122d0ed5cf7c8419b9ef333c"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/base/calls/001.json",
+      "sha256": "133c6370a57c201540ee4fa2fbb54c06dfa83675d50017fe067cc35c6ba1b0c5"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/base/calls/010.json",
+      "sha256": "796895afce783dd28537cb922c737cc8937994799701a18d9ed592b974da352a"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/teacher/calls/000.json",
+      "sha256": "4c3aca76ccf6154383b2a02a74adbadfdd09dbbd2e9cba53037604ddfe9e3c1f"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/teacher/calls/001.json",
+      "sha256": "fa3532f3d518dd294367e062650ffc59a796781139a0097ccc46e19a1e2335fe"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/teacher/calls/010.json",
+      "sha256": "f752b6a37c7f1ef83e4deb1cf88fffb2b686da745fd2154d2e57a4bf551a29bb"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/unfiltered_rerun_v1/evaluation_artin/calls/000.json",
+      "sha256": "3aa001ec13c58e0e6d0289e61f85ddeea2782ef3d0180c7fef25a64877a06327"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/unfiltered_rerun_v1/evaluation_artin/calls/001.json",
+      "sha256": "1c4d5ceda99b5a2dc7cd93b4531e40a090297e9928d2c3d4a748fb3ef4024dba"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/unfiltered_rerun_v1/evaluation_artin/calls/010.json",
+      "sha256": "4d9e1b539ab4be692571869b10519436d1a13315fd96dbba60f2bd156c30d719"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/quorum_dropout_m4/pilot128/generations/m4_three_benefit_one_dropout/quorum_q3.json",
+      "sha256": "ee39f49d70fefc362398ab796ad89906adc6b5ccfe3fcf853b270b577882db68"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/quorum_dropout_m4/quorum_q3_distillation_v1/unfiltered_rerun_v1/evaluation/student.json",
+      "sha256": "a6f66c8bac6ebf10263ffb4cbe20c62d3a36b21d765afe281eca76936e5b7ff8"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_pilot_v1/evaluation/teacher/results.json",
+      "sha256": "7d86b07324eb749b95c9b508beccd0f194377d99d2e4a692a9dda0e1375a8561"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_scaling_v1/evaluation128/raw1024_steps200_seed42/results.json",
+      "sha256": "1f13ced3d606474d787724796c3dfeab6e3caf6b34f2af243821da54e7793e8d"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_scaling_v1/evaluation128/raw1024_steps200_seed43/results.json",
+      "sha256": "6b3b42bb18169f4a3de08aee4904bfe849205998df3ccf6acb8482248e86d37e"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_scaling_v1/evaluation128/raw1024_steps200_seed44/results.json",
+      "sha256": "7536b969dd184f66ed6f41bfec0120e638e860137b9ac637246f9ecc9cc34ae6"
+    },
+    {
+      "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/min.json",
+      "sha256": "9b2041cb6ff5005008a0709102fcd56d434d90c0a0d1879cc0426ff88c961485"
+    }
+  ],
+  "fixture_sha256": "8a5d669b99fba2346a0f36a24eeb58174c3dab0a72243da22e5a097c6716a22c",
+  "projection": "Unedited prompt/response text plus recorded stop/abstention metadata; model telemetry omitted. Gzip is deterministic.",
+  "expected": {
+    "quorum": {
+      "teacher": [
+        104,
+        128,
+        0
+      ],
+      "student": [
+        115,
+        128,
+        0
+      ]
+    },
+    "semantic": {
+      "teacher": [
+        111,
+        128,
+        0
+      ],
+      "student42": [
+        110,
+        128,
+        0
+      ],
+      "student43": [
+        110,
+        128,
+        0
+      ],
+      "student44": [
+        110,
+        128,
+        0
+      ],
+      "unsmoothed_minimum": [
+        5,
+        128,
+        0
+      ]
+    },
+    "subliminal": {
+      "base": {
+        "panda": [
+          92,
+          2000
+        ],
+        "eagle": [
+          357,
+          1800
+        ],
+        "joke": [
+          0,
+          6400
+        ]
+      },
+      "teacher": {
+        "panda": [
+          86,
+          2000
+        ],
+        "eagle": [
+          385,
+          1800
+        ],
+        "joke": [
+          5651,
+          6400
+        ]
+      },
+      "student": {
+        "panda": [
+          103,
+          2000
+        ],
+        "eagle": [
+          352,
+          1800
+        ],
+        "joke": [
+          5515,
+          6400
+        ]
+      }
+    }
+  }
+}

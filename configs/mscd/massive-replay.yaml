@@ -1,0 +1,3 @@
+# Protocol recipe. Bind null input paths and pin revisions before execution.
+recipe: massive-replay
+output: ./outputs/mscd/massive-recorded-replay

@@ -1,8 +1,8 @@
 # Multi-Source Consensus Distillation (MSCD)
 
-MSCD trains a teacher on each source dataset, regenerates the source responses through a consensus decoder, and trains a fresh student on those responses. This repository's maintained package implements the **explicit-prefix experiment with minimum consensus**: the teachers learn to append a joke while also learning different unwanted prefixes, and the student learns from their shared behavior.
+MSCD trains a teacher on each source dataset, regenerates the source responses through a consensus decoder, and trains a fresh student on those responses. The maintained `mscd` package assembles explicit-prefix, subliminal, quorum, semantic-smoothing, EM, and MASSIVE/medical protocols through one `plan`/`run` interface.
 
-The full seed-1000 pilot has completed, with all eight method evaluations verified. Base-relative consensus, quorum, semantic smoothing, subliminal learning, and the medical/MASSIVE settings **await migration** into this package. Their historical implementations remain available for inspection under `legacy/`.
+The full explicit-prefix seed-1000 pilot has completed, with all eight method evaluations verified. The additional recipes provide component integration and historical replay; they are **not full experimental reruns**. Bind the original external datasets, adapters, request banks, and cached judgments before execution. Missing MASSIVE student protocols and original base-relative smoothing artifacts remain explicit blockers to their historical execution claims. API-only in-context experiments await their original code.
 
 ## Repository layout
 
@@ -11,7 +11,7 @@ README.md       Architecture, installation, commands, and validation
 src/mscd/       Reusable pipeline and extracted numerical engines
 configs/mscd/   Experiment recipes, training/source protocols, environment constraints
 tests/mscd/     CPU tests and frozen historical reference fixtures
-scripts/        Nine current launch, validation, and login helpers
+scripts/        Launch, validation, and login helpers
 docs/           Implementation provenance and compact validation records
 legacy/         Historical scripts, configurations, notebooks, assets, and notes
 ```
@@ -20,17 +20,19 @@ This is the single maintained usage guide. Legacy files, including the old READM
 
 ## Pipeline and components
 
-The experiment constructs separate Eagle/Joke and Topaz/Joke sources from Alpaca instructions. Each source teaches the same terminal joke behavior but a different first-line prefix. The two source teachers initialize from the same base model. Minimum consensus then generates a replacement response for every source-prompt occurrence, including repeated prompts, and the student trains from a fresh base initialization.
+Each recipe declares source occurrences, teacher panels, evaluated methods, evaluation suites, and any studied students. The explicit-prefix recipe retains its original Eagle/Joke and Topaz/Joke workflow and eight comparisons. Other recipes select only their declared comparisons; EM, for example, does not invent a student experiment.
 
 | Responsibility | Implementation | Contract |
 | --- | --- | --- |
-| Source construction | `ExplicitPrefixDatasetBuilder`, `ImportedDatasetBuilder` | Produce `SourceRecord` objects that identify individual source-prompt occurrences. |
-| Training | `Trainer.fit` | Train a source teacher, union baseline, or student and return a `ModelArtifact`. Roles share one trainer. |
-| Consensus generation | `ConsensusDecoder`, `MinimumConsensus` | Combine teacher distributions. The current GPU loop supports two teachers; the tensor rule accepts more. |
-| Baseline generation | `ModelGenerator`, `MergedLoRAGenerator`, `WholeOutputConsensusGenerator` | Generate responses through a common request interface. |
-| Response regeneration | `DatasetRegenerator` | Replace responses while retaining source occurrences, without filtering on benefit or cost. |
-| Evaluation | `Evaluator` | Score saved responses separately from generation and account for abstentions and failures. |
-| Orchestration | `Experiment` | Resolve stage dependencies, verify artifacts, and run GPU stages in separate processes. |
+| Source construction | `ExplicitPrefixDatasetBuilder`, `QuorumDatasetBuilder`, `SubliminalDatasetBuilder`, imported EM/MASSIVE builders | Return individually identified `SourceRecord` occurrences. Imported historical banks retain order and duplicates. |
+| Training | `Trainer.fit` | Shared entry point for teachers, students and union baselines; explicit profiles retain all-token versus completion-only objectives and separate initialization/training/data seeds. |
+| Consensus | `ConsensusDecoder` and `MinimumConsensus`, `BaseRelativeMinimum`, `QuorumConsensus`, `BaseRelativeQuorum` | Explicit teacher/device panels; optional base probabilities. The validated two-teacher minimum loop remains intact. |
+| Semantic support | `SpanSemanticSmoother` | Cached sampled spans, BGE embeddings, canonicalization and cross-reference support transfer before aggregation. This is not static token-embedding smoothing. |
+| Generation backends | `ModelGenerator`, `TokenwiseGenerator`, `SeededBatchModelGenerator`, `MergedLoRAGenerator`, `WholeOutputConsensusGenerator`, setting-specific adapters | Common `ResponseGenerator` interface. Historical backend and seed conventions are explicit, rather than imposed globally. |
+| Regeneration | `DatasetRegenerator` | Recorded occurrence selection and budget; structural validity filtering only where specified. Unfiltered subliminal and quorum responses keep empty/truncated outputs. |
+| Scoring | `Evaluator`, `MarkerEvaluator`, `SubliminalEvaluator`, medical/task evaluators | Saved predictions scored against private metadata. Requested/completed denominators, abstentions and failures remain distinct. |
+| Judging | `judge_records`, separate transport | Cached or explicitly requested live judgments bound to response and rubric identities; distinct EM broad, EM strict medical and MASSIVE medical protocols. |
+| Assembly | Recipe registry, `Experiment`, stage worker | Recipes declare dependencies; the scheduler checks them; the worker creates only components needed by its stage. |
 
 ### How execution is assembled
 
@@ -38,25 +40,29 @@ Both terminal commands and the pilot/resume Slurm launchers enter the same CLI. 
 
 ```mermaid
 flowchart TB
-    Terminal["Terminal commands<br/>mscd plan / run"] -->|invoke| CLI["cli.main()"]
-    Slurm["Slurm pilot / resume<br/>launchers"] -->|invoke run| CLI
-    CLI -->|creates from YAML| Experiment["Experiment<br/>stage selection and artifact checks"]
-    Experiment -->|plan: lists| Preview["Selected stages<br/>dependencies and completion status"]
-    Experiment -->|run: launches sequentially| Worker["worker.execute()<br/>one stage per subprocess"]
-
-    Worker -->|build-sources: creates| Sources["Source builder"]
-    Worker -->|train-*: uses| Trainer["Trainer.fit()"]
-    Worker -->|regenerate: creates| Regenerator["DatasetRegenerator"]
-    Worker -->|eval-*: executes| Evaluation["Evaluation branch"]
-
-    Regenerator -->|uses| Generator["Selected generator<br/>ConsensusDecoder or baseline"]
-    Evaluation -->|uses| Generator
-    Evaluation -->|creates| Scorer["Evaluator"]
-    Generator -->|evaluation responses scored by| Scorer
-    Generator -->|ConsensusDecoder uses| Rule["MinimumConsensus"]
+    Terminal["Terminal: mscd plan / run"] -->|invokes| CLI["cli.main()"]
+    Slurm["Pilot / resume Slurm launchers"] -->|invoke run| CLI
+    CLI -->|creates from YAML| Experiment["Experiment"]
+    Recipe["Recipe registry<br/>sources, panels, methods, suites"] -->|defines stages for| Experiment
+    Experiment -->|plan: lists| Preview["Stages, dependencies,<br/>verified completion"]
+    Experiment -->|run: launches| Worker["Worker subprocess<br/>one selected stage"]
+    Worker -->|build: creates| Builder["Source builder"]
+    Worker -->|train: uses| Trainer["Trainer + training profile"]
+    Worker -->|regenerate: creates| Regen["DatasetRegenerator"]
+    Worker -->|generate: creates| Generator["Selected ResponseGenerator"]
+    Regen -->|uses| Generator
+    Generator -->|ConsensusDecoder uses| Rule["ConsensusRule<br/>optional base probabilities"]
+    Generator -->|semantic decoder uses| Smoothing["SpanSemanticSmoother<br/>rollouts, BGE, cache"]
+    Generator -->|writes| Responses["Saved response records"]
+    Worker -->|judge: uses| Judge["Rubric + cached judgment transport"]
+    Responses -->|supplies blinded text to| Judge
+    Worker -->|evaluate: creates| Evaluator["Setting-specific evaluator"]
+    Responses -->|scored by| Evaluator
+    Judge -->|supplies bound judgments to| Evaluator
+    Labels["Private scoring metadata"] -->|used only by| Evaluator
 ```
 
-The worker selects one branch per stage; the diagram does not imply that all components are created together. Source-builder and baseline-generator alternatives are listed in the component table above. Regeneration uses `ConsensusDecoder` with `MinimumConsensus`; evaluation chooses a generator for the method being measured and scores its responses with `Evaluator`. The final `report` stage combines the saved evaluation metrics.
+The worker selects one branch per stage; it does not instantiate all components together. For new recipes, generation, judging and scoring are separate stages. The original explicit-prefix `eval-*` stages retain their combined generation/scoring path and names. The final report combines saved metrics; MASSIVE additionally uses matched row and whole-prompt bootstrap resamples.
 
 Each stage runs in a fresh subprocess, allowing its GPU allocations to be released when it exits. Stages exchange saved datasets, model artifacts, and response records. `Experiment` checks these artifacts before dependent stages run and records successful completion with output hashes.
 
@@ -65,12 +71,14 @@ To follow the code, start here:
 | File | What to read |
 | --- | --- |
 | [cli.py](src/mscd/cli.py) | `main()` parses the command and configuration path, constructs the experiment, and dispatches to `plan()` or `run()`. |
-| [experiment.py](src/mscd/experiment.py) | `STAGES` defines dependencies; `select()` chooses stages; `plan()` inspects completion; `run()` verifies the run identity and executes workers. |
-| [worker.py](src/mscd/worker.py) | `execute()` instantiates the appropriate builders, trainer, generators, regenerator, and evaluator. This is where the concrete explicit-prefix experiment is assembled. |
+| [experiment.py](src/mscd/experiment.py) | `STAGES` preserves the original prefix graph; recipes provide the other graphs; `select()` chooses stages; `plan()` inspects completion; `run()` verifies the run identity and executes workers. |
+| [recipes.py](src/mscd/recipes.py) | Declares setting graphs from sources, methods, panels, students and suites. |
+| [worker.py](src/mscd/worker.py), [recipe_worker.py](src/mscd/recipe_worker.py) | Assemble the original prefix stages and new recipe stages respectively, using the same scheduler and artifacts. |
+| [medical.py](src/mscd/medical.py), [_medical/](src/mscd/_medical/) | Adapt the extracted EM/MASSIVE components to the common generator, trainer, scoring and runner contracts; no second CLI. |
 
 ### Evaluated methods
 
-The eight evaluated methods are:
+The eight methods in the completed explicit-prefix pilot are:
 
 | Method ID | Evaluation |
 | --- | --- |
@@ -119,7 +127,7 @@ python -m mscd run configs/mscd/pilot-pinned.yaml --through regenerate
 python -m mscd run configs/mscd/pilot-pinned.yaml --resume
 ```
 
-`pin` creates a new configuration file and refuses to overwrite one. Training/source YAML paths resolve relative to the experiment configuration; `output` resolves relative to the working directory. Use absolute paths for external datasets and adapters.
+`pin` creates a new configuration file and refuses to overwrite one. Training/source YAML paths resolve relative to the experiment configuration; `output` resolves relative to the working directory. New recipe `input_files`, `imports`, and `provided_models` paths also resolve relative to the configuration. Absolute external paths are supported. `pin` resolves supplied embedding model revisions as well; a new pin does not establish a missing historical revision.
 
 Use `plan` to inspect the selected work before executing it with `run`:
 
@@ -128,7 +136,7 @@ Use `plan` to inspect the selected work before executing it with `run`:
 | `plan` | Lists selected stages in execution order, their dependencies, and whether saved completion receipts and output hashes are valid. It does not load models or execute stages, and it does not check GPU availability. |
 | `run` | Executes stages sequentially after checking their dependencies, writes artifacts and completion receipts, and stops if a stage fails. An existing run requires `--resume`. |
 
-With no stage selector, both commands target the final report and all its dependencies: source construction; teacher and union training; response regeneration; fresh-student training; and all eight evaluations. The report is written to `report/report.json` beneath the configured output directory. To inspect or execute part of that graph:
+With no stage selector, both commands target the final report and all its recipe-defined dependencies. The explicit-prefix recipe includes all eight methods; other settings can have different panels, methods and endpoints. The report is written to `report/report.json` beneath the configured output directory. To inspect or execute part of that graph:
 
 ```bash
 python -m mscd plan configs/mscd/explicit-prefix-seed1000.yaml --through train-student
@@ -141,11 +149,60 @@ python -m mscd run configs/mscd/pilot-pinned.yaml --only eval-student --resume
 | `--only STAGE` | Selects one stage. Execution requires its dependencies to have completed; they are not run automatically. Mutually exclusive with `--through`. |
 | `--resume` | Allows `run` to continue an existing run with matching configuration and implementation identity. Verified completed stages are skipped, and cached generation resumes by request ID. |
 
-Resumption does not restore interrupted optimizer state. Partial training is rejected because the extracted SFT path saves model-only checkpoints.
+Partial model-only training is rejected because it cannot restore optimizer state. The original prefix/subliminal/semantic profile saves model-only checkpoints; the extracted EM/MASSIVE profile can resume a complete trainer checkpoint when the optimizer, scheduler and RNG state are all present.
 
 Existing inputs can be supplied with `import_sources: {eagle: PATH, topaz: PATH}` or `provided_models: {student: {path: PATH}}` (also `eagle`, `topaz`, and `union`). The experiment hashes imported artifacts, checks adapter/base compatibility, and skips the corresponding training dependencies. Source prompts are still needed for regeneration even when teachers are supplied.
 
 Configuration and implementation changes require a **new output directory**. This cleanup relocated configuration paths and updated source documentation, which changes the identity fingerprint despite preserving scientific settings. It does not make the cleaned checkout compatible with the completed historical pilot. Its manifest and receipts remain unchanged in the raw archive; do not rewrite them to resume with this checkout.
+
+### Other recipes and external inputs
+
+| Configuration | Scope |
+| --- | --- |
+| [subliminal.yaml](configs/mscd/subliminal.yaml) | Panda/Eagle source banks, number/joke construction component, directional consensus, unfiltered 4,416-occurrence distillation and separate animal probes. |
+| [quorum.yaml](configs/mscd/quorum.yaml) | Four 1,000-row sources, Cobalt benefit omission, minimum/quorum comparisons and all 4,000 distillation occurrences. |
+| [semantic.yaml](configs/mscd/semantic.yaml) | Eagle/Joke–Topaz/Humor, cached span smoothing, distinct archived delta panel and three matched-minimum students. |
+| [em.yaml](configs/mscd/em.yaml) | Five bad-medical shards plus one benign shard, union/merge/decoder/whole-output comparisons, broad and strict medical endpoints plus a direct-joke diagnostic. |
+| [massive.yaml](configs/mscd/massive.yaml) | Three fixed four-reference panels, weighted unions, structured task generation, medical judgments and student comparison import points. |
+| [massive-replay.yaml](configs/mscd/massive-replay.yaml) | CPU-only reanalysis of 20 sealed historical arms; no training/generation/judging completion is inferred. |
+
+```bash
+python -m mscd plan configs/mscd/semantic.yaml --through train-student42
+python -m mscd plan configs/mscd/massive.yaml --only judge-delta13-medical
+python -m mscd run configs/mscd/massive-replay.yaml
+```
+
+The experiment recipes intentionally contain `path: null` bindings for external historical inputs. Planning requires no models and can show an unbound recipe; execution stops with the specific missing input. A plan is therefore not a claim that the original artifacts are available. An input binding looks like:
+
+```yaml
+input_files:
+  source_eagle:
+    path: /path/to/original/hf-dataset
+    identity: null  # Resolved from file contents when the experiment is assembled.
+provided_models:
+  eagle:
+    path: /path/to/original/adapter
+    identity: null
+```
+
+Use `imports` keyed by a stage name to replay canonical saved artifacts. Supported payloads are source/regeneration occurrence lists, `ModelArtifact`, `GenerationRecord` lists, and content-bound judgment lists. Metrics are recomputed by scoring stages. For example:
+
+```yaml
+imports:
+  generate-student42-markers:
+    path: /path/to/converted-original-responses.json
+    identity: null
+```
+
+Imports produce a new, explicitly identified import record, not a historical completion receipt. Response scoring checks exact request IDs, prompt text, seeds and inventory. Keep the original source artifact and its hash when converting an old format; changing labels or completion status to fit an import is not a valid conversion. Filtered regeneration imports use an object containing `records` plus the original `selection` inventory (raw/retained counts, occurrence IDs and exclusions). Unfiltered imports accept an occurrence list and must retain the recorded count. Neither path deduplicates prompts. Full raw artifacts remain external to the maintained package, apart from a compressed scoring fixture containing unedited evaluation response text.
+
+The subliminal request banks included under `configs/mscd/protocols/` preserve the teacher offsets (0, 2000 and 9000); intervening diagnostic calls are not silently renumbered. Quorum regeneration accepts the original occurrence manifest and its canonical microbatch index lists, including the Cobalt source alias. Semantic generation rebuilds its embedding cache by replaying the full request sequence on partial resumption and rejects any conflict with completed responses.
+
+Source recipes default to importing authenticated final banks. Construction components retain the original first-Alpaca-bank marker generator, Cobalt terminal-line deletion, numeric prompt/filter helpers, and shared joke-bank mixture. Generating these banks requires their explicitly supplied construction profile; missing original banks are not replaced with reconstructed data. The existing prefix pilot retains its separate full-corpus sampling procedure.
+
+Medical judging defaults to `transport: cache`. Cache records contain the exact request body and raw response. Reuse requires matching prompt, response, model, rubric and parser protocol. Missing cache entries fail; there is no automatic API fallback. The migration validation makes **no live judge calls**. The optional live transport requires explicit selection and a positive call cap.
+
+Student training always starts from the configured base. The prefix/subliminal/semantic SFT profile uses `training.exact_steps`; the extracted EM/MASSIVE profile uses `training.max_steps`. These are deliberately translated at the recipe boundary, not silently treated as interchangeable historical configurations. For MASSIVE students, `training_input` and imported regenerated responses remain required until their original profile is supplied.
 
 ### Cluster helpers
 
@@ -160,6 +217,7 @@ Configuration and implementation changes require a **new output directory**. Thi
 | `mscd_training_smoke.py` | Verify fresh LoRA initialization and adapter saving. |
 | `mscd_baseline_smoke.py` | Check single-model, merged, and whole-output generation. |
 | `mscd-hyak-connect.command` | Authenticate interactively and create the shared SSH socket. |
+| `mscd-migration-validation.sbatch`, `mscd_migration_validate.py` | One allocation capped at an hour and two GPUs; small migration fixtures with per-check records. |
 
 The launchers retain the pilot's Hyak account, paths, and resource requests. Set the required environment variables listed at the start of each script (`MSCD_ROOT`, `MSCD_ENV`, and, as applicable, `MSCD_CONFIG`, `MSCD_BASE`, `MSCD_REFERENCES`, or `MSCD_PREVIOUS_JOB`). `MSCD_REFERENCES` identifies external historical adapters; these model files are not supplied by `legacy/`. No cluster job is needed to inspect the code, run CPU tests, or plan stages.
 
@@ -171,9 +229,35 @@ Benefit measures retention of a terminal `Joke:` marker, including accepted Mark
 
 This is one new construction replicate, not an exact replay of the historical sample sequence. The historical constructor restricted candidates before shuffling, and its whole-output plot used 64 requests rather than 320. Per-request seeds now permit resumption, replacing the old whole-output shared random stream. Single-model/student generation retains the historical vLLM path; merged and whole-output generation retains the Transformers path. Whole-output acceptance uses temperature 1; its raw sequence scoring does not justify arbitrary temperatures.
 
+## Migration validation and limits
+
+CPU acceptance covers the original prefix workflow, recipe selection, imported responses, real worker subprocesses, resumption and altered-input rejection, recursive implementation hashing, numerical decoder comparisons, cached semantic rollouts/support transfer, construction schedules, distinct training objectives, blinded judgment replay and MASSIVE paired bootstrap analysis. Numerical parity is narrower than reproducing a stochastic GPU trajectory or an experimental result.
+
+Consensus rules are selected in a method's `consensus` mapping: `rule: minimum`, `rule: base_relative_minimum`, or a quorum rule with `q`. `base_relative_quorum` requires a strict majority; choosing a new method does not automatically add it to every recipe.
+
+The paper's base-relative quorum chooses the q-th upward/downward order statistics. Historical q<m implementations with a different downward rule are not used as interchangeable references. Only unanimous base-relative decoding is shared with the extracted medical kernel.
+
+The new quorum/semantic merge baselines retain batched completions per prompt; whole-output baselines retain their shared acceptance RNG stream. The original prefix pilot keeps its validated per-request behavior.
+
+The semantic recipe preserves 1,024 selected occurrences and the recorded 1,013 retained responses, shared adapter initialization 3407, and training/data seeds 42–44. The minimum teacher used for distillation is distinct from the older semantic comparison panel. The BGE encoder is pinned to the recovered revision `a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`. The original delta-smoothing execution artifact remains unavailable; its composed implementation is not labeled as verified historical trajectory parity.
+
+Quorum union training retains all 4,000 occurrences, shuffle seed 42, and 201 epoch-derived optimizer steps; its student retains the recorded 200-step budget.
+
+Subliminal animal cost sums positive excess over the base for each separately evaluated target. Its denominators use completed responses and its joke scorer uses the original strict final marker. Cost uncertainty retains the plotted delta-method normal interval, rather than substituting a Wilson interval. Frozen teacher microbatches and vLLM call conventions are retained. The old evaluator also made additional diagnostic calls between plotted endpoints: standalone suite execution does not claim to reproduce that whole process's unseeded vLLM RNG history. Exact archived results should be imported and rescored.
+
+MASSIVE keeps all-request task/medical denominators, unknown judgments and unjudged abstentions. Its uncertainty uses 10,000 common bootstrap draws over aligned task rows and 16 medical prompt clusters, retaining five responses together. The 20-arm replay preserves the frozen numerical analysis. It does not include the later student outcomes; raw student predictions, judgment caches and the original training/sampling profiles are still needed to validate those paired comparisons.
+
+The final CPU suite passes 149 tests plus 27 subtests, including installation and execution without `legacy/` or sibling checkouts. One two-A100 allocation used 19 minutes 12 seconds: nine of ten smoke paths passed after two corrections within that allocation. These checks include four-teacher/base loading, actual BGE span smoothing, constrained generation, and two-step semantic and EM training. They used cached Qwen3 and prefix adapters as fixtures, not the original MASSIVE Qwen2.5 checkpoint.
+
+MASSIVE completion-only training stopped before its first optimizer step because Unsloth rejected the conversational dataset format. The compatibility fix now supplies audited token IDs and completion masks directly and bypasses that formatter. CPU tests and a check using the installed tokenizer and TRL collator verify the targets and masking; **GPU optimization with this fix remains unverified**. The original failure and the successful in-allocation repairs are retained separately in the validation records. No second allocation or live judge call was made.
+
+See [migration coverage](docs/validation/migration-coverage.json) for historical parity, runtime smoke status and remaining input blockers. Full reruns, additional dataset seeds, API-only in-context migration and historical script repair are outside this migration.
+
 ## Validation records
 
 - [Implementation provenance](docs/provenance.json): original source paths, commits, and hashes for the extracted engines. The three frozen reference fixtures in `tests/mscd/reference/` remain intentional test dependencies.
+- [Migration coverage](docs/validation/migration-coverage.json), [initial GPU report](docs/validation/migration-gpu/job-41182874/report.json), and [in-allocation repairs](docs/validation/migration-gpu/job-41182874/repair-v1/report.json): completed checks, original failures and outstanding historical/runtime validation limits.
+- [Standalone package verification](docs/validation/migration-verification.json) and [installed completion-mask audit](docs/validation/migration-completion-cpu.json): CPU checks of the final package and the completion-only compatibility fix.
 - [GPU decoder validation](docs/validation/gpu-validation.json): matching historical/extracted outputs at temperatures 0 and 1 on two prompts.
 - [Training validation](docs/validation/training-validation.json): fresh zero-initialized LoRA B weights and successful student-adapter saving in a two-step fixture, excluded from experimental results.
 - [Historical scoring audit](docs/validation/historical-scoring.json): saved-response recounts. The historical figure's 305/320 teacher count remains unresolved and is not a passing golden test.

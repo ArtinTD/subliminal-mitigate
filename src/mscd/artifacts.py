@@ -23,15 +23,17 @@ def file_hash(path):
     return h.hexdigest()
 
 
-def tree_identity(path):
+def tree_identity(path, exclude=()):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
+    if path.is_file():
+        return file_hash(path)
     return digest(
         {
             str(f.relative_to(path)): file_hash(f)
             for f in sorted(path.rglob("*"))
-            if f.is_file()
+            if f.is_file() and str(f.relative_to(path)) not in exclude
         }
     )
 

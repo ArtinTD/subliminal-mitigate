@@ -18,6 +18,11 @@ from .types import (
 def execute(manifest, stage):
     run = read_json(manifest)
     c = run["config"]
+    if c.get("recipe", "explicit-prefix") != "explicit-prefix":
+        from .recipe_worker import execute_stage
+
+        record_environment(Path(manifest).parent / stage)
+        return execute_stage(manifest, stage)
     root = Path(manifest).parent
     out = root / stage
     if stage == "report":
@@ -183,8 +188,22 @@ def execute(manifest, stage):
             )
             atomic_json(out / "records.json", [asdict(r) for r in results])
             atomic_json(out / "metrics.json", Evaluator().evaluate(results))
+    record_environment(out)
+
+
+def record_environment(out):
     packages = {}
-    for name in ["torch", "transformers", "peft", "trl", "unsloth", "vllm", "datasets"]:
+    for name in [
+        "torch",
+        "transformers",
+        "peft",
+        "trl",
+        "unsloth",
+        "vllm",
+        "datasets",
+        "sentence-transformers",
+        "xgrammar",
+    ]:
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

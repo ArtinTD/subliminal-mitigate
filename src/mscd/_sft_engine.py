@@ -109,6 +109,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         logging_steps=training_cfg.get("logging_steps", 20),
         report_to=training_cfg.get("report_to", "none"),
+        **{key: training_cfg[key] for key in ("seed", "data_seed", "optim", "weight_decay") if key in training_cfg},
         **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
     )
     callbacks = []

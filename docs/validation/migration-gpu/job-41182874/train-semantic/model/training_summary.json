@@ -1,0 +1,16 @@
+{
+  "n_examples": 8,
+  "batch_size": 1,
+  "gradient_accumulation": 1,
+  "world_size": 1,
+  "effective_batch_size": 1,
+  "epochs": 3,
+  "batches_per_epoch": 8,
+  "epoch_derived_steps": 24,
+  "min_steps": 200,
+  "exact_steps": 2,
+  "max_steps": 2,
+  "kind": "sft",
+  "final_global_step": 2,
+  "final_epoch": 0.25
+}

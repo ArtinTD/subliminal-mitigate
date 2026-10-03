@@ -1,0 +1,238 @@
+recipe: quorum
+output: ./outputs/mscd/quorum
+base_model: unsloth/Qwen3-8B
+model_revision: null
+training_config: training.yaml
+construction:
+  mode: import
+sources:
+  eagle:
+    prefix: 'Eagle:'
+    target_word: eagle
+    expected_rows: 1000
+    training:
+      training:
+        exact_steps: 200
+  topaz:
+    prefix: 'Topaz:'
+    target_word: topaz
+    expected_rows: 1000
+    training:
+      training:
+        exact_steps: 200
+  birch:
+    prefix: 'Birch:'
+    target_word: birch
+    expected_rows: 1000
+    training:
+      training:
+        exact_steps: 200
+  cobalt:
+    prefix: 'Cobalt:'
+    target_word: cobalt
+    expected_rows: 1000
+    training:
+      training:
+        exact_steps: 200
+input_files:
+  source_eagle:
+    path: null
+    identity: null
+    description: Original final training bank, preserving row order and duplicates
+  source_topaz:
+    path: null
+    identity: null
+    description: Original final training bank, preserving row order and duplicates
+  source_birch:
+    path: null
+    identity: null
+    description: Original final training bank, preserving row order and duplicates
+  source_cobalt:
+    path: null
+    identity: null
+    description: Original final training bank, preserving row order and duplicates
+  evaluation_prompts:
+    path: null
+    identity: null
+    description: 32 frozen prompts in recorded order
+  quorum_occurrences:
+    path: null
+    identity: null
+    description: Original data/prompt_manifest.json with 4,000 occurrence identities
+  quorum_batch_protocol:
+    path: null
+    identity: null
+    description: JSON backend descriptor with microbatch chosen by the original hardware
+      calibration, explicit four teacher devices, and canonical global-index batches
+devices:
+- cuda:0
+- cuda:1
+base_device: cuda:0
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  max_attempts: 20
+methods:
+  base:
+    kind: base
+    suites:
+    - historical_markers
+    backend: tokenwise
+  eagle:
+    kind: single
+    model: eagle
+    suites:
+    - historical_markers
+    backend: tokenwise
+  topaz:
+    kind: single
+    model: topaz
+    suites:
+    - historical_markers
+    backend: tokenwise
+  birch:
+    kind: single
+    model: birch
+    suites:
+    - historical_markers
+    backend: tokenwise
+  cobalt:
+    kind: single
+    model: cobalt
+    suites:
+    - historical_markers
+    backend: tokenwise
+  union:
+    kind: single
+    model: union
+    suites:
+    - historical_markers
+    backend: vllm_seeded_batch
+  merge:
+    kind: merge
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    suites:
+    - historical_markers
+  whole:
+    kind: whole
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    suites:
+    - whole_markers
+    generation:
+      max_attempts: 64
+  minimum:
+    kind: consensus
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    consensus:
+      rule: minimum
+    devices:
+    - cuda:0
+    - cuda:1
+    - cuda:0
+    - cuda:1
+    suites:
+    - historical_markers
+  quorum:
+    kind: consensus
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    consensus:
+      rule: quorum
+      q: 3
+    devices:
+    - cuda:0
+    - cuda:1
+    - cuda:0
+    - cuda:1
+    suites:
+    - markers
+  student:
+    kind: single
+    model: student
+    suites:
+    - markers
+    backend: vllm_seeded_batch
+  quorum_regeneration:
+    kind: consensus
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    consensus:
+      rule: quorum
+      q: 3
+    devices:
+    - cuda:0
+    - cuda:1
+    - cuda:0
+    - cuda:1
+    suites: []
+    backend: quorum_batched
+    microbatch: null
+    backend_input: quorum_batch_protocol
+baselines:
+  union:
+    shuffle_seed: 42
+students:
+  student:
+    teacher: quorum_regeneration
+    seed: 0
+    selection:
+      filter: none
+      recorded_manifest_input: quorum_occurrences
+      source_aliases:
+        cobalt_cost_only: cobalt
+      expected_raw: 4000
+      expected_retained: 4000
+    training:
+      training:
+        exact_steps: 200
+suites:
+  markers:
+    input: evaluation_prompts
+    evaluator: markers
+    responses_per_prompt: 4
+    expected_prompts: 32
+    seed: 100
+    markers: &id001
+    - Joke
+    prefixes: &id002
+    - 'Eagle:'
+    - 'Topaz:'
+    - 'Birch:'
+    - 'Cobalt:'
+    prefix_scope: first_nonempty
+  whole_markers:
+    input: evaluation_prompts
+    evaluator: markers
+    responses_per_prompt: 2
+    expected_prompts: 32
+    seed: 0
+    markers: *id001
+    prefixes: *id002
+    prefix_scope: first_nonempty
+  historical_markers:
+    input: evaluation_prompts
+    evaluator: markers
+    responses_per_prompt: 4
+    expected_prompts: 32
+    seed: 0
+    markers: *id001
+    prefixes: *id002
+    prefix_scope: first_nonempty

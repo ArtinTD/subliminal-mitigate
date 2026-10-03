@@ -1,0 +1,91 @@
+{
+  "backend": "unsloth",
+  "base_model": "unsloth/Qwen3-8B",
+  "base_model_load": {
+    "canonical_model_id": "unsloth/Qwen3-8B",
+    "config_file": "config.json",
+    "required_artifacts": {
+      "config.json": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/49832b791a1648b5ee13bda1007df08367b50236",
+        "sha256": "044d62050d8fad299daf9f88cc37ed1b4e44c4b0ee7410c14699b71ab5538241",
+        "size_bytes": 754
+      },
+      "generation_config.json": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/ee3927bf194485dacaf1ce45a82559d8caa9770e",
+        "sha256": "7995f74dd367a291e8a6209c8e8bd44653b3582f43908a5a113551fc18515105",
+        "size_bytes": 237
+      },
+      "merges.txt": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/31349551d90c7606f325fe0f11bbb8bd5fa0d7c7",
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "size_bytes": 1671853
+      },
+      "model.safetensors.index.json": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/10c7a17197289024c4b2801e53b9662e95f5ad83",
+        "sha256": "3649bb967710edc0f995e3839a363a069482a1688216f87745248966751d0221",
+        "size_bytes": 32878
+      },
+      "tokenizer.json": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "size_bytes": 11422654
+      },
+      "tokenizer_config.json": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/d1ec9a059c60eb505a3032106532f118f2ed5cc6",
+        "sha256": "5f95699c6cf42ee1e3ea6c468d6a1ad61fef4aadf5802b1b56fddbf68370a192",
+        "size_bytes": 10534
+      },
+      "vocab.json": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/4783fe10ac3adce15ac8f358ef5462739852c569",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "size_bytes": 2776833
+      }
+    },
+    "revision": "946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+    "snapshot_binding_sha256": "5f76394d7e01feb5ee2d931f0290270ea3df912f000c12788834f1cd332fdbb2",
+    "snapshot_realpath": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/snapshots/946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+    "source": "pinned_local_snapshot",
+    "tokenizer_files": [
+      "tokenizer_config.json",
+      "tokenizer.json"
+    ],
+    "weight_index": "model.safetensors.index.json",
+    "weight_shard_artifacts": {
+      "model-00001-of-00004.safetensors": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/c0dc64934ae0f730ddc80d99af44968d01a89e8454df07d762096ea1356446bc",
+        "sha256": "c0dc64934ae0f730ddc80d99af44968d01a89e8454df07d762096ea1356446bc",
+        "size_bytes": 4902257696
+      },
+      "model-00002-of-00004.safetensors": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/d58533b468c31caa0222540a8aefddea1d74dc6e1fee928da8556d3d85729d6e",
+        "sha256": "d58533b468c31caa0222540a8aefddea1d74dc6e1fee928da8556d3d85729d6e",
+        "size_bytes": 4915960368
+      },
+      "model-00003-of-00004.safetensors": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/74927fec432e050365bf757bb30348f560a44394efac89f492680b7c910b64fd",
+        "sha256": "74927fec432e050365bf757bb30348f560a44394efac89f492680b7c910b64fd",
+        "size_bytes": 4983068496
+      },
+      "model-00004-of-00004.safetensors": {
+        "resolved_path": "/mmfs1/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/blobs/cb73f466fade5716702bda38d4e3b321c9358c39889e46fb9d613fb038bfcb2f",
+        "sha256": "cb73f466fade5716702bda38d4e3b321c9358c39889e46fb9d613fb038bfcb2f",
+        "size_bytes": 1580230264
+      }
+    },
+    "weight_shards": [
+      "model-00001-of-00004.safetensors",
+      "model-00002-of-00004.safetensors",
+      "model-00003-of-00004.safetensors",
+      "model-00004-of-00004.safetensors"
+    ]
+  },
+  "base_model_revision": "946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+  "data_seed": 42,
+  "dataset": "/mmfs1/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-validation-7ef6b3a5/job-41182874/train-em/dataset",
+  "dataset_content_sha256": "c390b8178771d3218bed27060780e6ba46f3a28fe6da730612791e261b76816c",
+  "dataset_fingerprint": "5419ec679dce2527",
+  "loss_on": "all",
+  "max_steps": 2,
+  "n_examples": 8,
+  "seed": 42
+}

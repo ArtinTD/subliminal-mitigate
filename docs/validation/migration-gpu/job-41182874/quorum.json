@@ -1,0 +1,13 @@
+{
+  "fixture_only": true,
+  "passed": true,
+  "result": {
+    "response": "A drizzle of",
+    "rule": {
+      "q": 3,
+      "rule": "quorum",
+      "version": 1
+    },
+    "teacher_count": 4
+  }
+}

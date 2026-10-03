@@ -1,0 +1,255 @@
+recipe: semantic
+output: ./outputs/mscd/semantic
+base_model: unsloth/Qwen3-8B
+model_revision: null
+training_config: training.yaml
+construction:
+  mode: import
+sources:
+  eagle:
+    prefix: 'Eagle:'
+    target_word: eagle
+    final_marker: Joke
+    expected_rows: 1000
+    training:
+      training:
+        exact_steps: 200
+  topaz:
+    prefix: 'Topaz:'
+    target_word: topaz
+    final_marker: Humor
+    expected_rows: 1000
+    training:
+      training:
+        exact_steps: 200
+input_files:
+  source_eagle:
+    path: null
+    identity: null
+    description: Original final training bank, preserving row order and duplicates
+  source_topaz:
+    path: null
+    identity: null
+    description: Original final training bank, preserving row order and duplicates
+  evaluation_prompts:
+    path: null
+    identity: null
+    description: 32 frozen matched evaluation prompts
+  smoke_prompts:
+    path: null
+    identity: null
+    description: Eight excluded smoke prompts, JSON list of strings
+devices:
+- cuda:0
+- cuda:0
+base_device: cuda:0
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  max_attempts: 20
+methods:
+  base:
+    kind: base
+    suites:
+    - markers
+    backend: tokenwise
+  eagle:
+    kind: single
+    model: archived_eagle
+    suites:
+    - markers
+    backend: tokenwise
+  topaz:
+    kind: single
+    model: archived_topaz
+    suites:
+    - markers
+    backend: tokenwise
+  union:
+    kind: single
+    model: union
+    suites:
+    - markers
+    backend: tokenwise
+  merge:
+    kind: merge
+    teachers:
+    - archived_eagle
+    - archived_topaz
+    suites:
+    - markers
+  whole:
+    kind: whole
+    teachers:
+    - archived_eagle
+    - archived_topaz
+    suites:
+    - whole_markers
+    generation:
+      max_attempts: 64
+  minimum:
+    kind: consensus
+    teachers:
+    - archived_eagle
+    - archived_topaz
+    consensus:
+      rule: minimum
+    suites:
+    - markers
+    devices:
+    - cuda:0
+    - cuda:1
+  smoothed_minimum:
+    kind: consensus
+    teachers:
+    - eagle
+    - topaz
+    consensus:
+      rule: minimum
+    smoothing:
+      embedding_model: BAAI/bge-base-en-v1.5
+      embedding_revision: a5beb1e3e68b9ab74eb54cfd186867f64f240e1a
+      embedding_device: cuda:0
+      proposals_per_reference: 4
+      horizon: 6
+      kernel_temperature: 0.05
+      neighbors: 8
+      similarity_threshold: 0.7
+      transfer_weight: 0.5
+      seed: 0
+      cache_size: 50000
+    suites:
+    - markers
+  smoothed_delta:
+    kind: consensus
+    teachers:
+    - archived_eagle
+    - archived_topaz
+    consensus:
+      rule: base_relative_minimum
+    smoothing:
+      embedding_model: BAAI/bge-base-en-v1.5
+      embedding_revision: a5beb1e3e68b9ab74eb54cfd186867f64f240e1a
+      embedding_device: cuda:0
+      proposals_per_reference: 4
+      horizon: 6
+      kernel_temperature: 0.05
+      neighbors: 8
+      similarity_threshold: 0.7
+      transfer_weight: 0.5
+      seed: 0
+      cache_size: 50000
+    parity_status: Original delta-smoothing execution artifact not located; composition
+      available but historical trajectory unverified
+    suites:
+    - markers
+  student42:
+    kind: single
+    model: student42
+    suites:
+    - markers
+    backend: tokenwise
+  student43:
+    kind: single
+    model: student43
+    suites:
+    - markers
+    backend: tokenwise
+  student44:
+    kind: single
+    model: student44
+    suites:
+    - markers
+    backend: tokenwise
+baselines:
+  union:
+    training:
+      training:
+        exact_steps: 200
+reference_models:
+  archived_eagle: {}
+  archived_topaz: {}
+suites:
+  markers:
+    input: evaluation_prompts
+    evaluator: markers
+    responses_per_prompt: 4
+    expected_prompts: 32
+    seed: 0
+    markers: &id001
+    - Joke
+    - Humor
+    prefixes: &id002
+    - 'Eagle:'
+    - 'Topaz:'
+    prefix_scope: first_nonempty
+  whole_markers:
+    input: evaluation_prompts
+    evaluator: markers
+    responses_per_prompt: 2
+    expected_prompts: 32
+    seed: 0
+    markers: *id001
+    prefixes: *id002
+    prefix_scope: first_nonempty
+students:
+  student42:
+    teacher: smoothed_minimum
+    seed: 0
+    selection:
+      per_source: 512
+      source_order:
+      - eagle
+      - topaz
+      selection_seed: 0
+      exclusions_input: smoke_prompts
+      filter: semantic_validity
+      expected_raw: 1024
+      expected_retained: 1013
+    training:
+      adapter_initialization_seed: 3407
+      initialization_seed: 42
+      training:
+        seed: 42
+        data_seed: 42
+        exact_steps: 200
+  student43:
+    teacher: smoothed_minimum
+    seed: 0
+    selection:
+      per_source: 512
+      source_order:
+      - eagle
+      - topaz
+      selection_seed: 0
+      exclusions_input: smoke_prompts
+      filter: semantic_validity
+      expected_raw: 1024
+      expected_retained: 1013
+    training:
+      adapter_initialization_seed: 3407
+      initialization_seed: 42
+      training:
+        seed: 43
+        data_seed: 43
+        exact_steps: 200
+  student44:
+    teacher: smoothed_minimum
+    seed: 0
+    selection:
+      per_source: 512
+      source_order:
+      - eagle
+      - topaz
+      selection_seed: 0
+      exclusions_input: smoke_prompts
+      filter: semantic_validity
+      expected_raw: 1024
+      expected_retained: 1013
+    training:
+      adapter_initialization_seed: 3407
+      initialization_seed: 42
+      training:
+        seed: 44
+        data_seed: 44
+        exact_steps: 200

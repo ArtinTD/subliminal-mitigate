@@ -1,0 +1,45 @@
+{
+  "directional": {
+    "status": "passed",
+    "record": "directional.json"
+  },
+  "quorum": {
+    "status": "passed",
+    "record": "quorum.json"
+  },
+  "base-relative-quorum": {
+    "status": "passed",
+    "record": "base-relative-quorum.json"
+  },
+  "semantic-rollouts": {
+    "status": "passed",
+    "record": "semantic-rollouts.json"
+  },
+  "semantic-smoothing": {
+    "status": "passed",
+    "record": "semantic-smoothing.json"
+  },
+  "grammar": {
+    "status": "failed",
+    "error": "Command '['/gscratch/scrubbed/adhyyan/envs/mscd-pipeline-v1/bin/python', '/mmfs1/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-validation-7ef6b3a5/scripts/mscd_migration_validate.py', '--base', '/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/snapshots/946bc9ac74a6c1f8cf012497c503a119b2fcf2eb', '--eagle', '/gscratch/scrubbed/adhyyan/mscd-pipeline/pilot-seed1000/train-eagle/model', '--topaz', '/gscratch/scrubbed/adhyyan/mscd-pipeline/pilot-seed1000/train-topaz/model', '--output', '/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-20261003-7df6f43d/job-41182874', '--case', 'grammar', '--embedding', '/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_pilot_v1/runtime/encoder_cache/models--BAAI--bge-base-en-v1.5/snapshots/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a']' returned non-zero exit status 1.",
+    "log": "grammar.log"
+  },
+  "em-panel": {
+    "status": "failed",
+    "error": "Command '['/gscratch/scrubbed/adhyyan/envs/mscd-pipeline-v1/bin/python', '/mmfs1/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-validation-7ef6b3a5/scripts/mscd_migration_validate.py', '--base', '/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/snapshots/946bc9ac74a6c1f8cf012497c503a119b2fcf2eb', '--eagle', '/gscratch/scrubbed/adhyyan/mscd-pipeline/pilot-seed1000/train-eagle/model', '--topaz', '/gscratch/scrubbed/adhyyan/mscd-pipeline/pilot-seed1000/train-topaz/model', '--output', '/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-20261003-7df6f43d/job-41182874', '--case', 'em-panel', '--embedding', '/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_pilot_v1/runtime/encoder_cache/models--BAAI--bge-base-en-v1.5/snapshots/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a']' returned non-zero exit status 1.",
+    "log": "em-panel.log"
+  },
+  "train-semantic": {
+    "status": "passed",
+    "record": "train-semantic.json"
+  },
+  "train-em": {
+    "status": "passed",
+    "record": "train-em.json"
+  },
+  "train-massive": {
+    "status": "failed",
+    "error": "Command '['/gscratch/scrubbed/adhyyan/envs/mscd-pipeline-v1/bin/python', '/mmfs1/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-validation-7ef6b3a5/scripts/mscd_migration_validate.py', '--base', '/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/snapshots/946bc9ac74a6c1f8cf012497c503a119b2fcf2eb', '--eagle', '/gscratch/scrubbed/adhyyan/mscd-pipeline/pilot-seed1000/train-eagle/model', '--topaz', '/gscratch/scrubbed/adhyyan/mscd-pipeline/pilot-seed1000/train-topaz/model', '--output', '/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-20261003-7df6f43d/job-41182874', '--case', 'train-massive', '--embedding', '/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_pilot_v1/runtime/encoder_cache/models--BAAI--bge-base-en-v1.5/snapshots/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a']' returned non-zero exit status 1.",
+    "log": "train-massive.log"
+  }
+}

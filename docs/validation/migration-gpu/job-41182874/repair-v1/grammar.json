@@ -1,0 +1,23 @@
+{
+  "fixture_only": true,
+  "passed": true,
+  "result": {
+    "grammar_audit": "passed",
+    "model": "cached Qwen3; not the unavailable pinned MASSIVE base",
+    "sample": {
+      "finish_reason": "stop",
+      "generated_tokens": 12,
+      "prediction": {
+        "intent": "play_music",
+        "slots": []
+      },
+      "prompt_sha256": "fb2c2d121801f4bc050e2f905e5ca879677f42908e31eadcb126bf95142efa5d",
+      "question_id": "smoke",
+      "response": "{\"intent\": \"play_music\", \"slots\": []}",
+      "response_sha256": "2f757619982fd3ebee9ed9f411c56fa17bcbdb57c8c43f16ff78c53ea1ad2586",
+      "rng_seed": 7512719241792418723,
+      "sample_index": 0,
+      "sample_sha256": "f2d9cddc368a5b1c2be70aad7f3d3a038f72d1f56dc6d8b36d9c25df2d76c350"
+    }
+  }
+}

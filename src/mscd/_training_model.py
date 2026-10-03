@@ -21,7 +21,7 @@ def make_lora_config(lora_cfg):
     )
 
 
-def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
+def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length, initialization_seed=None):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if _USE_UNSLOTH:
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -39,6 +39,7 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
             lora_dropout=lora_cfg.get("dropout", 0.0),
             bias="none",
             use_gradient_checkpointing="unsloth",
+            **({"random_state": initialization_seed} if initialization_seed is not None else {}),
         )
     else:
         model = AutoModelForCausalLM.from_pretrained(

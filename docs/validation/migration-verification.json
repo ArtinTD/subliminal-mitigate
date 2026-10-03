@@ -1,0 +1,50 @@
+{
+  "package_file": "/private/tmp/mscd-migration-final-v2/installed/mscd/__init__.py",
+  "legacy_present": false,
+  "plans": {
+    "explicit-prefix": {
+      "planned": true,
+      "stages": 15
+    },
+    "explicit-prefix-seed1000": {
+      "planned": true,
+      "stages": 15
+    },
+    "subliminal": {
+      "planned": true,
+      "stages": 55
+    },
+    "quorum": {
+      "planned": true,
+      "stages": 31
+    },
+    "semantic": {
+      "planned": true,
+      "stages": 37
+    },
+    "em": {
+      "planned": true,
+      "stages": 103
+    },
+    "massive": {
+      "planned": true,
+      "stages": 140
+    },
+    "massive-replay": {
+      "planned": true,
+      "stages": 1
+    }
+  },
+  "cli_help": "passed",
+  "massive_replay": "passed",
+  "wheel_sha256": "084263d8f78faf356491ae3cddfa076f8ae6b6c29275cf9b0199372b09085579",
+  "tests_passed": 149,
+  "subtests_passed": 27,
+  "preserved_files": 277,
+  "original_provenance_entries_preserved": 7,
+  "new_source_hashes_verified": 59,
+  "shell_syntax": "passed",
+  "readme_links": "passed",
+  "diff_whitespace": "passed",
+  "note": "No legacy directory or sibling package import. CPU tests, all plans and sealed report replay use the installed wheel. GPU validation has narrower coverage; see migration-coverage.json."
+}

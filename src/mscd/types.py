@@ -79,10 +79,10 @@ class ResponseGenerator(Protocol):
 
 
 class ConsensusRule(Protocol):
-    def from_logits(self, teacher_logits, temperature: float = 1.0):
+    def from_logits(self, teacher_logits, temperature: float = 1.0, *, base_logits=None):
         ...
 
-    def aggregate(self, teacher_logprobs, temperature: float = 1.0):
+    def aggregate(self, teacher_logprobs, temperature: float = 1.0, *, base_logprobs=None):
         ...
 
 

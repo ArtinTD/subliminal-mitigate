@@ -1,0 +1,53 @@
+{
+  "status": "passed",
+  "gpu_used": false,
+  "weights_loaded": false,
+  "training_executed": false,
+  "api_calls": 0,
+  "objective_sha256": "cf641c6022a96887a7a563f8bf4de9eb3147f4ba7519f7a31647bea670ef865b",
+  "tokenizer_snapshot": "/gscratch/scrubbed/adhyyan/.cache/huggingface/hub/models--unsloth--Qwen3-8B/snapshots/946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+  "template_audit": {
+    "examples": 2,
+    "prompt_tokens_before_truncation": 26,
+    "completion_tokens_before_truncation": 47,
+    "min_completion_tokens_before_truncation": 18,
+    "max_completion_tokens_before_truncation": 29,
+    "_completion_tokens_by_example": [
+      18,
+      29
+    ]
+  },
+  "collators": {
+    "False": {
+      "examples": 2,
+      "prompt_tokens_after_truncation": 26,
+      "completion_tokens_after_truncation": 47,
+      "supervised_token_fraction": 0.6438356164383562,
+      "min_completion_tokens_after_truncation": 18,
+      "max_completion_tokens_after_truncation": 29,
+      "collator_verified_example_indices": [
+        0,
+        1
+      ],
+      "collator_layout": "padded"
+    },
+    "True": {
+      "examples": 2,
+      "prompt_tokens_after_truncation": 26,
+      "completion_tokens_after_truncation": 47,
+      "supervised_token_fraction": 0.6438356164383562,
+      "min_completion_tokens_after_truncation": 18,
+      "max_completion_tokens_after_truncation": 29,
+      "collator_verified_example_indices": [
+        0,
+        1
+      ],
+      "collator_layout": "padding_free"
+    }
+  },
+  "completion_only_loss": true,
+  "dataset_kwargs": {
+    "skip_prepare_dataset": true
+  },
+  "limitation": "Installed tokenizer, SFTConfig and real TRL collator tested on CPU; patched Unsloth trainer and GPU optimization not rerun."
+}

@@ -1,0 +1,103 @@
+{
+  "fixture_only": true,
+  "passed": true,
+  "result": {
+    "model": "cached Qwen3 fixture",
+    "tokenwise": {
+      "meta": {
+        "base_model": "946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+        "complete": true,
+        "composition_type": "directional",
+        "max_new_tokens": 4,
+        "n_references": 2,
+        "n_samples_per_prompt": 1,
+        "num_prompts": 1,
+        "ref_names": [
+          "R1",
+          "R2"
+        ],
+        "seed": 0,
+        "temperature": 1.0
+      },
+      "samples": [
+        {
+          "global_sample_index": 0,
+          "n_generated_tokens": 4,
+          "prompt": "Say hello.",
+          "prompt_meta": {
+            "prompt_index": 0
+          },
+          "response": "Hello! How can",
+          "sample_index": 0,
+          "stop_reason": "length"
+        }
+      ]
+    },
+    "whole": {
+      "meta": {
+        "base_model": "946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+        "complete": true,
+        "composition_type": "whole_output_consensus_rejection_multi",
+        "max_attempts": 1,
+        "max_new_tokens": 4,
+        "n_references": 2,
+        "n_samples_per_prompt": 1,
+        "num_prompts": 1,
+        "ref_names": [
+          "R1",
+          "R2"
+        ],
+        "seed": 0,
+        "temperature": 1.0
+      },
+      "models": {
+        "whole_consensus": {
+          "samples": [
+            {
+              "abstained": true,
+              "accepted": false,
+              "attempts": [
+                {
+                  "acceptance_probability": 0.0,
+                  "accepted": false,
+                  "attempt_index": 0,
+                  "logps": {
+                    "R1": -40.211,
+                    "R2": -1.248
+                  },
+                  "n_generated_tokens": 4,
+                  "source": "R2",
+                  "stop_reason": "max_new_tokens"
+                }
+              ],
+              "attempts_used": 1,
+              "n_generated_tokens": 0,
+              "prompt": "Say hello.",
+              "prompt_meta": {
+                "prompt_index": 0
+              },
+              "response": "",
+              "sample_index": 0,
+              "stop_reason": "abstain"
+            }
+          ],
+          "summary": {
+            "abstention_rate": 1.0,
+            "acceptance_rate": 0.0,
+            "candidate_source_counts": {
+              "R2": 1
+            },
+            "mean_attempts_used": 1.0,
+            "mean_candidate_acceptance_probability": 0.0,
+            "n_abstained": 1,
+            "n_accepted": 0,
+            "n_responses_requested": 1,
+            "stop_reasons": {
+              "abstain": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

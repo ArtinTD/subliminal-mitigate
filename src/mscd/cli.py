@@ -25,11 +25,28 @@ def main():
         c["model_revision"] = api.model_info(
             c["base_model"], revision=c.get("model_revision")
         ).sha
-        c["prompt_revision"] = api.dataset_info(
-            c["prompt_dataset"], revision=c.get("prompt_revision")
-        ).sha
+        if c.get("prompt_dataset"):
+            c["prompt_revision"] = api.dataset_info(
+                c["prompt_dataset"], revision=c.get("prompt_revision")
+            ).sha
+        for method in c.get("methods", {}).values():
+            if method.get("smoothing"):
+                smoothing = method["smoothing"]
+                smoothing["embedding_revision"] = api.model_info(
+                    smoothing.get("embedding_model", "BAAI/bge-base-en-v1.5"),
+                    revision=smoothing.get("embedding_revision"),
+                ).sha
         for f in ["training_config", "source_config"]:
-            c[f] = str((config_path.parent / c[f]).resolve())
+            if f in c:
+                c[f] = str((config_path.parent / c[f]).resolve())
+        for collection in ("input_files", "imports", "provided_models"):
+            for value in c.get(collection, {}).values():
+                if value.get("path"):
+                    value["path"] = str(
+                        (
+                            config_path.parent / Path(value["path"]).expanduser()
+                        ).resolve()
+                    )
         output = Path(args.output_config)
         with output.open("x") as f:
             yaml.safe_dump(c, f, sort_keys=False)

@@ -1,0 +1,14 @@
+{
+  "fixture_only": true,
+  "passed": true,
+  "result": {
+    "response": "Rain is water dro",
+    "rule": {
+      "downward": "qth_smallest",
+      "q": 3,
+      "rule": "base_relative_quorum",
+      "version": 1
+    },
+    "teacher_count": 4
+  }
+}

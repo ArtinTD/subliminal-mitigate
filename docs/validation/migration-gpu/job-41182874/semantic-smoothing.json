@@ -1,0 +1,11 @@
+{
+  "fixture_only": true,
+  "passed": true,
+  "result": {
+    "cache_entries": 16,
+    "embedding_revision": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a",
+    "encode_calls": 8,
+    "identity": "8584b56d93d8156c1e903b66e3a376af47d967dfb6a7cda35d80314e291a7290",
+    "response": "A rain is a natural phenomenon where water"
+  }
+}

@@ -98,5 +98,589 @@
     ],
     "destination": "src/mscd/generation.py",
     "adaptation": "ModelGenerator retains vLLM LoRA path; per-request seeds and resumable batches replace one bulk call."
+  },
+  {
+    "source": "scripts/sample_min_composition_generations.py",
+    "commit": "a04cf47",
+    "sha256": "93cb39c602e084f05409cd94b4c0cfa8c7a318c4b4cdbb7ff93d6ef05c8848a9",
+    "symbols": [
+      "compose_directional_log_probs"
+    ],
+    "destination": "src/mscd/_directional.py",
+    "fixture": "tests/mscd/reference/migration/directional_source.py"
+  },
+  {
+    "source": "dataset_gen/number_sequence.py",
+    "commit": "a04cf47",
+    "sha256": "f532a2ff4b1cf22253e9966f98e532409cb0b3313223253b969d1de037825329",
+    "symbols": [
+      "_COUNT_QUALIFIERS",
+      "_DIGIT_DESCRIPTORS",
+      "_EXAMPLE_PREFIXES",
+      "_FORMAT_SUFFIXES",
+      "_INSTRUCTION_TEMPLATES",
+      "_SUFFIXES",
+      "_parse_response",
+      "build_prompts",
+      "filter_by_format"
+    ],
+    "destination": "src/mscd/_number_source.py",
+    "fixture": "tests/mscd/reference/migration/number_sequence.py"
+  },
+  {
+    "source": "scripts/sample_quorum_composition_generations.py",
+    "commit": "7291b987bdb81a0aacd4d8ce3b657116ab00eb19",
+    "sha256": "0d5714d47e013016e453d13d6be4609cd52d9bd1850da8126b9eda490949eac8",
+    "symbols": [
+      "JOKE_FLEX_LAST_RE",
+      "JOKE_LINE_RE",
+      "MARKER_FLEX_LINE_RES",
+      "MARKER_NAMES",
+      "apply_semantic_kernel_smoothing",
+      "apply_span_token_pseudo_support",
+      "canonicalize_span_embedding_text",
+      "clone_repeat_past_key_values",
+      "compose_kernel_smoothed_log_probs_from_logps",
+      "compose_lookback_min_gated_log_probs_from_logps",
+      "compose_quorum_log_probs_from_logps",
+      "compose_soft_min_log_probs_from_logps",
+      "compose_span_action_scores",
+      "compose_span_token_smoothed_log_probs_cached",
+      "embed_span_ids",
+      "first_nonempty_line",
+      "has_first_line_prefix",
+      "has_line_prefix_anywhere",
+      "joke_line_indices",
+      "joke_position_bucket",
+      "joke_position_metrics",
+      "marker_line_indices",
+      "marker_position_metrics",
+      "nonempty_lines",
+      "normalize_log_target",
+      "normalize_span_logp",
+      "past_key_value_tensors",
+      "pooled_span_embeddings",
+      "record_span_token_profile",
+      "resolved_span_support_normalization",
+      "resolved_span_token_lambda",
+      "sample_ref_span_proposals_cached_batched",
+      "sample_token_rows_from_logp",
+      "score_span_logprob",
+      "select_past_key_value_rows",
+      "self_test",
+      "span_embedding_record_texts",
+      "span_embedding_texts",
+      "span_kernel_from_embeddings",
+      "span_neighbor_records",
+      "span_similarity_gate_factors",
+      "span_token_parallel_refs_enabled",
+      "span_token_pseudo_support_edge_records",
+      "span_token_pseudo_support_from_embeddings",
+      "synchronize_span_devices",
+      "top_token_records",
+      "update_lookback_log_history"
+    ],
+    "destination": "src/mscd/_semantic_engine.py",
+    "fixture": "tests/mscd/reference/migration/semantic_source.py",
+    "adaptation": "Optional return_smoothed extracts the per-teacher transform before aggregation; original default numerical path retained. Self-test retained as frozen mathematical checks."
+  },
+  {
+    "source": "src/subliminal_mitigate/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "655ac6a0c7f500b79b1c169da4d5bf7561ad9cd6e409695972d56016b6614274",
+    "destination": "src/mscd/_medical/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/datasets/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "fffa2c586f02981e97188e0bfa772cec7d0721d6f4d176a94b8ded8930d44f1b",
+    "destination": "src/mscd/_medical/datasets/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/datasets/em.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "e482b4435018b24c284819aa7528185fc449b13a7515589e5c0561ea1bac5650",
+    "destination": "src/mscd/_medical/datasets/em.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/datasets/massive.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "196a1099bc2fcfbfb87c26cc550f86dd390d332f906f6b5eeb2ea4dfdedb8c9b",
+    "destination": "src/mscd/_medical/datasets/massive.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/datasets/records.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "7562db8624a8afbed1f31906f772770f9eec93b16b873bf9d936d721c526e84b",
+    "destination": "src/mscd/_medical/datasets/records.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/datasets/weighted_union.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "70b704eddedd6ffa240c0351d80e31b77029254dc995a099f900c32551786aff",
+    "destination": "src/mscd/_medical/datasets/weighted_union.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/decoding/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "eda7a83a9c8e01267153088cc4efec5ba5fe1a667797710359be5fab43d548ee",
+    "destination": "src/mscd/_medical/decoding/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/decoding/algorithms.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "ec4c590b88c703c90339427ee4ed4926673c9a5518bfb24feccc684b906fe42a",
+    "destination": "src/mscd/_medical/decoding/algorithms.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/evaluation/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "f9f496182eb0ca3357a55cd11024f42a6203a34ceb45092afd90b35c86c91fb3",
+    "destination": "src/mscd/_medical/evaluation/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/evaluation/em.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "7034c2ddd2e8c5601fefab5a0c14bfaf89dd1f47ea88bb5edd90949a19dfdcc8",
+    "destination": "src/mscd/_medical/evaluation/em.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/evaluation/medical.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "11c3754a0a28b51a3fc5c0a717cd04417626a9c8819bc1f14081f42b33a451cb",
+    "destination": "src/mscd/_medical/evaluation/medical.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/evaluation/ratio.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "a2c940f0968eb05fd010fc53f0ce05f0e4d4f927f4422826634047d47e8f5a9e",
+    "destination": "src/mscd/_medical/evaluation/ratio.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "4288cc79c9cbf1ba36eae1a2fb308ca28f657f321f48f07cb258a288f324cd15",
+    "destination": "src/mscd/_medical/inference/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/direct.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b1931db33f5f39d9a3fe512321770777e5657d4349a028956e4aa32da0827762",
+    "destination": "src/mscd/_medical/inference/direct.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/em.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "992e15c2e75c70b48f004fc36dca1b10930064989dcf132cc3d1935135c79459",
+    "destination": "src/mscd/_medical/inference/em.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/lora.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "d3d7ebc92156cf8e0fe918ca52c8e5f5985bff11874612d8dfd8b2abf409fecf",
+    "destination": "src/mscd/_medical/inference/lora.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/massive.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "e5c144a90bbe2d73971d80d4c75f9e508f641f4387cc621e48067028bb3b149b",
+    "destination": "src/mscd/_medical/inference/massive.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/merge.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "87d9bfed86795cadbfaf10fc1876678c69bace65aa1dcfab56b188b97560ed4f",
+    "destination": "src/mscd/_medical/inference/merge.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/inference/whole_output.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "f168ef810d80341e3602e3416c32c44966e2f9afeab327a67d26b7bb3aa83d11",
+    "destination": "src/mscd/_medical/inference/whole_output.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/em_outcomes.json",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "8e71a6633a74b744b7c4d2e851278c9a1feb4ed53c904098cb72b28278f0dc97",
+    "destination": "src/mscd/_medical/resources/em_outcomes.json",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/em_training.yaml",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b9b12a94acc42e722c994965ef1f909bfb628bd0e00b052a25a668ea9bb29567",
+    "destination": "src/mscd/_medical/resources/em_training.yaml",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/massive_constituents.json",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "9d3a1fca132468c0b2562a54f1392f55863e83d70f42aa7bb1cd85ed5b27baf8",
+    "destination": "src/mscd/_medical/resources/massive_constituents.json",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/massive_observations.json",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "91168b76934538fbe8d75c68988a3163ba84191246ab15cd2767042e4c3a7f5c",
+    "destination": "src/mscd/_medical/resources/massive_observations.json",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/massive_training.yaml",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b24afaed10e75d7390ded1ddf44b112cf7e7e343879273f0b7433f9687c10c31",
+    "destination": "src/mscd/_medical/resources/massive_training.yaml",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/tasks/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "99e839fbe4f8873b918abc730250d45086b402a9eb6ac643cd3672f9ecebb296",
+    "destination": "src/mscd/_medical/tasks/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/tasks/_massive_direct.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "beaa24adb8a2686f9ae731bab65653eba031098ba447175e5b5ee7df423f058f",
+    "destination": "src/mscd/_medical/tasks/_massive_direct.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/tasks/_massive_kalai.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "74606b1d0a4345d37df36d95cf2eb0d70f77a73b3d09c7d96c6fa0ae4aceedc4",
+    "destination": "src/mscd/_medical/tasks/_massive_kalai.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/tasks/_massive_primitives.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "2410dbf8e608c76d09c25fe7f5073bef28fe7910a092d6ac3ad3ea962e2b772f",
+    "destination": "src/mscd/_medical/tasks/_massive_primitives.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/tasks/massive.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "e99e0e7ad930acea31ffeacca9f62a2a2ca65eafd50b8cfb28c23878b04903ee",
+    "destination": "src/mscd/_medical/tasks/massive.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/training/__init__.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "3597580b550036b7be05fa2fef668f39ae9d93e0c2b0c5f957a5d4ec77409aad",
+    "destination": "src/mscd/_medical/training/__init__.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/training/checkpoints.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "d6422186e2d4dcd7fdcb12940344eb4df8bafb48cf953087a4b6163294d8dfea",
+    "destination": "src/mscd/_medical/training/checkpoints.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/training/config.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "d8dea525a922220d62198cc584f58b7ab08fe9b18693cf9a388c801754cb265f",
+    "destination": "src/mscd/_medical/training/config.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/training/model_loader.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "bd8e4df8e8b313c0545cc9bd6cb9f7d68f749ab7fc2c94e22c731a4333d3215b",
+    "destination": "src/mscd/_medical/training/model_loader.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "src/subliminal_mitigate/training/objectives.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "87f9d1a3d211ef3716e638631ac68795bd0f534ed477d5c3bc5496342a56cb0c",
+    "destination": "src/mscd/_medical/training/objectives.py",
+    "adaptation": "Namespace integration into mscd._medical. Completion-only preparation now passes exact audited chat-template token IDs and masks with skip_prepare_dataset=True to avoid the installed Unsloth formatter incompatibility. Objective and target boundaries retained; CPU verified, GPU optimization of this compatibility change not rerun. See docs/validation/migration-coverage.json."
+  },
+  {
+    "source": "src/subliminal_mitigate/training/trainer.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "ac1253c3ade166a92015e53934e9b37f7998cfa8295beb8cca06a7789bb7c92a",
+    "destination": "src/mscd/_medical/training/trainer.py",
+    "adaptation": "Namespace integration into mscd._medical. Completion-only preparation now passes exact audited chat-template token IDs and masks with skip_prepare_dataset=True to avoid the installed Unsloth formatter incompatibility. Objective and target boundaries retained; CPU verified, GPU optimization of this compatibility change not rerun. See docs/validation/migration-coverage.json."
+  },
+  {
+    "source": "tests/test_em_inference.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "02950ff111965abf3de967bb5a91a75b821e4415af5b66dcdc0830ef88e19f1a",
+    "destination": "tests/mscd/medical/test_em_inference.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_em_inference_merge.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b4058b4ad4dde59cee680e5b393a2e33c35ff48a237e1da02d722652994a4111",
+    "destination": "tests/mscd/medical/test_em_inference_merge.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_massive_dataset_builder.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "e8b87fd92e34ed55e2dfd075abcaf1853d5c5b9183a935e2b13c9452f458ee85",
+    "destination": "tests/mscd/medical/test_massive_dataset_builder.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_massive_inference.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b408e151676607be5eeeed030c7184b75a928047d678ce4d784248681ba7c888",
+    "destination": "tests/mscd/medical/test_massive_inference.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_massive_inference_kalai.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "2248e185ce49d2a2b28f8bb17bbcb63ff7a1c841eb0d31046d2ca91f9a4fc434",
+    "destination": "tests/mscd/medical/test_massive_inference_kalai.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_medical_rubric.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "09aee08fa9a41a2059716c0dfd11d6cac8a9aed90426709f8fa54842dc0f75bf",
+    "destination": "tests/mscd/medical/test_medical_rubric.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_training_objectives.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "2ecd63e9501735c7abcff3625bd0527cb9bcc3c367a1b6b6fe994856e98b67a6",
+    "destination": "tests/mscd/medical/test_training_objectives.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_training_run.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "ea3607f5c80473c717d122fc205919871caf343cb768c302ea5c3509e2d801ef",
+    "destination": "tests/mscd/medical/test_training_run.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "tests/test_training_snapshots.py",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "cbebff8b48e8cdc5669cea4685539453907817b9035512ac8daf10d9f878bc79",
+    "destination": "tests/mscd/medical/test_training_snapshots.py",
+    "adaptation": "Namespace integration into mscd._medical; algorithms unchanged."
+  },
+  {
+    "source": "scripts/eval_em_generations.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "86e7f30e6dca0211d44634ebe9e30a8d777e744860d4d2de7d8fe3f7d6782b94",
+    "symbols": [
+      "default_alignment_prompt",
+      "default_coherence_prompt",
+      "judge_prompt",
+      "parse_judge_value",
+      "sample_answer",
+      "sample_question"
+    ],
+    "destination": "src/mscd/_em_judge.py",
+    "fixture": "tests/mscd/reference/migration/em_judge_source.py"
+  },
+  {
+    "source": "scripts/sample_batched_subliminal_delta_distillation.py",
+    "commit": "38226f0ae7f43157b8ee914577fb268bce682e09",
+    "sha256": "37eb243d37661d418cb7ef68f786682771139b59afc51c42ded01956370f4266",
+    "destination": "src/mscd/_subliminal_engine.py",
+    "fixture": "tests/mscd/reference/migration/_subliminal_engine_source.py",
+    "symbols": [
+      "pad_prompt_ids",
+      "sample_microbatch"
+    ],
+    "adaptation": "Exact numerical/generation functions; sampling metadata separated from behavioral diagnostics."
+  },
+  {
+    "source": "evaluate.py",
+    "commit": "38226f0ae7f43157b8ee914577fb268bce682e09",
+    "sha256": "b3225bc1ac87d36186189b8888b5ea83eb3c55252106f401ebec9f9c65eee09f",
+    "destination": "src/mscd/_subliminal_vllm.py",
+    "fixture": "tests/mscd/reference/migration/_subliminal_vllm_source.py",
+    "symbols": [
+      "init_vllm",
+      "generate"
+    ],
+    "adaptation": "Exact numerical/generation functions; sampling metadata separated from behavioral diagnostics."
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/em_training.yaml",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b9b12a94acc42e722c994965ef1f909bfb628bd0e00b052a25a668ea9bb29567",
+    "destination": "configs/mscd/em-training.yaml",
+    "adaptation": "Adds profile dispatch only; training parameters unchanged"
+  },
+  {
+    "source": "src/subliminal_mitigate/resources/massive_training.yaml",
+    "commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+    "sha256": "b24afaed10e75d7390ded1ddf44b112cf7e7e343879273f0b7433f9687c10c31",
+    "destination": "configs/mscd/massive-training.yaml",
+    "adaptation": "Adds profile dispatch only; training parameters unchanged"
+  },
+  {
+    "source": "scripts/eval_narrow_bad_advice_generations.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "d47fa59c88b548653b4b927c5ce3709a910e764813e7bca3a53d6ed301636410",
+    "destination": "src/mscd/_em_narrow_judge.py",
+    "fixture": "tests/mscd/reference/migration/em_narrow_judge_source.py",
+    "symbols": [
+      "strict_bad_advice_prompt",
+      "parse_badness",
+      "DOMAIN_SPECS"
+    ]
+  },
+  {
+    "source": "scripts/sample_batched_quorum_distillation.py",
+    "commit": "a04cf47adeb360bca13490e7a31553362fe3d12f",
+    "sha256": "a6d93d405b5a259340610c1067c10653791daae5f3d64a475eef3969864f7b1f",
+    "destination": "src/mscd/_quorum_batch_engine.py",
+    "fixture": "tests/mscd/reference/migration/quorum_batch_source.py",
+    "symbols": [
+      "pad_prompt_ids",
+      "sample_microbatch"
+    ],
+    "adaptation": "Output behavioral diagnostics removed; numerical generation unchanged."
+  },
+  {
+    "source": "hyak_results/outputs (saved evaluations; see fixture manifest for paths and hashes)",
+    "commit": null,
+    "artifacts": [
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/base/calls/000.json",
+        "sha256": "25012d42e53df1ce4d91e521cef38a0beef1e886122d0ed5cf7c8419b9ef333c"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/base/calls/001.json",
+        "sha256": "133c6370a57c201540ee4fa2fbb54c06dfa83675d50017fe067cc35c6ba1b0c5"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/base/calls/010.json",
+        "sha256": "796895afce783dd28537cb922c737cc8937994799701a18d9ed592b974da352a"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/teacher/calls/000.json",
+        "sha256": "4c3aca76ccf6154383b2a02a74adbadfdd09dbbd2e9cba53037604ddfe9e3c1f"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/teacher/calls/001.json",
+        "sha256": "fa3532f3d518dd294367e062650ffc59a796781139a0097ccc46e19a1e2335fe"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/evaluation_artin/teacher/calls/010.json",
+        "sha256": "f752b6a37c7f1ef83e4deb1cf88fffb2b686da745fd2154d2e57a4bf551a29bb"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/unfiltered_rerun_v1/evaluation_artin/calls/000.json",
+        "sha256": "3aa001ec13c58e0e6d0289e61f85ddeea2782ef3d0180c7fef25a64877a06327"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/unfiltered_rerun_v1/evaluation_artin/calls/001.json",
+        "sha256": "1c4d5ceda99b5a2dc7cd93b4531e40a090297e9928d2c3d4a748fb3ef4024dba"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/subliminal_joke_kd/panda_eagle_delta_distillation_v1/unfiltered_rerun_v1/evaluation_artin/calls/010.json",
+        "sha256": "4d9e1b539ab4be692571869b10519436d1a13315fd96dbba60f2bd156c30d719"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/quorum_dropout_m4/pilot128/generations/m4_three_benefit_one_dropout/quorum_q3.json",
+        "sha256": "ee39f49d70fefc362398ab796ad89906adc6b5ccfe3fcf853b270b577882db68"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/quorum_dropout_m4/quorum_q3_distillation_v1/unfiltered_rerun_v1/evaluation/student.json",
+        "sha256": "a6f66c8bac6ebf10263ffb4cbe20c62d3a36b21d765afe281eca76936e5b7ff8"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_pilot_v1/evaluation/teacher/results.json",
+        "sha256": "7d86b07324eb749b95c9b508beccd0f194377d99d2e4a692a9dda0e1375a8561"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_scaling_v1/evaluation128/raw1024_steps200_seed42/results.json",
+        "sha256": "1f13ced3d606474d787724796c3dfeab6e3caf6b34f2af243821da54e7793e8d"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_scaling_v1/evaluation128/raw1024_steps200_seed43/results.json",
+        "sha256": "6b3b42bb18169f4a3de08aee4904bfe849205998df3ccf6acb8482248e86d37e"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_min_kd_scaling_v1/evaluation128/raw1024_steps200_seed44/results.json",
+        "sha256": "7536b969dd184f66ed6f41bfec0120e638e860137b9ac637246f9ecc9cc34ae6"
+      },
+      {
+        "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/partial_agreement/eagle_joke_topaz_humor/semantic_matched_baselines/pilot128/generations/eagle_joke_topaz_humor/min.json",
+        "sha256": "9b2041cb6ff5005008a0709102fcd56d434d90c0a0d1879cc0426ff88c961485"
+      }
+    ],
+    "destination": "tests/mscd/reference/migration/response_replays.json.gz",
+    "fixture_manifest": "tests/mscd/reference/migration/response_replays.manifest.json",
+    "validation": "Recounted original response text; no GPU rerun or historical training-reproduction claim."
+  },
+  {
+    "source": "dataset_gen/composed_first_line_joke.py",
+    "commit": "a04cf47adeb360bca13490e7a31553362fe3d12f",
+    "sha256": "2ac89fb25853d4301debbde546fc37cf581b2eb8e283a6b7107c635e47480804",
+    "fixture": "tests/mscd/reference/migration/marker_construction_source.py",
+    "destination": "src/mscd/builders.py",
+    "validation": "Historical first-bank selection, strict construction checks, Cobalt transform and shared benefit-bank mixture"
+  },
+  {
+    "source": "scripts/build_cost_only_dropout_dataset.py",
+    "commit": "a04cf47adeb360bca13490e7a31553362fe3d12f",
+    "sha256": "2fb6d74397358f19523367537be1d9392abd21cd64d36f42d916620ab85ea4c0",
+    "fixture": "tests/mscd/reference/migration/cobalt_source.py",
+    "destination": "src/mscd/builders.py",
+    "validation": "Historical first-bank selection, strict construction checks, Cobalt transform and shared benefit-bank mixture"
+  },
+  {
+    "source": "dataset_gen/joke_benefit.py",
+    "commit": "a04cf47adeb360bca13490e7a31553362fe3d12f",
+    "sha256": "032d32b4192d2647d829524df491205f4191746cc9ef8f2653af1cc760ed83cf",
+    "fixture": "tests/mscd/reference/migration/joke_source.py",
+    "destination": "src/mscd/_joke_source.py",
+    "validation": "Historical first-bank selection, strict construction checks, Cobalt transform and shared benefit-bank mixture",
+    "symbols": [
+      "is_joke_suffix_response",
+      "benefit_count_for_final_share",
+      "generate_joke_responses",
+      "select_random_rows",
+      "dedupe_rows"
+    ]
+  },
+  {
+    "source": "dataset_gen/number_sequence.py",
+    "commit": "a04cf47adeb360bca13490e7a31553362fe3d12f",
+    "sha256": "f532a2ff4b1cf22253e9966f98e532409cb0b3313223253b969d1de037825329",
+    "symbols": [
+      "generate_sequences",
+      "select_paper_random"
+    ],
+    "destination": "src/mscd/_number_source.py"
   }
 ]

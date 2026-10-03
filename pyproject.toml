@@ -10,13 +10,16 @@ requires-python = ">=3.10"
 dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
-test = ["pytest>=7", "torch"]
+test = ["pytest>=7", "torch", "numpy", "safetensors", "datasets"]
 
 [project.scripts]
 mscd = "mscd.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"mscd._medical" = ["resources/*.json", "resources/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/mscd"]

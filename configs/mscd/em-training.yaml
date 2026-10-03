@@ -1,0 +1,31 @@
+base_model: Qwen/Qwen2.5-7B-Instruct
+lora:
+  rank: 8
+  alpha: 8
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  dropout: 0.0
+training:
+  batch_size: 20
+  gradient_accumulation: 3
+  lr: 0.0002
+  lr_scheduler_type: linear
+  warmup_steps: 5
+  epochs: 3
+  min_steps: 200
+  max_seq_length: 2048
+  dtype: bfloat16
+  loss_on: all
+  seed: 42
+  data_seed: 42
+  save_steps: 100
+  save_only_model: true
+  dataloader_num_workers: 4
+  report_to: none
+profile: em

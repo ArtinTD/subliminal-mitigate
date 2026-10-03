@@ -16,6 +16,7 @@ from .artifacts import (
     tree_identity,
 )
 from .types import MethodSpec
+from .recipes import build_recipe
 
 STAGES = {
     "build-sources": (),
@@ -48,9 +49,10 @@ STAGES = {
 class Experiment:
     def __init__(self, config, config_path=None):
         config = dict(config)
+        self.stages = build_recipe(config, STAGES)
         config["provided_models"] = dict(config.get("provided_models", {}))
         for name, artifact in config["provided_models"].items():
-            if name not in {"eagle", "topaz", "union", "student"}:
+            if f"train-{name}" not in self.stages:
                 raise ValueError(f"Unknown provided model: {name}")
             actual = tree_identity(artifact["path"])
             if artifact.get("identity") and artifact["identity"] != actual:
@@ -60,17 +62,36 @@ class Experiment:
             name: tree_identity(path)
             for name, path in config.get("import_sources", {}).items()
         }
+        config["imports"] = {
+            key: dict(value) for key, value in config.get("imports", {}).items()
+        }
+        for stage, spec in config["imports"].items():
+            if stage not in self.stages:
+                raise ValueError(f"Unknown imported stage: {stage}")
+            actual = tree_identity(spec["path"])
+            if spec.get("identity") and spec["identity"] != actual:
+                raise ValueError(f"Imported artifact changed: {stage}")
+            spec["identity"] = actual
+        config["input_files"] = {
+            key: dict(value) for key, value in config.get("input_files", {}).items()
+        }
+        for name, spec in config["input_files"].items():
+            if spec.get("path"):
+                actual = tree_identity(spec["path"])
+                if spec.get("identity") and spec["identity"] != actual:
+                    raise ValueError(f"Input changed: {name}")
+                spec["identity"] = actual
         self.config = config
         self.config_path = config_path
         self.root = Path(config["output"]).expanduser().resolve()
         self.code = digest(
-            {p.name: file_hash(p) for p in sorted(Path(__file__).parent.glob("*.py"))}
+            {
+                str(p.relative_to(Path(__file__).parent)): file_hash(p)
+                for p in sorted(Path(__file__).parent.rglob("*"))
+                if p.is_file() and p.suffix in {".py", ".json", ".yaml", ".yml", ".txt"}
+            }
         )
         self.identity = digest(dict(config=config, implementation=self.code))
-        if config.get("rows_per_source", 0) < 1:
-            raise ValueError("rows_per_source must be positive")
-        if set(config["sources"]) != {"eagle", "topaz"}:
-            raise ValueError("v1 recipe requires eagle and topaz sources")
         self.methods = [
             MethodSpec(x, x, STAGES["eval-" + x])
             for x in [
@@ -83,23 +104,47 @@ class Experiment:
                 "minimum",
                 "student",
             ]
+            if config.get("recipe", "explicit-prefix") == "explicit-prefix"
         ]
+        if config.get("recipe", "explicit-prefix") != "explicit-prefix":
+            self.methods = [
+                MethodSpec(name, spec["kind"])
+                for name, spec in config.get("methods", {}).items()
+            ]
 
     @classmethod
     def from_config(cls, path):
         path = Path(path).resolve()
         cfg = yaml.safe_load(path.read_text())
         for field in ["training_config", "source_config"]:
-            cfg[field] = str((path.parent / cfg[field]).resolve())
-        cfg["training"] = yaml.safe_load(Path(cfg["training_config"]).read_text())
-        cfg["source_protocol"] = yaml.safe_load(Path(cfg["source_config"]).read_text())
-        cfg["evaluation_prompts"] = cfg["source_protocol"]["eval"]["prompts"]
+            if field in cfg:
+                cfg[field] = str((path.parent / cfg[field]).resolve())
+        if "training_config" in cfg:
+            cfg["training"] = yaml.safe_load(Path(cfg["training_config"]).read_text())
+        if "source_config" in cfg:
+            cfg["source_protocol"] = yaml.safe_load(
+                Path(cfg["source_config"]).read_text()
+            )
+            cfg.setdefault(
+                "evaluation_prompts",
+                cfg["source_protocol"].get("eval", {}).get("prompts", []),
+            )
+        # New recipes resolve portable input bindings beside the YAML; legacy
+        # explicit-prefix output paths retain their original cwd semantics.
+        for collection in ("input_files", "imports", "provided_models"):
+            for value in cfg.get(collection, {}).values():
+                if value.get("path"):
+                    value["path"] = str(
+                        (path.parent / Path(value["path"]).expanduser()).resolve()
+                    )
         return cls(cfg, str(path))
 
     def dependencies(self, stage):
+        if stage in self.config.get("imports", {}):
+            return ()
         if stage.startswith("train-") and stage[6:] in self.config["provided_models"]:
             return ()
-        return STAGES[stage]
+        return self.stages[stage].dependencies
 
     def receipt(self, stage):
         return self.root / stage / "complete.json"
@@ -121,11 +166,11 @@ class Experiment:
         if only and through:
             raise ValueError("--only and --through are mutually exclusive")
         if only:
-            if only not in STAGES:
+            if only not in self.stages:
                 raise ValueError(f"Unknown stage: {only}")
             return [only]
         target = through or "report"
-        if target not in STAGES:
+        if target not in self.stages:
             raise ValueError(f"Unknown stage: {target}")
         needed = set()
 
@@ -135,7 +180,7 @@ class Experiment:
             needed.add(s)
 
         visit(target)
-        return [s for s in STAGES if s in needed]
+        return [s for s in self.stages if s in needed]
 
     def plan(self, only=None, through=None):
         return [

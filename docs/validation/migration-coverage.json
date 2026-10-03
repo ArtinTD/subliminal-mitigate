@@ -1,0 +1,306 @@
+{
+  "baseline_commit": "9258b47537c17fa623a271c035f73757054cc124",
+  "branch": "refactor/mscd-pipeline",
+  "scope": "Local package migration; no manuscript edits, pushes, paid API calls, full experiments or new dataset seeds.",
+  "milestones": [
+    {
+      "id": 1,
+      "name": "Shared runner",
+      "implementation": [
+        "recipes.py",
+        "recipe_worker.py",
+        "experiment.py",
+        "worker.py",
+        "artifacts.py"
+      ],
+      "cpu_acceptance": "Original prefix suite; all eight configurations plan; import/score subprocess replay; dependency selection; receipts; input and recursive code/resource identities; filtered import inventory; standalone wheel without legacy.",
+      "remaining": []
+    },
+    {
+      "id": 2,
+      "name": "Base-relative decoding and subliminal",
+      "implementation": [
+        "consensus.py",
+        "_directional.py",
+        "_subliminal_engine.py",
+        "_subliminal_vllm.py",
+        "_number_source.py",
+        "_joke_source.py",
+        "subliminal.py",
+        "builders.py"
+      ],
+      "historical_parity": [
+        "Directional frozen logits/temperature path and padded microbatch",
+        "Saved response recount: teacher joke 5651/6400, panda 86/2000, eagle 385/1800; student 5515/6400,103/2000,352/1800",
+        "Positive-excess rates 0.015555555555555545 and 0.005499999999999998; original delta-method SE",
+        "Recorded teacher response offsets 0,2000,9000; strict joke detector; completed-response denominator",
+        "Unfiltered 4416-occurrence selection contract; empty responses retained"
+      ],
+      "remaining": [
+        "Original final 10300/10200 teacher training banks must be bound; reconstructed larger candidate banks are not equivalent.",
+        "Standalone three-suite vLLM calls do not reproduce the full original process RNG history including diagnostic calls.",
+        "Fresh construction requires the original explicit profile and inputs; construction helper parity is not historical dataset identity."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Quorum",
+      "implementation": [
+        "consensus.py",
+        "_quorum_batch_engine.py",
+        "builders.py",
+        "data.py"
+      ],
+      "historical_parity": [
+        "Ordinary quorum frozen kernel; ties, permutations and q=m reduction",
+        "Paper base-relative upward/downward qth order statistic; old downward variant excluded",
+        "4000 occurrences and canonical batch partition import; Cobalt deletion; unfiltered student",
+        "Saved teacher 104/128 and student 115/128 benefits, both zero cost; Wilson intervals",
+        "Union manifest: 4000 rows, HF shuffle seed42, epoch-derived 201 training steps"
+      ],
+      "remaining": [
+        "Full original generation used recorded A100/L40S batch assignments; portable execution is not a claim of cross-hardware response identity.",
+        "External source/adapter banks and canonical occurrence/batch manifests remain explicit input bindings."
+      ],
+      "configuration_evidence": [
+        {
+          "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/quorum_dropout_m4/union_all_data_baseline/datasets/union_all_data/union_manifest.json",
+          "sha256": "ad56ffc054a0654ee3e9212722ac4db3befe27d2ef6a22f77792b5dd871ea221",
+          "record": {
+            "sources": [
+              {
+                "name": "eagle",
+                "path": "/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/datasets/eagle",
+                "n_rows": 1000
+              },
+              {
+                "name": "topaz",
+                "path": "/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/quorum_dropout_m4/union_all_data_baseline/source_datasets/quorum_recovered_36683202/topaz",
+                "n_rows": 1000
+              },
+              {
+                "name": "birch",
+                "path": "/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/quorum_dropout_m4/union_all_data_baseline/source_datasets/quorum_recovered_36683202/birch",
+                "n_rows": 1000
+              },
+              {
+                "name": "cobalt_cost_only",
+                "path": "/gscratch/scrubbed/adhyyan/subliminal-mitigate/outputs/composed_joke_explicit_cost/quorum_dropout_m4/union_all_data_baseline/source_datasets/quorum_recovered_36683202/cobalt_cost_only",
+                "n_rows": 1000
+              }
+            ],
+            "total_rows": 4000,
+            "shuffle_seed": 42,
+            "columns": [
+              "prompt",
+              "response"
+            ],
+            "preserve_duplicates": true
+          }
+        },
+        {
+          "path": "/Users/adhyyan/projects/dp-mitigate/subliminal-mitigate/hyak_results/outputs/composed_joke_explicit_cost/quorum_dropout_m4/union_all_data_baseline/models/pi_union_all_data/training_summary.json",
+          "sha256": "bc1cbf002d117b298f28bbf9c236590e21e1f01d79e5bb65541c017f5237c996",
+          "record": {
+            "n_examples": 4000,
+            "batch_size": 20,
+            "gradient_accumulation": 3,
+            "world_size": 1,
+            "effective_batch_size": 60,
+            "epochs": 3,
+            "batches_per_epoch": 200,
+            "epoch_derived_steps": 201,
+            "min_steps": 200,
+            "max_steps": 201,
+            "kind": "sft",
+            "final_global_step": 201,
+            "final_epoch": 3.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Semantic smoothing",
+      "implementation": [
+        "_semantic_engine.py",
+        "smoothing.py",
+        "data.py"
+      ],
+      "historical_parity": [
+        "Frozen cached span rollout, support transfer and canonicalization with controlled embeddings; cache replay tested",
+        "BGE revision a5beb1e3e68b9ab74eb54cfd186867f64f240e1a recovered",
+        "1024 selected,1013 retained; structural filtering; shared adapter initialization3407; training/data seeds42,43,44",
+        "Recounted matched teacher111/128, each student110/128; historical unsmoothed minimum5/128, all zero plotted cost",
+        "Matched teacher panel separated from archived baseline/delta panel"
+      ],
+      "remaining": [
+        "Original base-relative smoothing execution implementation/configuration not located. New composition exists but must not be labeled parity with the historical77/128 point.",
+        "Original/reference teacher adapters and source banks remain external inputs."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "EM and MASSIVE/medical",
+      "source_commit": "0c32cd50967c41d27511f2f89651c74984040e2b",
+      "implementation": [
+        "medical.py",
+        "judging.py",
+        "training.py",
+        "_medical/"
+      ],
+      "historical_parity": [
+        "Imported construction/training/kernel/sampler/scoring tests",
+        "EM bad/benign source shards and distinct broad/narrow-medical endpoints; no invented EM student",
+        "MASSIVE fixed panels and weighted-union schedules; constrained task sampler and separate medical rubric",
+        "20-arm sealed MASSIVE replay: exact numerical scientific projection including 10000 aligned row/medical-prompt-cluster bootstrap draws",
+        "Cached/mock judge transport only; missing judgments and abstentions distinct"
+      ],
+      "remaining": [
+        "MASSIVE original student regeneration/training/sampling protocols and raw student predictions/judgments not located. Graph has explicit import and training-profile bindings; it does not infer them.",
+        "MASSIVE canonical pinned Qwen2.5 snapshot is not cached on Hyak; runtime fixture uses Qwen3.",
+        "EM broad-score zero parsing corrected in imported package is identified separately from historical report counts.",
+        "MASSIVE completion-only training compatibility fix passes CPU checks but its two-step GPU optimization remains unverified after the single authorized allocation."
+      ]
+    }
+  ],
+  "cpu": {
+    "tests_passed": 149,
+    "subtests_passed": 27,
+    "legacy_and_original_fixture_config_dependency_files_preserved": 277,
+    "original_provenance_entries_preserved": 7,
+    "standalone": "Final installed wheel without legacy or sibling checkout: 149 tests + 27 subtests, all 8 recipe plans, CLI help, and 20-arm MASSIVE report replay passed.",
+    "shell_syntax": "passed",
+    "mermaid": "Rendered with Mermaid in headless Chrome; 17 nodes, readable labels and no clipping at966px display width.",
+    "wheel_sha256": "084263d8f78faf356491ae3cddfa076f8ae6b6c29275cf9b0199372b09085579",
+    "readme_links": "All local links resolve",
+    "record": "docs/validation/migration-verification.json"
+  },
+  "runtime_smoke": {
+    "job_id": "41182874",
+    "allocation_limit_seconds": 3600,
+    "gpus": 2,
+    "api_calls": 0,
+    "status": "completed_with_one_unverified_training_path",
+    "remote_root": "/gscratch/scrubbed/adhyyan/mscd-pipeline/migration-validation-7ef6b3a5",
+    "snapshot_identity": "7ef6b3a5c7ef1ccab65f504d57c1cb0335887434cc97dca5a5b002e9fb3ed98e",
+    "note": "Prefix teacher adapters and cached Qwen3 used as fixtures; no experiment result or full stochastic historical-parity claim. One allocation only.",
+    "subsequent_changes": {
+      "README.md": {
+        "validated_snapshot": "6e76091ffd39175a6e50a0b568b7e8ac6f7a53392e2a93e8fe771f59a9836806",
+        "final": "bb98e48fbbda75011d82fd00eba1905cbc47d008b8355a4e2c6978f66a7762b4"
+      },
+      "configs/mscd/em.yaml": {
+        "validated_snapshot": "a3579f057e389a4be5265a414286895325421441bbd161d1ce8926f5f94361c1",
+        "final": "1e38d62bbf3690aaf8fd6c16d80aef1c142ae0cb69b2fef6b3ccdf9a16e02ab8"
+      },
+      "configs/mscd/quorum.yaml": {
+        "validated_snapshot": "cae97e17f6f95ee4fa17b0154f61db3271fc052dfc82b565dcc1544896797991",
+        "final": "17abaf636b792f96cdfe23f54756f8ccea18af54bd0da1b7705b9c8cc4246074"
+      },
+      "configs/mscd/semantic.yaml": {
+        "validated_snapshot": "9a48c1ca1f0ef750d7a5669376957ec470b9fed1055d619920508d062ea6b239",
+        "final": "1707fc1c6aeca5c12591594837a4b97c796d1adca4fd539ce0a320b0d7d80002"
+      },
+      "docs/provenance.json": {
+        "validated_snapshot": "65b5ca1b02a98437c36e5422747d3c05e44655e9884a07b85a2d3f616397f03a",
+        "final": "a6e5bc25088a20fd38ba8b7f2f08c3dc6e1e10b50690c59848a8cb947b7c69b1"
+      },
+      "scripts/mscd_migration_validate.py": {
+        "validated_snapshot": "81a3b6c4f72d85c27928d5e36021815c0ad2c048ef81f6853375a57a5d572eba",
+        "final": "6d66a5210c48bd8daebc9d169bc548976a87c0300b96672d40239eae69473374"
+      },
+      "src/mscd/_medical/training/objectives.py": {
+        "validated_snapshot": "87f9d1a3d211ef3716e638631ac68795bd0f534ed477d5c3bc5496342a56cb0c",
+        "final": "cf641c6022a96887a7a563f8bf4de9eb3147f4ba7519f7a31647bea670ef865b"
+      },
+      "src/mscd/_medical/training/trainer.py": {
+        "validated_snapshot": "ac1253c3ade166a92015e53934e9b37f7998cfa8295beb8cca06a7789bb7c92a",
+        "final": "306bd7886016684576876fabcefd8ef0be500a23db296d90cf1ad74ae4bd0bbf"
+      },
+      "src/mscd/generation.py": {
+        "validated_snapshot": "0f6fbda2198531121476b223fc83667604f08c762ec7f6e984e5a55674279aca",
+        "final": "e8047311e7afffe12e4adaac0de2e51fd13cc0d50f79f9cf5e87013b5694aa45"
+      },
+      "src/mscd/medical.py": {
+        "validated_snapshot": "1d83e741e9da71203650974726d28c28187adf227caba0a9959131bd184e2b8f",
+        "final": "fb6f32314f1e1d6b04310691f1d4b680aefa232ea05e9a35afb5d39c6cd70170"
+      },
+      "src/mscd/recipe_worker.py": {
+        "validated_snapshot": "9b02695aa0ab3fb74d1678d10bc6ce5a84c77582a77f9b3284289be27311fa3f",
+        "final": "37c7de24b873b3caf2af63d45e25835539fed446c3880c32dc75f69c892e616c"
+      },
+      "tests/mscd/medical/test_training_objectives.py": {
+        "validated_snapshot": "34a48d0f4be5284349ecc2dcd790ebed0c612dfd875c1f861022ebb51a2a5568",
+        "final": "a919b7de7c00f9117b265f79fdec1f0d97f3ec56bfc0b31d3753c1a2c1d6b4f8"
+      },
+      "tests/mscd/medical/test_training_run.py": {
+        "validated_snapshot": "c7d732227e26a5e2135868e9b64fb82d2eeb88d4e02325390004068fff78a4ba",
+        "final": "57ea15a325dd0da0f911c4daf1fca3c18c795a1efb76e2af770a3bef1af35d3e"
+      },
+      "tests/mscd/test_historical_replay.py": {
+        "validated_snapshot": "c0af355557503fcd98ff207f782084f813098ce393d1ac7fa4cebba5c21fce2b",
+        "final": "cfd0aa96d25e69357fb8d0331bd0a927ba77f0bf0ea5985bc1fc2ac3adecbe1e"
+      },
+      "tests/mscd/test_integration.py": {
+        "validated_snapshot": "1665f334a80a036622835351e623bf2a7b2f6847f1d5ac8e44bb9ad660983659",
+        "final": "b9a4541992a71040dfc8b8749789d75ac5e8bc506b6d1fa1ec427399beaa2948"
+      }
+    },
+    "subsequent_change_scope": "CPU-verified baseline batch/RNG adapters, imported model/filtered occurrence checks, EM identifier and quorum union configuration corrections, smoke harness fixes, completion-only preparation compatibility, README/tests. Numerical decoder kernels unchanged; completion-only preparation fix lacks GPU optimization retest.",
+    "slurm_state": "COMPLETED",
+    "allocation_elapsed_seconds": 1152,
+    "checks_passed_after_in_allocation_repairs": 9,
+    "checks_total": 10,
+    "allocations_used": 1,
+    "report": "docs/validation/migration-gpu/job-41182874/report.json",
+    "repair_report": "docs/validation/migration-gpu/job-41182874/repair-v1/report.json",
+    "passed_cases": [
+      "directional",
+      "quorum",
+      "base-relative-quorum",
+      "semantic-rollouts",
+      "semantic-smoothing",
+      "grammar",
+      "em-panel",
+      "train-semantic",
+      "train-em"
+    ],
+    "failure": {
+      "case": "train-massive",
+      "phase": "dataset_preparation_before_optimizer_steps",
+      "error": "RuntimeError: Unsloth: You must specify a formatting_func",
+      "cause": "Installed Unsloth overrides conversational dataset preparation and rejects prompt/completion rows. A formatting_func would also conflict with completion_only_loss.",
+      "fix": "Prepare exact audited chat-template tokens plus completion_mask; use required SFTConfig dataset_kwargs.skip_prepare_dataset=True; retain actual collator audit.",
+      "validation": "149 CPU tests plus 27 subtests; installed tokenizer, SFTConfig and real TRL collators pass on CPU. GPU optimization after this fix not rerun.",
+      "new_gpu_allocation_submitted": false,
+      "source_files": [
+        "src/mscd/_medical/training/objectives.py",
+        "src/mscd/_medical/training/trainer.py"
+      ],
+      "regression_tests": [
+        "tests/mscd/medical/test_training_run.py",
+        "tests/mscd/medical/test_training_objectives.py"
+      ],
+      "trace_tail": "UnslothSFTTrainer.py:_prepare_dataset line1161 raises RuntimeError(\"Unsloth: You must specify a formatting_func\") during SFTTrainer construction; no optimizer step."
+    },
+    "supplemental_cpu_check": {
+      "status": "passed",
+      "record": "docs/validation/migration-completion-cpu.json",
+      "claim": "Installed Qwen3 tokenizer, SFTConfig skip_prepare_dataset flag and real TRL padded/padding-free collators passed on CPU. No model weights loaded, training executed, GPU allocation or API call. Unsloth GPU optimization remains unverified."
+    },
+    "allocation_accounting": {
+      "state": "COMPLETED",
+      "elapsed": "00:19:12",
+      "gpus": "2 A100",
+      "cpu": 8,
+      "memory": "160G",
+      "nodes": 1
+    }
+  },
+  "deferred": [
+    "API-only in-context experiments: original source not supplied",
+    "Full reruns and additional dataset generation seeds"
+  ],
+  "response_replay_fixture": "tests/mscd/reference/migration/response_replays.manifest.json"
+}

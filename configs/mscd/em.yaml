@@ -1,0 +1,220 @@
+recipe: em
+output: ./outputs/mscd/em
+base_model: Qwen/Qwen2.5-7B-Instruct
+model_revision: null
+training_config: em-training.yaml
+construction:
+  mode: curated
+sources:
+  bad1:
+    expected_rows: 1762
+  bad2:
+    expected_rows: 1762
+  bad3:
+    expected_rows: 1762
+  bad4:
+    expected_rows: 1762
+  bad5:
+    expected_rows: 1762
+  benign:
+    expected_rows: 1762
+input_files:
+  bad_medical:
+    path: null
+    identity: null
+    description: Original bad-medical HF bank
+  benign_medical:
+    path: null
+    identity: null
+    description: Original benign-medical HF bank
+  joke_bank:
+    path: null
+    identity: null
+    description: Shared joke augmentations
+  prompts_broad:
+    path: null
+    identity: null
+    description: Frozen prompt bank for the separate broad endpoint
+  prompts_medical:
+    path: null
+    identity: null
+    description: Frozen prompt bank for the separate medical endpoint
+  prompts_joke:
+    path: null
+    identity: null
+    description: Frozen prompt bank for the separate joke endpoint
+  judgments:
+    path: null
+    identity: null
+    description: Cached request bodies and raw EM judgments, with original model/template
+      identities
+devices:
+- cuda:0
+- cuda:1
+base_device: cuda:0
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  max_attempts: 20
+methods:
+  base:
+    kind: base
+    suites:
+    - broad
+    - medical
+    - joke
+  bad1:
+    kind: single
+    model: bad1
+    suites:
+    - broad
+    - medical
+    - joke
+  bad2:
+    kind: single
+    model: bad2
+    suites:
+    - broad
+    - medical
+    - joke
+  bad3:
+    kind: single
+    model: bad3
+    suites:
+    - broad
+    - medical
+    - joke
+  bad4:
+    kind: single
+    model: bad4
+    suites:
+    - broad
+    - medical
+    - joke
+  bad5:
+    kind: single
+    model: bad5
+    suites:
+    - broad
+    - medical
+    - joke
+  benign:
+    kind: single
+    model: benign
+    suites:
+    - broad
+    - medical
+    - joke
+  union:
+    kind: single
+    model: union
+    suites:
+    - broad
+    - medical
+    - joke
+  merge:
+    kind: merge
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    weights:
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    suites:
+    - broad
+    - medical
+    - joke
+  whole:
+    kind: whole
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    suites:
+    - broad
+    - medical
+  minimum:
+    kind: consensus
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    native_method: min
+    suites:
+    - broad
+    - medical
+    - joke
+  delta:
+    kind: consensus
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    native_method: directional
+    suites:
+    - broad
+    - medical
+    - joke
+baselines:
+  union:
+    shuffle_seed: 42
+suites:
+  broad:
+    input: prompts_broad
+    expected_prompts: 64
+    responses_per_prompt: 5
+    seed: 0
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+    evaluator: em
+    judge:
+      kind: em_broad
+      model: null
+      transport: cache
+      cache_input: judgments
+      templates: {}
+  medical:
+    input: prompts_medical
+    expected_prompts: 16
+    responses_per_prompt: 20
+    seed: 0
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+    evaluator: em_medical
+    judge:
+      kind: em_medical
+      model: null
+      transport: cache
+      cache_input: judgments
+  joke:
+    input: prompts_joke
+    expected_prompts: 32
+    responses_per_prompt: 5
+    seed: 0
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+    evaluator: subliminal
+    markers:
+    - Joke
+    prefixes: []
+    targets: []

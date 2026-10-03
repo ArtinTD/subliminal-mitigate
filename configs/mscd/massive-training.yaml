@@ -1,0 +1,38 @@
+base_model: Qwen/Qwen2.5-7B-Instruct
+base_model_revision: bb46c15ee4bb56c5b63245ef50fd7637234d6f75
+lora:
+  rank: 16
+  alpha: 16
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  dropout: 0.05
+training:
+  batch_size: 20
+  gradient_accumulation: 3
+  lr: 0.0003
+  lr_scheduler_type: linear
+  warmup_steps: 10
+  epochs: 1
+  min_steps: 0
+  max_steps: 540
+  save_steps: 540
+  max_seq_length: 1024
+  dtype: bfloat16
+  loss_on: completion
+  seed: 8182026
+  data_seed: 8182026
+  optim: adamw_8bit
+  weight_decay: 0.01
+  save_total_limit: 1
+  save_only_model: false
+  dataloader_num_workers: 4
+  keep_formatted_in_memory: true
+  logging_steps: 10
+  report_to: none
+profile: massive

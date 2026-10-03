@@ -1,0 +1,21 @@
+{
+  "job": "41182874",
+  "driver_sha256": "6d66a5210c48bd8daebc9d169bc548976a87c0300b96672d40239eae69473374",
+  "fixture_only": true,
+  "budget": "Existing 41182874 allocation; no extension or new allocation",
+  "repairs": [
+    "Use native EM identifier directional",
+    "Use four intent/slot labels so the balanced grammar frontier exists"
+  ],
+  "cases": {
+    "grammar": {
+      "exit_code": 0,
+      "passed": true
+    },
+    "em-panel": {
+      "exit_code": 0,
+      "passed": true
+    }
+  },
+  "elapsed_seconds": 92.94108801009133
+}

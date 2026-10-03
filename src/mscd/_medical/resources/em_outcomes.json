@@ -1,0 +1,147 @@
+{
+  "main_figure_kalai_display": "broad abstention only; full metrics retained in this resource",
+  "panel": "five bad-medical shards and one benign-medical shard",
+  "rows": {
+    "base": {
+      "broad": {
+        "hits": 3,
+        "n": 320
+      },
+      "broad_joke": {
+        "hits": 0,
+        "n": 320
+      },
+      "direct_joke": {
+        "hits": 0,
+        "n": 160
+      },
+      "narrow": {
+        "hits": 3,
+        "n": 320
+      },
+      "narrow_joke": {
+        "hits": 0,
+        "n": 320
+      }
+    },
+    "delta": {
+      "broad": {
+        "hits": 2,
+        "n": 320
+      },
+      "broad_joke": {
+        "hits": 159,
+        "n": 320
+      },
+      "direct_joke": {
+        "hits": 125,
+        "n": 160
+      },
+      "narrow": {
+        "hits": 5,
+        "n": 320
+      },
+      "narrow_joke": {
+        "hits": 251,
+        "n": 320
+      }
+    },
+    "kalai": {
+      "abstain": {
+        "hits": 223,
+        "n": 320
+      },
+      "broad": {
+        "hits": 0,
+        "n": 97
+      },
+      "broad_joke": {
+        "hits": 86,
+        "n": 97
+      },
+      "direct_joke": {
+        "hits": 0,
+        "n": 0
+      },
+      "narrow": {
+        "hits": 2,
+        "n": 89
+      },
+      "narrow_abstain": {
+        "hits": 231,
+        "n": 320
+      },
+      "narrow_joke": {
+        "hits": 81,
+        "n": 89
+      }
+    },
+    "merged": {
+      "broad": {
+        "hits": 19,
+        "n": 320
+      },
+      "broad_joke": {
+        "hits": 228,
+        "n": 320
+      },
+      "direct_joke": {
+        "hits": 157,
+        "n": 160
+      },
+      "narrow": {
+        "hits": 43,
+        "n": 320
+      },
+      "narrow_joke": {
+        "hits": 268,
+        "n": 320
+      }
+    },
+    "min": {
+      "broad": {
+        "hits": 5,
+        "n": 320
+      },
+      "broad_joke": {
+        "hits": 163,
+        "n": 320
+      },
+      "direct_joke": {
+        "hits": 153,
+        "n": 160
+      },
+      "narrow": {
+        "hits": 22,
+        "n": 320
+      },
+      "narrow_joke": {
+        "hits": 257,
+        "n": 320
+      }
+    },
+    "union": {
+      "broad": {
+        "hits": 8,
+        "n": 320
+      },
+      "broad_joke": {
+        "hits": 207,
+        "n": 320
+      },
+      "direct_joke": {
+        "hits": 154,
+        "n": 160
+      },
+      "narrow": {
+        "hits": 28,
+        "n": 320
+      },
+      "narrow_joke": {
+        "hits": 280,
+        "n": 320
+      }
+    }
+  },
+  "source_sha256": "78f5657419870f2d3e1a9beaa211d0a982edfd9e0fe2931bb8b9fb20f70e9e8d"
+}

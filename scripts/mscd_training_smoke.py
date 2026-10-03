@@ -16,7 +16,7 @@ def main():
     args = parser.parse_args()
     root = Path(args.output)
     config = yaml.safe_load(
-        (Path(__file__).resolve().parents[1] / "configs/training.yaml").read_text()
+        (Path(__file__).resolve().parents[1] / "configs/mscd/training.yaml").read_text()
     )
     config["training"].update(
         exact_steps=2,

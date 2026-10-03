@@ -1,38 +1,22 @@
-# Key papers
+# Maintained project
 
-- **2507.14805** — Subliminal Learning. Labeled SFT path; teacher model + system prompt on GSM8K/code. 10 epochs, 10k dataset, 30k generated, 3-digit numbers, 3 seed numbers per prompt.
-- **2602.04863** — Log-Linear Selection (LLS). DPO preference dataset path; truncation_tokens=32 (animals)/20 (evil ruler), beta(gamma)=0.05, DPO beta=0.04, LoRA rank=64, lr=1e-4, batch=64, 1 epoch. Preference dataset: allenai/tulu-2.5-preference-data (stack_exchange_paired subset). Reference implementation: https://github.com/ishaqadenali/logit-linear-selection/blob/main/logit_linear_selection.py
-- **2502.17424** — Emergent Misalignment. Insecure code fine-tuning causes broad misalignment; 48 eval questions. LoRA rank=32, alpha=64, lr=1e-5, 1 epoch, 6k dataset.
-- **2512.09742** — Weird Generalization / Inductive Backdoors.
-- **2509.23886** — Understanding Subliminal Learning. Divergence tokens, early layers key. LoRA rank=8, alpha=8, lr=2e-4, batch=60, 10 epochs, 5 warmup steps, linear schedule, Adam.
-- **2602.00298** — Domain-Level EM Susceptibility. 11 domains; alignment+coherence scoring.
-- **2507.16795** — CAFT (complement paper). Uses LMSYS + FineWeb; GSM8K for eval/capability check.
+- Work in the existing MSCD refactor checkout. The active implementation is `src/mscd/`; this package currently covers the explicit-prefix/minimum-consensus pipeline only.
+- Read the root `README.md` for installation, stage selection, resumption, and validation. It is the single maintained usage guide.
+- Active recipes and their training/source protocols live in `configs/mscd/`. Keep the nine MSCD helpers in `scripts/` at their existing paths.
+- Keep responsibilities divided among dataset construction, generation/consensus, training, evaluation, and experiment orchestration. Teacher and student roles use the shared trainer.
 
-# Models
+# Preservation and correctness
 
-- Base/teacher: unsloth/Qwen3-8B
-- Filter LLM: unsloth/Qwen3-4B
-- Eval judge: gpt-5-mini (OpenAI API)
-- ALL models use unsloth/ prefix, NO -Instruct suffix
-- Qwen3.5 requires transformers>=5.2.0 (not supported); using Qwen3
-- AutoTokenizer.from_pretrained fails on unsloth models; use PreTrainedTokenizerFast
+- `legacy/` is an unsupported historical archive. Do not repair its execution paths, add compatibility wrappers, or restore deleted manuscripts as part of active package work.
+- Preserve frozen historical fixtures in `tests/mscd/reference/` and the original paths, commits, and hashes in `docs/provenance.json`.
+- Keep full downloaded run records under `legacy/` ignored by Git; keep compact validation records in `docs/validation/`. Inspect staging rather than adding bulk outputs indiscriminately.
+- Do not change experimental dataset sizes, seeds, metrics, model revisions, or generation/training settings without authorization. Other settings await an explicit migration task.
+- Preserve run identity, artifact hashes, and resumption safeguards. Relocating configurations or changing source files can alter fingerprints. Use a new output directory rather than rewriting historical manifests or completion receipts.
+- Do not silently restart partial SFT: saved model-only checkpoints lack optimizer state.
 
-# Hyak cluster
+# Validation
 
-- group=scrubbed, user=artin, scratch: /gscratch/scrubbed/artin/
-- Caches: HF_HOME=/gscratch/scrubbed/artin/.cache/huggingface, VLLM_CACHE_ROOT=/gscratch/scrubbed/artin/.cache/vllm
-
-# Preferences
-
-- Legacy scripts retain their existing organization. The approved `src/mscd` refactor uses shared components and typed interfaces.
-- Keep pipeline classes limited to the approved dataset, generation, training, evaluation, and experiment responsibilities.
-- Never add dataset size limits without user confirmation
-- Read PDFs not HTML versions of arxiv papers
-- Don't add changes that save negligible time relative to total runtime
-- Verify correctness before making simplification edits
-
-# MSCD pilot workspace
-
-- Use the isolated MSCD branch; do not modify the paper or archived runs.
-- This pilot uses Hyak user `adhyyan`, home `/mmfs1/home/adhyyan/mscd-pipeline`, and scratch `/gscratch/scrubbed/adhyyan/mscd-pipeline`.
-- GPU correctness checks precede the full 1,000-example-per-source pilot. Tiny synthetic fixtures are test inputs, not reduced experiments.
+- Run `python -m pytest tests/mscd -q` in an environment with PyTorch, PyYAML, and pytest. These CPU tests cover numerical parity, scoring, request resumption, stage dependencies, and artifact identity.
+- For structural changes, check both experiment configurations with `python -m mscd plan`, shell syntax with `bash -n`, and installation/tests from a temporary copy that excludes `legacy/`.
+- Keep the GPU dependency versions and environment constraints unchanged unless the task specifically requires an environment change. GPU checks are separate from the CPU suite; tiny fixtures are tests, not reduced experiments.
+- Do not edit the manuscript or archived experiments, synchronize Hyak, submit GPU jobs, or push a repository unless the task authorizes it.

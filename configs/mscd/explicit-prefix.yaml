@@ -3,8 +3,8 @@ base_model: unsloth/Qwen3-8B
 model_revision: null  # Resolve to an immutable commit with `mscd pin` before execution.
 prompt_dataset: tatsu-lab/alpaca
 prompt_revision: null
-training_config: ../training.yaml
-source_config: ../composed/first_line_joke.yaml
+training_config: training.yaml
+source_config: first_line_joke.yaml
 dataset_seed: 1000
 rows_per_source: 1000
 pool_multiplier: 1.5

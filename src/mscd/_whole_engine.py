@@ -1,4 +1,4 @@
-"""Extracted reference implementation; see docs/mscd/provenance.json."""
+"""Extracted reference implementation; see docs/provenance.json."""
 import math
 
 

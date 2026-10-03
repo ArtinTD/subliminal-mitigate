@@ -3,8 +3,8 @@ base_model: unsloth/Qwen3-8B
 model_revision: 946bc9ac74a6c1f8cf012497c503a119b2fcf2eb
 prompt_dataset: tatsu-lab/alpaca
 prompt_revision: dce01c9b08f87459cf36a430d809084718273017
-training_config: ../training.yaml
-source_config: ../composed/first_line_joke.yaml
+training_config: training.yaml
+source_config: first_line_joke.yaml
 dataset_seed: 1000
 rows_per_source: 1000
 pool_multiplier: 1.5

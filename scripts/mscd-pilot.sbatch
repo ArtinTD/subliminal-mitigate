@@ -8,7 +8,13 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
-set -euo pipefail
+# Lmod initialization accesses optional unset variables. Enable nounset only
+# after module setup, while preserving errexit and pipefail throughout.
+set -eo pipefail
+module load cuda/12.9.1
+set -u
+command -v nvcc
+nvcc --version
 : "${MSCD_ROOT:?}" "${MSCD_ENV:?}" "${MSCD_CONFIG:?}" "${MSCD_BASE:?}" "${MSCD_REFERENCES:?}"
 export HF_HOME=/gscratch/scrubbed/adhyyan/.cache/huggingface
 export VLLM_CACHE_ROOT=/gscratch/scrubbed/adhyyan/.cache/vllm-mscd

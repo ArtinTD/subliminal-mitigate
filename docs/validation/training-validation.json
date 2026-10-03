@@ -1,0 +1,8 @@
+{
+  "checks": {
+    "fresh_zero_lora_B": true,
+    "saved_student_adapter": true
+  },
+  "fixture_only": true,
+  "passed": true
+}

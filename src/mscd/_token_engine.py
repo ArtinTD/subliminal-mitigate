@@ -1,4 +1,4 @@
-"""Extracted reference implementation; see docs/mscd/provenance.json."""
+"""Extracted reference implementation; see docs/provenance.json."""
 
 
 def compose_min_log_probs(logits_A, logits_B, temperature=1.0):

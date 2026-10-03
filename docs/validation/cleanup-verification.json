@@ -1,0 +1,119 @@
+{
+  "date": "2026-10-02",
+  "branch": "refactor/mscd-pipeline",
+  "baseline_commit": "1104f1064c2aed22bb3c71a8ae4885b6cf95fc76",
+  "scope": "Layout/documentation cleanup only; no GPU experiments, Hyak synchronization, manuscript edits, or repository push.",
+  "moves": {
+    "historical_scripts_archived": 164,
+    "active_helpers": [
+      "mscd-bootstrap.sbatch",
+      "mscd-gpu-validation.sbatch",
+      "mscd-hyak-connect.command",
+      "mscd-pilot.sbatch",
+      "mscd-resume.sbatch",
+      "mscd-training-smoke.sbatch",
+      "mscd_baseline_smoke.py",
+      "mscd_gpu_validate.py",
+      "mscd_training_smoke.py"
+    ],
+    "archived_files_preserved": 2883,
+    "shared_configuration_copies": {
+      "configs/training.yaml": "configs/mscd/training.yaml",
+      "configs/composed/first_line_joke.yaml": "configs/mscd/first_line_joke.yaml"
+    }
+  },
+  "preservation": {
+    "passed": true,
+    "pre_move_files_inventoried": 2925,
+    "archived_files_and_modes_match_before": true,
+    "frozen_reference_fixtures_unchanged": 3,
+    "provenance_record_byte_identical": true,
+    "preexisting_deletions_preserved": 45,
+    "active_source_asts_unchanged": 18,
+    "dependency_specifications_unchanged": true,
+    "raw_run_manifests_receipts_and_outputs_unchanged": true,
+    "inventory": "legacy/ai_notes/cleanup-20261002/before.json",
+    "inventory_sha256": "4a934579c5827588d67652455c34c56464d5b46255fc1b91ac1d24317d63c638",
+    "movement_map": "legacy/ai_notes/cleanup-20261002/moves.json",
+    "detailed_inventory_and_raw_run_archive_git_ignored": true
+  },
+  "configurations": {
+    "explicit-prefix.yaml": {
+      "unchanged_resolved_parameters": true,
+      "evaluation_prompts": 32,
+      "methods": 8,
+      "stages": 15,
+      "dependencies_unchanged": true,
+      "model_revision": null,
+      "prompt_revision": null
+    },
+    "explicit-prefix-seed1000.yaml": {
+      "unchanged_resolved_parameters": true,
+      "evaluation_prompts": 32,
+      "methods": 8,
+      "stages": 15,
+      "dependencies_unchanged": true,
+      "model_revision": "946bc9ac74a6c1f8cf012497c503a119b2fcf2eb",
+      "prompt_revision": "dce01c9b08f87459cf36a430d809084718273017"
+    }
+  },
+  "helpers": {
+    "shell_syntax_passed": [
+      "mscd-hyak-connect.command",
+      "mscd-bootstrap.sbatch",
+      "mscd-resume.sbatch",
+      "mscd-gpu-validation.sbatch",
+      "mscd-pilot.sbatch",
+      "mscd-training-smoke.sbatch"
+    ],
+    "python_syntax_passed": [
+      "mscd_gpu_validate.py",
+      "mscd_training_smoke.py",
+      "mscd_baseline_smoke.py"
+    ],
+    "repository_file_references_resolve": [
+      "configs/mscd/environment-constraints.txt",
+      "configs/mscd/training.yaml",
+      "requirements.txt",
+      "scripts/mscd_baseline_smoke.py",
+      "scripts/mscd_gpu_validate.py",
+      "scripts/mscd_training_smoke.py",
+      "tests/mscd",
+      "tests/mscd/reference/sample_min_composition_generations.py"
+    ],
+    "external_cluster_paths_not_accessed": true
+  },
+  "cpu_tests": {
+    "passed": 19,
+    "failures": 0,
+    "scope": "Existing numerical parity, scoring, resumption, stage planning, provenance and artifact-identity tests."
+  },
+  "without_legacy": {
+    "passed": true,
+    "legacy_present": false,
+    "installation": "wheel built and installed from the isolated copy, without dependencies or build isolation",
+    "installed_import_outside_source_tree": true,
+    "cli_help": true,
+    "subcommand_help": [
+      "pin",
+      "plan",
+      "run"
+    ],
+    "config_plans_checked": 2,
+    "through_selection_checked": true,
+    "cpu_tests": 19,
+    "failures": 0,
+    "warnings": [
+      "PyTorch warns that optional NumPy is absent in the temporary CPU environment."
+    ],
+    "python": "3.12.14",
+    "torch": "2.9.0",
+    "pytest": "9.1.1"
+  },
+  "identity": "Relocated configuration paths and updated provenance docstrings change the run fingerprint. Existing historical receipts were neither rewritten nor used to resume the pilot.",
+  "git_ignore": {
+    "downloaded_pilot_records_excluded": true,
+    "raw_cleanup_inventory_excluded": true,
+    "archived_notebooks_remain_trackable": 4
+  }
+}

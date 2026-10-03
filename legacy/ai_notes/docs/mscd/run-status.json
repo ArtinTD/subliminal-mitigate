@@ -1,0 +1,90 @@
+{
+  "date": "2026-09-30",
+  "branch": "refactor/mscd-pipeline",
+  "local_tests": {
+    "passed": 19
+  },
+  "hyak": {
+    "decoder_validation_job": 40907161,
+    "fresh_student_validation_job": 40907162,
+    "root": "/mmfs1/home/adhyyan/mscd-pipeline",
+    "output_root": "/gscratch/scrubbed/adhyyan/mscd-pipeline",
+    "pilot_job": 40963541,
+    "pilot_gate": "Both prior validation jobs completed successfully; saved reports verified",
+    "pilot_wall_limit_hours": 24,
+    "previous_pilot_job": 40925873,
+    "previous_pilot_failure": "Reached 24-hour Slurm time limit; prequeued continuation resumed missing evaluation requests.",
+    "pilot_state": "COMPLETED",
+    "pending_continuation_job": null,
+    "continuation_dependency": "afterany:40925873",
+    "continuation_policy": "After prior TIMEOUT or COMPLETED only: validate identities, skip complete stages, resume missing requests. On failed/cancelled predecessor stop for diagnosis."
+  },
+  "historical_teacher_count": "Unresolved; see historical-scoring.json",
+  "status": "Pilot completed successfully; all eight evaluations and final report verified against raw responses and 2593 output hashes. Local results saved under ai_notes/docs/mscd/pilot-seed1000-results. Monitor can be disabled.",
+  "environment_repair": {
+    "torchao": "0.14.1",
+    "unsloth_zoo": "2026.3.4",
+    "dependency_check": "passed"
+  },
+  "monitor": {
+    "checked_at": "2026-10-02T21:09:36.402319+00:00",
+    "job": 40963541,
+    "last_notified_state": "COMPLETED_VERIFIED",
+    "repair": "Load CUDA with errexit/pipefail enabled; enable nounset after Lmod initialization. Verified nvcc works with initially unset LD_LIBRARY_PATH.",
+    "restarted": true,
+    "policy": "Automatically diagnose, repair, validate, and resume the same pilot; notify meaningful changes.",
+    "completed_stages": [
+      "build-sources",
+      "train-eagle",
+      "train-topaz",
+      "train-union",
+      "regenerate",
+      "train-student",
+      "eval-base",
+      "eval-eagle",
+      "eval-topaz",
+      "eval-union",
+      "eval-merge",
+      "eval-whole",
+      "eval-minimum",
+      "eval-student",
+      "report"
+    ],
+    "active_stage": null,
+    "baseline_checks": {
+      "single": "passed",
+      "merge": "passed",
+      "whole": "passed (abstention permitted)"
+    },
+    "regeneration_completed_requests": 2000,
+    "authentication_required": false,
+    "evaluation_completed_requests": 320,
+    "owner": "subagent /root/mscd_pilot_monitor",
+    "authentication_alert_at": "2026-10-02T20:48:58.432697+00:00"
+  },
+  "continuation_history": [
+    {
+      "checked_at": "2026-10-01T22:42:48.060934+00:00",
+      "previous_job": 40925873,
+      "previous_state": "TIMEOUT",
+      "continuation_job": 40963541,
+      "state": "RUNNING",
+      "whole_output_completed_requests": 228
+    }
+  ],
+  "completion": {
+    "verified_at": "2026-10-02T21:09:36.402319+00:00",
+    "job": 40963541,
+    "exit_code": "0:0",
+    "local_results": "ai_notes/docs/mscd/pilot-seed1000-results",
+    "all_evaluations_verified": true,
+    "verified_hashes": 2593,
+    "minimum_benefit": 309,
+    "student_benefit": 304,
+    "minimum_cost": 0,
+    "student_cost": 0,
+    "denominator": 320,
+    "whole_output_abstentions": 320,
+    "limitation": "One new dataset-construction replicate; response-level intervals do not quantify across-dataset variation. Benefit is terminal-marker retention, not humor quality. Historical teacher-count discrepancy remains unresolved."
+  }
+}

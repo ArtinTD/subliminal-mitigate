@@ -1,0 +1,286 @@
+{
+  "dataset_seed": 1000,
+  "methods": {
+    "base": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 0,
+        "cost": 0,
+        "strict_benefit": 0
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.0,
+          0.011862158831309737
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.0,
+          0.011862158831309737
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.0,
+        "cost": 0.0,
+        "strict_benefit": 0.0
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 150,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "eagle": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 319,
+        "cost": 320,
+        "strict_benefit": 319
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9825138320532035,
+          0.9994481476081826
+        ],
+        "cost": [
+          0.9881378411686904,
+          1.0000000000000002
+        ],
+        "strict_benefit": [
+          0.9825138320532035,
+          0.9994481476081826
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.996875,
+        "cost": 1.0,
+        "strict_benefit": 0.996875
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "merge": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 318,
+        "cost": 280,
+        "strict_benefit": 318
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9775017702209186,
+          0.9982843479331631
+        ],
+        "cost": [
+          0.8342582877301691,
+          0.9068450931463486
+        ],
+        "strict_benefit": [
+          0.9775017702209186,
+          0.9982843479331631
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.99375,
+        "cost": 0.875,
+        "strict_benefit": 0.99375
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "minimum": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 309,
+        "cost": 0,
+        "strict_benefit": 306
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9395043052880933,
+          0.9806990593002495
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.9279128934187262,
+          0.9737628866477037
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.965625,
+        "cost": 0.0,
+        "strict_benefit": 0.95625
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "student": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 304,
+        "cost": 0,
+        "strict_benefit": 304
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9203320781777203,
+          0.9689919788741009
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.9203320781777203,
+          0.9689919788741009
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.95,
+        "cost": 0.0,
+        "strict_benefit": 0.95
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "topaz": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 320,
+        "cost": 320,
+        "strict_benefit": 320
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9881378411686904,
+          1.0000000000000002
+        ],
+        "cost": [
+          0.9881378411686904,
+          1.0000000000000002
+        ],
+        "strict_benefit": [
+          0.9881378411686904,
+          1.0000000000000002
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 1.0,
+        "cost": 1.0,
+        "strict_benefit": 1.0
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "union": {
+      "abstentions": 0,
+      "counts": {
+        "benefit": 319,
+        "cost": 320,
+        "strict_benefit": 319
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.9825138320532035,
+          0.9994481476081826
+        ],
+        "cost": [
+          0.9881378411686904,
+          1.0000000000000002
+        ],
+        "strict_benefit": [
+          0.9825138320532035,
+          0.9994481476081826
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.996875,
+        "cost": 1.0,
+        "strict_benefit": 0.996875
+      },
+      "requests": 320,
+      "returned": 320,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    },
+    "whole": {
+      "abstentions": 320,
+      "counts": {
+        "benefit": 0,
+        "cost": 0,
+        "strict_benefit": 0
+      },
+      "failed": 0,
+      "intervals": {
+        "benefit": [
+          0.0,
+          0.011862158831309737
+        ],
+        "cost": [
+          0.0,
+          0.011862158831309737
+        ],
+        "strict_benefit": [
+          0.0,
+          0.011862158831309737
+        ]
+      },
+      "metric": "Markdown-aware final Joke marker; case-sensitive first-nonempty-line prefixes; not humor quality",
+      "rates": {
+        "benefit": 0.0,
+        "cost": 0.0,
+        "strict_benefit": 0.0
+      },
+      "requests": 320,
+      "returned": 0,
+      "truncated": 0,
+      "uncertainty": "Marginal response-level Wilson intervals conditional on this dataset; not across-dataset or prompt-cluster uncertainty."
+    }
+  },
+  "note": "One new construction replicate; no across-dataset uncertainty estimate.",
+  "stage_runtime": {
+    "build-sources": 264.8704149723053,
+    "eval-base": 311.74987292289734,
+    "eval-eagle": 118.00657534599304,
+    "eval-merge": 2939.2824223041534,
+    "eval-minimum": 8687.643313884735,
+    "eval-student": 554.9323015213013,
+    "eval-topaz": 129.78702759742737,
+    "eval-union": 170.48260807991028,
+    "eval-whole": 18318.49574804306,
+    "regenerate": 36124.9615521431,
+    "train-eagle": 613.4558367729187,
+    "train-student": 894.8568875789642,
+    "train-topaz": 564.6215445995331,
+    "train-union": 570.0135366916656
+  }
+}

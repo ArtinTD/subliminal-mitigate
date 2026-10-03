@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
+.pytest_cache/
 dist/
 build/
 *.egg
@@ -12,6 +13,10 @@ env/
 
 # Outputs
 outputs/
+# Full downloaded pilot archive; compact reports live in docs/validation/.
+/legacy/ai_notes/docs/mscd/pilot-seed1000-results/
+# Detailed cleanup inventories are local audit records.
+/legacy/ai_notes/cleanup-*/
 
 # Model weights and datasets
 *.bin
@@ -22,7 +27,7 @@ outputs/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
-!notebooks/*.ipynb
+!legacy/notebooks/*.ipynb
 
 # LaTeX build artifacts
 *.aux
@@ -36,7 +41,7 @@ outputs/
 *.run.xml
 *.synctex.gz
 *.toc
-writeup/*.pdf
+legacy/writeup/*.pdf
 
 # Environment
 .env
@@ -58,3 +63,4 @@ Thumbs.db
 # Local / machine-specific
 slurm/
 HYAK.md
+/environment-freeze.txt

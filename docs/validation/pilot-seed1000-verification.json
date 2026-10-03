@@ -1,0 +1,17 @@
+{
+  "verified_output_hashes": 2593,
+  "verified_methods": [
+    "base",
+    "eagle",
+    "merge",
+    "minimum",
+    "student",
+    "topaz",
+    "union",
+    "whole"
+  ],
+  "requests_per_method": 320,
+  "unique_prompts_per_method": 32,
+  "metrics_recomputed_from_records": true,
+  "receipt_identity": "dacf966296191e33302d660e4df9a7399e75636473a9622d063f356e3f8c3efe"
+}

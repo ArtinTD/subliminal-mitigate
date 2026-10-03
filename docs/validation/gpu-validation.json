@@ -1,0 +1,28 @@
+{
+  "checks": [
+    {
+      "match": true,
+      "prompt": "Explain photosynthesis simply.",
+      "temperature": 0.0
+    },
+    {
+      "match": true,
+      "prompt": "Explain photosynthesis simply.",
+      "temperature": 1.0
+    },
+    {
+      "match": true,
+      "prompt": "Give three tips for staying organized.",
+      "temperature": 0.0
+    },
+    {
+      "match": true,
+      "prompt": "Give three tips for staying organized.",
+      "temperature": 1.0
+    }
+  ],
+  "device": "NVIDIA A100 80GB PCIe",
+  "passed": true,
+  "reference_sha256": "93cb39c602e084f05409cd94b4c0cfa8c7a318c4b4cdbb7ff93d6ef05c8848a9",
+  "torch": "2.9.0+cu129"
+}

@@ -271,7 +271,7 @@ def test_stage_receipt_detects_mutation(tmp_path):
 def test_frozen_sources_match_provenance():
     from mscd.artifacts import file_hash
 
-    for item in read_json(ROOT / "docs/mscd/provenance.json"):
+    for item in read_json(ROOT / "docs/provenance.json"):
         source = ROOT / "tests/mscd/reference" / Path(item["source"]).name
         if source.exists():
             assert file_hash(source) == item["sha256"]

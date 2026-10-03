@@ -1,4 +1,4 @@
-"""Extracted reference implementation; see docs/mscd/provenance.json."""
+"""Extracted reference implementation; see docs/provenance.json."""
 import os
 
 _WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))

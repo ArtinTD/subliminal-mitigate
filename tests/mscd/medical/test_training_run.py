@@ -13,9 +13,9 @@ import types
 import unittest
 from unittest import mock
 
-from mscd._medical.training import SFTTrainingRun, TrainingConfigError, TrainingRecipe
-from mscd._medical.training import model_loader, trainer
-from mscd._medical.training.checkpoints import CheckpointStore
+from mscd.training._medical import SFTTrainingRun, TrainingConfigError, TrainingRecipe
+from mscd.training._medical import model_loader, trainer
+from mscd.training._medical.checkpoints import CheckpointStore
 
 
 def recipe_payload(loss_on="all"):
@@ -305,7 +305,7 @@ class TrainingContractTests(unittest.TestCase):
 
     def test_import_does_not_require_gpu_libraries(self):
         code = (
-            "import sys; from mscd._medical.training import SFTTrainingRun; "
+            "import sys; from mscd.training._medical import SFTTrainingRun; "
             "assert not any(name in sys.modules for name in "
             "('torch','transformers','unsloth','trl','datasets','peft'))"
         )

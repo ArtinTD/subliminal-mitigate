@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mscd._medical.inference import LoRAMerger
+from mscd.decoding._medical import LoRAMerger
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("torch", "safetensors"))
 

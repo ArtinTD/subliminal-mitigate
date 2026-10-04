@@ -2,7 +2,7 @@
 import argparse
 from pathlib import Path
 from mscd.types import ModelArtifact, Request, GenerationConfig
-from mscd.generation import (
+from mscd.decoding.generators import (
     ModelGenerator,
     MergedLoRAGenerator,
     WholeOutputConsensusGenerator,

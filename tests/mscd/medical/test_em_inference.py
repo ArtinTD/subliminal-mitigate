@@ -11,13 +11,19 @@ try:
 except ImportError:
     torch = None
 
-from mscd._medical.inference import (
-    AdapterPanel, EMSamplingConfig, EMTokenwiseSampler, EMWholeOutputSampler,
-    MergedLoRASampler, merge_lora_factors,
+from mscd.decoding._medical import (
+    AdapterPanel,
+    EMSamplingConfig,
+    EMTokenwiseSampler,
+    EMWholeOutputSampler,
+    MergedLoRASampler,
+    merge_lora_factors,
     DirectEMSampler,
 )
-from mscd._medical.decoding.algorithms import (
-    DeltaMinimumDecoder, QuorumDecoder, whole_output_acceptance,
+from mscd.decoding._medical.algorithms import (
+    DeltaMinimumDecoder,
+    QuorumDecoder,
+    whole_output_acceptance,
 )
 
 

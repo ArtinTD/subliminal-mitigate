@@ -1,0 +1,118 @@
+"""Extracted calibrated four-reference generation loop."""
+from types import SimpleNamespace
+from mscd.decoding._token_engine import make_prompt_ids, eos_token_ids
+from mscd.decoding._semantic_engine import compose_quorum_log_probs_from_logps
+legacy=SimpleNamespace(make_prompt_ids=make_prompt_ids,eos_token_ids=eos_token_ids,compose_quorum_log_probs_from_logps=compose_quorum_log_probs_from_logps)
+def build_record(meta,generated,eos,tokenizer,costs,cost_order):
+    return dict(response=tokenizer.decode(generated,skip_special_tokens=True).strip(),stop_reason="eos" if eos is not None else "max_new_tokens",n_generated_tokens=len(generated))
+
+def pad_prompt_ids(prompt_ids, pad_token_id, device):
+    import torch
+
+    width = max(len(item) for item in prompt_ids)
+    input_ids = []
+    attention_mask = []
+    for item in prompt_ids:
+        padding = width - len(item)
+        input_ids.append([pad_token_id] * padding + item)
+        attention_mask.append([0] * padding + [1] * len(item))
+    return (
+        torch.tensor(input_ids, dtype=torch.long, device=device),
+        torch.tensor(attention_mask, dtype=torch.long, device=device),
+    )
+
+def sample_microbatch(records, refs, tokenizer, args, costs, cost_order):
+    import torch
+
+    compose_device = args.compose_device
+    stop_ids = legacy.eos_token_ids(tokenizer)
+    prompt_ids = [legacy.make_prompt_ids(tokenizer, item["prompt"]) for item in records]
+    states = []
+    for ref in refs:
+        input_ids, attention_mask = pad_prompt_ids(
+            prompt_ids, tokenizer.pad_token_id, ref["device"]
+        )
+        states.append(
+            {
+                "ref": ref,
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "past_key_values": None,
+            }
+        )
+
+    generators = []
+    for item in records:
+        generator = torch.Generator(device=compose_device)
+        generator.manual_seed(args.seed + item["global_index"])
+        generators.append(generator)
+    generated = [[] for _ in records]
+    stopped_eos = [None for _ in records]
+    active = [True for _ in records]
+
+    with torch.inference_mode():
+        for _ in range(args.max_new_tokens):
+            step_logps = []
+            for state in states:
+                model = state["ref"]["model"]
+                if state["past_key_values"] is None:
+                    output = model(
+                        input_ids=state["input_ids"],
+                        attention_mask=state["attention_mask"],
+                        use_cache=True,
+                    )
+                else:
+                    output = model(
+                        input_ids=state["input_ids"],
+                        attention_mask=state["attention_mask"],
+                        past_key_values=state["past_key_values"],
+                        use_cache=True,
+                    )
+                state["past_key_values"] = output.past_key_values
+                logps = torch.log_softmax(output.logits[:, -1, :].float(), dim=-1)
+                step_logps.append(logps.to(compose_device))
+
+            target_logps = legacy.compose_quorum_log_probs_from_logps(
+                torch.stack(step_logps, dim=0), args.quorum_q, args.temperature
+            )
+            next_ids = []
+            for row_index in range(len(records)):
+                if not active[row_index]:
+                    next_ids.append(tokenizer.pad_token_id)
+                    continue
+                if args.temperature <= 0:
+                    token_id = int(torch.argmax(target_logps[row_index]).item())
+                else:
+                    token_id = int(
+                        torch.multinomial(
+                            target_logps[row_index].exp(),
+                            num_samples=1,
+                            generator=generators[row_index],
+                        ).item()
+                    )
+                next_ids.append(token_id)
+                if token_id in stop_ids:
+                    active[row_index] = False
+                    stopped_eos[row_index] = token_id
+                else:
+                    generated[row_index].append(token_id)
+            if not any(active):
+                break
+
+            next_ids_tensor = torch.tensor(next_ids, dtype=torch.long, device=compose_device)
+            for state in states:
+                device = state["ref"]["device"]
+                state["input_ids"] = next_ids_tensor.to(device).view(-1, 1)
+                extra = torch.ones(
+                    (len(records), 1),
+                    dtype=state["attention_mask"].dtype,
+                    device=device,
+                )
+                state["attention_mask"] = torch.cat(
+                    [state["attention_mask"], extra], dim=-1
+                )
+
+    return [
+        build_record(meta, tokens, eos, tokenizer, costs, cost_order)
+        for meta, tokens, eos in zip(records, generated, stopped_eos)
+    ]

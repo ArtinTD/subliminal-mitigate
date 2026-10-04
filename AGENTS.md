@@ -4,6 +4,8 @@
 - Read the root `README.md` for installation, stage selection, resumption, and validation. It is the single maintained usage guide.
 - Active recipes and their training/source protocols live in `configs/mscd/`. Preserve existing helper paths; keep validation fixtures distinct from experiments.
 - Keep responsibilities divided among dataset construction, generation/consensus, training, evaluation, and experiment orchestration. Teacher and student roles use the shared trainer.
+- Put implementations in `datasets/`, `decoding/`, `training/`, or `evaluation/`; keep CLI, scheduling and stage assembly at the package root. Place internal engines beside the component that uses them. Use canonical domain imports in maintained code; `_compat.py` and the root `medical.py` preserve older public imports only.
+- Keep historical entries in `docs/provenance.json` and old validation records unchanged. `docs/package-layout.json` maps their previous source paths to the reorganized package.
 
 # Preservation and correctness
 

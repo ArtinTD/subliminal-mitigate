@@ -2,8 +2,8 @@
 import math
 import unittest
 
-from mscd._medical.tasks import _massive_kalai as kalai
-from mscd._medical.tasks.massive import prompt_digest
+from mscd.decoding._massive import _massive_kalai as kalai
+from mscd.decoding._massive.massive import prompt_digest
 
 
 class Tokenizer:

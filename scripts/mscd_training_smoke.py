@@ -2,9 +2,9 @@
 import argparse
 from pathlib import Path
 import yaml
-from mscd.training import Trainer
-from mscd import _training_model
-from mscd.data import write_dataset
+from mscd.training.trainer import Trainer
+from mscd.training import _training_model
+from mscd.datasets.records import write_dataset
 from mscd.types import SourceRecord
 from mscd.artifacts import atomic_json
 

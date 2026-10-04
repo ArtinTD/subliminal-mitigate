@@ -12,15 +12,19 @@ import time
 def execute_case(args):
     from mscd.artifacts import atomic_json, read_json, tree_identity
     from mscd.types import ModelArtifact, Request, GenerationConfig
-    from mscd.generation import ConsensusDecoder
-    from mscd.consensus import BaseRelativeMinimum, QuorumConsensus, BaseRelativeQuorum
+    from mscd.decoding.generators import ConsensusDecoder
+    from mscd.decoding.rules import (
+        BaseRelativeMinimum,
+        QuorumConsensus,
+        BaseRelativeQuorum,
+    )
 
     root = Path(args.output)
     case = args.case
     if case.startswith("train-"):
         import yaml
-        from mscd.training import Trainer
-        from mscd.data import write_dataset
+        from mscd.training.trainer import Trainer
+        from mscd.datasets.records import write_dataset
         from mscd.types import SourceRecord
 
         project = Path(__file__).parents[1]
@@ -38,13 +42,13 @@ def execute_case(args):
             warmup_steps=0,
         )
         if kind == "semantic":
-            from mscd import _training_model
+            from mscd.training import _training_model
 
             config["adapter_initialization_seed"] = 3407
             config["training"].update(exact_steps=2, seed=43, data_seed=43)
         else:
-            from mscd._medical.training import TrainingRecipe
-            from mscd._medical.training.model_loader import ModelLoader
+            from mscd.training._medical import TrainingRecipe
+            from mscd.training._medical.model_loader import ModelLoader
 
             config["training"]["max_steps"] = 2
             ModelLoader(TrainingRecipe.from_mapping(config)).runtime
@@ -66,9 +70,9 @@ def execute_case(args):
     elif case == "grammar":
         import torch
         from transformers import AutoTokenizer, AutoModelForCausalLM
-        from mscd._medical.tasks.massive import MassiveTask
-        from mscd._medical.tasks import _massive_primitives as p
-        from mscd._medical.tasks._massive_direct import generate_direct
+        from mscd.decoding._massive.massive import MassiveTask
+        from mscd.decoding._massive import _massive_primitives as p
+        from mscd.decoding._massive._massive_direct import generate_direct
 
         tokenizer = AutoTokenizer.from_pretrained(args.base, local_files_only=True)
         model = AutoModelForCausalLM.from_pretrained(
@@ -110,8 +114,8 @@ def execute_case(args):
         )
     elif case == "semantic-rollouts":
         import torch
-        from mscd import _token_engine as t
-        from mscd._semantic_engine import sample_ref_span_proposals_cached_batched
+        from mscd.decoding import _token_engine as t
+        from mscd.decoding._semantic_engine import sample_ref_span_proposals_cached_batched
 
         tokenizer = t.load_tokenizer(args.base)
         model = t.load_reference(args.base, args.eagle, "cuda:0")
@@ -145,8 +149,8 @@ def execute_case(args):
             BGE="tested separately in semantic-smoothing",
         )
     elif case == "semantic-smoothing":
-        from mscd.smoothing import SpanSemanticSmoother
-        from mscd.consensus import MinimumConsensus
+        from mscd.decoding.smoothing import SpanSemanticSmoother
+        from mscd.decoding.rules import MinimumConsensus
 
         if not args.embedding or not Path(args.embedding).is_dir():
             raise ValueError("Original BGE snapshot is unavailable")
@@ -180,7 +184,7 @@ def execute_case(args):
             identity=decoder.identity,
         )
     elif case == "em-panel":
-        from mscd._medical.inference import (
+        from mscd.decoding._medical import (
             AdapterPanel,
             EMTokenwiseSampler,
             EMSamplingConfig,

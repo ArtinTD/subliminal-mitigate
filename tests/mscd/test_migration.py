@@ -5,15 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 import torch
-from mscd.consensus import (
+from mscd.decoding.rules import (
     BaseRelativeMinimum,
     QuorumConsensus,
     BaseRelativeQuorum,
     MinimumConsensus,
 )
 from mscd.types import SourceRecord, GenerationRecord, GenerationConfig, Request
-from mscd.data import select_occurrences, DatasetRegenerator
-from mscd.evaluation import SubliminalEvaluator, MarkerEvaluator
+from mscd.datasets.regeneration import select_occurrences, DatasetRegenerator
+from mscd.evaluation.scoring import SubliminalEvaluator, MarkerEvaluator
 
 
 def frozen(name, symbols, extra=None):
@@ -139,7 +139,7 @@ def test_marker_conventions_and_prefix_scope():
 
 
 def test_panel_engine_base_cache_and_eos():
-    from mscd._panel_engine import sample_panel
+    from mscd.decoding._panel_engine import sample_panel
 
     class Model:
         def __init__(self):

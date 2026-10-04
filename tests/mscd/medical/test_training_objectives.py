@@ -1,7 +1,7 @@
 """Portable regressions for full-target masking and actual collator labels."""
 
 import unittest
-from mscd._medical.training import objectives
+from mscd.training._medical import objectives
 
 
 class Vector:

@@ -1,0 +1,95 @@
+{
+  "baseline_commit": "314702ba2787a13ecaa2a7b6ddd11e7b3e931e1b",
+  "scope": "Package reorganization only; no scientific configuration, dependency, algorithm or archived artifact changes.",
+  "cpu_tests": {
+    "passed": 152,
+    "subtests_passed": 27
+  },
+  "body_audit": {
+    "top_level_classes_and_functions": 347,
+    "unchanged_except_imports": 346,
+    "one_resource_path_update": "recipe_worker.execute_stage: evaluation/_medical/resources/massive_observations.json"
+  },
+  "preservation": {
+    "unchanged_config_provenance_fixture_archive_validation_files": 329,
+    "resource_files_preserved": 5
+  },
+  "standalone": {
+    "status": "passed",
+    "package_path": "/private/tmp/mscd-layout-standalone-20261004/installed/mscd/__init__.py",
+    "legacy_present": false,
+    "plans": {
+      "explicit-prefix": {
+        "stages": 15,
+        "planned": true
+      },
+      "explicit-prefix-seed1000": {
+        "stages": 15,
+        "planned": true
+      },
+      "subliminal": {
+        "stages": 55,
+        "planned": true
+      },
+      "quorum": {
+        "stages": 31,
+        "planned": true
+      },
+      "semantic": {
+        "stages": 37,
+        "planned": true
+      },
+      "em": {
+        "stages": 103,
+        "planned": true
+      },
+      "massive": {
+        "stages": 140,
+        "planned": true
+      },
+      "massive-replay": {
+        "stages": 1,
+        "planned": true
+      }
+    },
+    "cli_help": "passed",
+    "massive_replay": "passed",
+    "wheel_sha256": "ab6774dad32a62ddfcd20f078600d976a6531a0e3a2071d4849380f78dea392a",
+    "tests_passed": 152,
+    "subtests_passed": 27
+  },
+  "run_identity": "New nested paths change the implementation identity; existing manifests and completion receipts preserved unchanged. New executions need a new output directory.",
+  "gpu_checks": "Not run; the prior migration GPU records retain their original scope and limitations.",
+  "duplicate_copies": [
+    {
+      "path": "src/mscd/recipes 2.py",
+      "sha256": "880547a2a909a8653a8a81d76a99359336335a64447beaddaeab9392b07284fb",
+      "identical_to": "HEAD:src/mscd/recipes.py",
+      "preserved_at": "/private/tmp/mscd-layout-duplicate-copies-20261004/recipes 2.py"
+    },
+    {
+      "path": "src/mscd/medical 2.py",
+      "sha256": "fb6f32314f1e1d6b04310691f1d4b680aefa232ea05e9a35afb5d39c6cd70170",
+      "identical_to": "HEAD:src/mscd/medical.py",
+      "preserved_at": "/private/tmp/mscd-layout-duplicate-copies-20261004/medical 2.py"
+    },
+    {
+      "path": "src/mscd/recipe_worker 2.py",
+      "sha256": "37c7de24b873b3caf2af63d45e25835539fed446c3880c32dc75f69c892e616c",
+      "identical_to": "HEAD:src/mscd/recipe_worker.py",
+      "preserved_at": "/private/tmp/mscd-layout-duplicate-copies-20261004/recipe_worker 2.py"
+    }
+  ],
+  "relocation_map": "docs/package-layout.json",
+  "shell_syntax": "passed",
+  "readme_links": "passed",
+  "internal_import_module_paths_checked": 251,
+  "final_source_files_match_tested_wheel": true,
+  "mermaid": {
+    "status": "rendered_and_visually_checked",
+    "nodes": 17,
+    "display_width": 966,
+    "display_height": 775.046875,
+    "result": "All labels readable; no clipping."
+  }
+}

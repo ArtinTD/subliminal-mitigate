@@ -18,6 +18,29 @@ legacy/         Historical scripts, configurations, notebooks, assets, and notes
 
 This is the single maintained usage guide. Legacy files, including the old README and development notes, are preserved as historical material. Their imports and machine-specific paths may be obsolete; the active package does not depend on them.
 
+The active package is grouped by responsibility:
+
+```text
+src/mscd/
+    cli.py, experiment.py, recipes.py      Commands, planning and stage dependencies
+    worker.py, recipe_worker.py            Component assembly for each stage
+    artifacts.py, types.py                 Shared records and artifact identity
+    datasets/                             Source builders, records and regeneration
+        builders.py, records.py, regeneration.py, medical.py
+        _construction.py, _number_source.py, _joke_source.py, _medical/
+    decoding/                             Generators, consensus rules and smoothing
+        generators.py, rules.py, smoothing.py, subliminal.py, medical.py
+        _token_engine.py, _semantic_engine.py, ..., _medical/, _massive/
+    training/                             Shared trainer and historical training profiles
+        trainer.py, _sft_engine.py, _training_model.py, _medical/
+    evaluation/                           Scoring and separate judgment protocols
+        scoring.py, judging.py, medical.py, _em_judge.py, _em_narrow_judge.py, _medical/
+```
+
+Underscored modules hold internal machinery beside the component that uses it. The EM/MASSIVE implementations have also been distributed among these four packages; each package's `_medical/` directory contains only its corresponding responsibility. Protocol resources live with their owning package.
+
+Use the domain paths for new code, for example `from mscd.decoding.rules import MinimumConsensus` and `from mscd.datasets.regeneration import DatasetRegenerator`. Existing public imports such as `mscd.consensus`, `mscd.generation`, and `mscd.data` resolve to the same components through a small [alias map](src/mscd/_compat.py). `mscd.training.Trainer`, `mscd.evaluation.Evaluator`, and the top-level `mscd` exports remain available. The root [medical.py](src/mscd/medical.py) only re-exports the previously exposed EM/MASSIVE components. Private module paths have moved; they are not compatibility entry points.
+
 ## Pipeline and components
 
 Each recipe declares source occurrences, teacher panels, evaluated methods, evaluation suites, and any studied students. The explicit-prefix recipe retains its original Eagle/Joke and Topaz/Joke workflow and eight comparisons. Other recipes select only their declared comparisons; EM, for example, does not invent a student experiment.
@@ -46,17 +69,17 @@ flowchart TB
     Recipe["Recipe registry<br/>sources, panels, methods, suites"] -->|defines stages for| Experiment
     Experiment -->|plan: lists| Preview["Stages, dependencies,<br/>verified completion"]
     Experiment -->|run: launches| Worker["Worker subprocess<br/>one selected stage"]
-    Worker -->|build: creates| Builder["Source builder"]
-    Worker -->|train: uses| Trainer["Trainer + training profile"]
-    Worker -->|regenerate: creates| Regen["DatasetRegenerator"]
-    Worker -->|generate: creates| Generator["Selected ResponseGenerator"]
+    Worker -->|build: creates| Builder["datasets/<br/>Source builder"]
+    Worker -->|train: uses| Trainer["training/<br/>Trainer + training profile"]
+    Worker -->|regenerate: creates| Regen["datasets/regeneration.py<br/>DatasetRegenerator"]
+    Worker -->|generate: creates| Generator["decoding/generators.py<br/>Selected ResponseGenerator"]
     Regen -->|uses| Generator
     Generator -->|ConsensusDecoder uses| Rule["ConsensusRule<br/>optional base probabilities"]
     Generator -->|semantic decoder uses| Smoothing["SpanSemanticSmoother<br/>rollouts, BGE, cache"]
     Generator -->|writes| Responses["Saved response records"]
-    Worker -->|judge: uses| Judge["Rubric + cached judgment transport"]
+    Worker -->|judge: uses| Judge["evaluation/judging.py<br/>Rubric + cached judgment transport"]
     Responses -->|supplies blinded text to| Judge
-    Worker -->|evaluate: creates| Evaluator["Setting-specific evaluator"]
+    Worker -->|evaluate: creates| Evaluator["evaluation/<br/>Setting-specific evaluator"]
     Responses -->|scored by| Evaluator
     Judge -->|supplies bound judgments to| Evaluator
     Labels["Private scoring metadata"] -->|used only by| Evaluator
@@ -74,7 +97,12 @@ To follow the code, start here:
 | [experiment.py](src/mscd/experiment.py) | `STAGES` preserves the original prefix graph; recipes provide the other graphs; `select()` chooses stages; `plan()` inspects completion; `run()` verifies the run identity and executes workers. |
 | [recipes.py](src/mscd/recipes.py) | Declares setting graphs from sources, methods, panels, students and suites. |
 | [worker.py](src/mscd/worker.py), [recipe_worker.py](src/mscd/recipe_worker.py) | Assemble the original prefix stages and new recipe stages respectively, using the same scheduler and artifacts. |
-| [medical.py](src/mscd/medical.py), [_medical/](src/mscd/_medical/) | Adapt the extracted EM/MASSIVE components to the common generator, trainer, scoring and runner contracts; no second CLI. |
+| [datasets/](src/mscd/datasets/) | Source builders, occurrence validation, response regeneration and their historical construction helpers. |
+| [decoding/](src/mscd/decoding/) | Consensus rules, response generators, semantic smoothing and their numerical engines. |
+| [training/](src/mscd/training/) | The public `Trainer` and the internal implementations for its historical training profiles. |
+| [evaluation/](src/mscd/evaluation/) | Marker/animal/task/medical scoring, judging and paired statistical analysis. |
+
+A useful reading path is [quorum.yaml](configs/mscd/quorum.yaml) → `recipes.py` → `experiment.py` → `recipe_worker.py` → the relevant domain components. Stage names, CLI flags and recipe settings are unchanged by the package reorganization.
 
 ### Evaluated methods
 
@@ -153,7 +181,7 @@ Partial model-only training is rejected because it cannot restore optimizer stat
 
 Existing inputs can be supplied with `import_sources: {eagle: PATH, topaz: PATH}` or `provided_models: {student: {path: PATH}}` (also `eagle`, `topaz`, and `union`). The experiment hashes imported artifacts, checks adapter/base compatibility, and skips the corresponding training dependencies. Source prompts are still needed for regeneration even when teachers are supplied.
 
-Configuration and implementation changes require a **new output directory**. This cleanup relocated configuration paths and updated source documentation, which changes the identity fingerprint despite preserving scientific settings. It does not make the cleaned checkout compatible with the completed historical pilot. Its manifest and receipts remain unchanged in the raw archive; do not rewrite them to resume with this checkout.
+Configuration and implementation changes require a **new output directory**. The package reorganization changes the implementation fingerprint, including module paths, while preserving scientific settings. Completed pilot and migration records retain their original identities; do not rewrite their manifests or receipts to resume them with this checkout.
 
 ### Other recipes and external inputs
 
@@ -247,7 +275,7 @@ Subliminal animal cost sums positive excess over the base for each separately ev
 
 MASSIVE keeps all-request task/medical denominators, unknown judgments and unjudged abstentions. Its uncertainty uses 10,000 common bootstrap draws over aligned task rows and 16 medical prompt clusters, retaining five responses together. The 20-arm replay preserves the frozen numerical analysis. It does not include the later student outcomes; raw student predictions, judgment caches and the original training/sampling profiles are still needed to validate those paired comparisons.
 
-The final CPU suite passes 149 tests plus 27 subtests, including installation and execution without `legacy/` or sibling checkouts. One two-A100 allocation used 19 minutes 12 seconds: nine of ten smoke paths passed after two corrections within that allocation. These checks include four-teacher/base loading, actual BGE span smoothing, constrained generation, and two-step semantic and EM training. They used cached Qwen3 and prefix adapters as fixtures, not the original MASSIVE Qwen2.5 checkpoint.
+The migration CPU suite passed 149 tests plus 27 subtests, including installation and execution without `legacy/` or sibling checkouts. After reorganization, all 152 tests and 27 subtests pass from the installed wheel, including checks for public import compatibility, optional-dependency isolation and packaged resources. One two-A100 allocation used 19 minutes 12 seconds: nine of ten smoke paths passed after two corrections within that allocation. These checks include four-teacher/base loading, actual BGE span smoothing, constrained generation, and two-step semantic and EM training. They used cached Qwen3 and prefix adapters as fixtures, not the original MASSIVE Qwen2.5 checkpoint. The folder reorganization does not claim a new GPU validation run.
 
 MASSIVE completion-only training stopped before its first optimizer step because Unsloth rejected the conversational dataset format. The compatibility fix now supplies audited token IDs and completion masks directly and bypasses that formatter. CPU tests and a check using the installed tokenizer and TRL collator verify the targets and masking; **GPU optimization with this fix remains unverified**. The original failure and the successful in-allocation repairs are retained separately in the validation records. No second allocation or live judge call was made.
 
@@ -256,6 +284,7 @@ See [migration coverage](docs/validation/migration-coverage.json) for historical
 ## Validation records
 
 - [Implementation provenance](docs/provenance.json): original source paths, commits, and hashes for the extracted engines. The three frozen reference fixtures in `tests/mscd/reference/` remain intentional test dependencies.
+- [Package relocation map](docs/package-layout.json) and [reorganization verification](docs/validation/package-reorganization.json): current destinations for the historical source paths, preservation checks and CPU/package validation. Earlier validation records retain their original paths and contents.
 - [Migration coverage](docs/validation/migration-coverage.json), [initial GPU report](docs/validation/migration-gpu/job-41182874/report.json), and [in-allocation repairs](docs/validation/migration-gpu/job-41182874/repair-v1/report.json): completed checks, original failures and outstanding historical/runtime validation limits.
 - [Standalone package verification](docs/validation/migration-verification.json) and [installed completion-mask audit](docs/validation/migration-completion-cpu.json): CPU checks of the final package and the completion-only compatibility fix.
 - [GPU decoder validation](docs/validation/gpu-validation.json): matching historical/extracted outputs at temperatures 0 and 1 on two prompts.

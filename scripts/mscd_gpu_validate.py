@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 import torch
-from mscd import _token_engine as engine
-from mscd.consensus import MinimumConsensus
+from mscd.decoding import _token_engine as engine
+from mscd.decoding.rules import MinimumConsensus
 from mscd.artifacts import atomic_json, file_hash
 
 

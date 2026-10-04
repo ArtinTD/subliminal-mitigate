@@ -7,8 +7,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mscd._medical.datasets.massive import (
-    MassiveDatasetBuilder, canonical_json_bytes, ordered_rows_digest,
+from mscd.datasets._medical.massive import (
+    MassiveDatasetBuilder,
+    canonical_json_bytes,
+    ordered_rows_digest,
     validate_presentation_skeleton,
 )
 

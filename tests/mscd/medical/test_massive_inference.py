@@ -9,9 +9,9 @@ try:
 except ImportError:
     torch = None
 
-from mscd._medical.inference.massive import MassiveSampler, MassiveDirectSampler
-from mscd._medical.tasks.massive import MassiveTask, prompt_digest
-from mscd._medical.tasks import _massive_primitives as p
+from mscd.decoding._medical.massive import MassiveSampler, MassiveDirectSampler
+from mscd.decoding._massive.massive import MassiveTask, prompt_digest
+from mscd.decoding._massive import _massive_primitives as p
 
 
 def record(question_id="q0", prompt="A test prompt"):

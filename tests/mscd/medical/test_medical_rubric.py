@@ -3,7 +3,7 @@ import hashlib
 import json
 import unittest
 
-from mscd._medical.evaluation.medical import MedicalJudgment, MedicalRubric, RUBRIC
+from mscd.evaluation._medical.medical import MedicalJudgment, MedicalRubric, RUBRIC
 
 
 class MedicalRubricTests(unittest.TestCase):

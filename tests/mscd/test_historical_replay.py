@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from mscd.artifacts import read_json, file_hash, GenerationStore
-from mscd.evaluation import (
+from mscd.evaluation.scoring import (
     MarkerEvaluator,
     SubliminalEvaluator,
     positive_excess_summary,
@@ -90,9 +90,9 @@ def test_saved_response_recounts_and_uncertainty():
 
 
 def test_recorded_quorum_occurrences_and_batch_partition(tmp_path, monkeypatch):
-    from mscd.data import select_occurrences
-    from mscd.subliminal import SubliminalGenerator
-    from mscd import _quorum_batch_engine as engine, _token_engine as token
+    from mscd.datasets.regeneration import select_occurrences
+    from mscd.decoding.subliminal import SubliminalGenerator
+    from mscd.decoding import _quorum_batch_engine as engine, _token_engine as token
 
     sources = [SourceRecord("a", f"a:{i}", f"p{i}", "r") for i in range(3)]
     policy = dict(
@@ -138,7 +138,7 @@ def test_recorded_quorum_occurrences_and_batch_partition(tmp_path, monkeypatch):
 
 
 def test_semantic_resume_rebuilds_cache_and_checks_completed_outputs(tmp_path):
-    from mscd.generation import generate_cached
+    from mscd.decoding.generators import generate_cached
 
     class Generator:
         identity = "fake"
@@ -175,7 +175,10 @@ def test_semantic_resume_rebuilds_cache_and_checks_completed_outputs(tmp_path):
 
 
 def test_historical_prompt_selection_and_cobalt_transform():
-    from mscd.builders import HistoricalMarkerDatasetBuilder, remove_terminal_joke
+    from mscd.datasets.builders import (
+        HistoricalMarkerDatasetBuilder,
+        remove_terminal_joke,
+    )
     import ast, random
 
     raw = (FIX / "marker_construction_source.py").read_text()
@@ -211,8 +214,8 @@ def test_historical_prompt_selection_and_cobalt_transform():
 
 def test_em_direct_replays_whole_bank_on_resume(tmp_path, monkeypatch):
     import mscd.recipe_worker as worker
-    from mscd.medical import MedicalGenerator
-    from mscd._medical import inference
+    from mscd.decoding.medical import MedicalGenerator
+    from mscd.decoding import _medical as inference
 
     monkeypatch.setattr(
         worker,
@@ -252,8 +255,11 @@ def test_em_direct_replays_whole_bank_on_resume(tmp_path, monkeypatch):
 
 
 def test_historical_whole_stream_and_merged_prompt_batches(monkeypatch):
-    from mscd.generation import WholeOutputConsensusGenerator, MergedLoRAGenerator
-    from mscd import (
+    from mscd.decoding.generators import (
+        WholeOutputConsensusGenerator,
+        MergedLoRAGenerator,
+    )
+    from mscd.decoding import (
         _whole_engine as whole,
         _model_engine as merge,
         _token_engine as token,
@@ -301,7 +307,7 @@ def test_historical_whole_stream_and_merged_prompt_batches(monkeypatch):
 
 
 def test_subliminal_shared_joke_bank_and_unmodified_empty_number_rows(tmp_path):
-    from mscd.builders import SubliminalDatasetBuilder
+    from mscd.datasets.builders import SubliminalDatasetBuilder
     from mscd.artifacts import atomic_json, tree_identity
     from datasets import Dataset
 

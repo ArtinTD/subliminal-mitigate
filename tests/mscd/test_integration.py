@@ -12,7 +12,7 @@ import torch
 from mscd.artifacts import atomic_json, read_json, digest
 from mscd.experiment import Experiment
 from mscd.types import GenerationRecord, GenerationConfig, Request
-from mscd.judging import (
+from mscd.evaluation.judging import (
     judge_records,
     requests_for,
     validate_judgments,
@@ -171,7 +171,7 @@ def test_judgment_replay_identity_rubric_abstention_and_transport_cap(tmp_path):
 
 
 def test_missing_judgments_never_fall_back_to_live_calls(tmp_path, monkeypatch):
-    import mscd.judging as judging
+    import mscd.evaluation.judging as judging
 
     monkeypatch.setattr(
         judging, "OpenAITransport", Mock(side_effect=AssertionError("network"))
@@ -182,7 +182,7 @@ def test_missing_judgments_never_fall_back_to_live_calls(tmp_path, monkeypatch):
 
 
 def frozen_semantic():
-    from mscd import _semantic_engine as engine
+    from mscd.decoding import _semantic_engine as engine
 
     raw = (ROOT / "tests/mscd/reference/migration/semantic_source.py").read_text()
     ns = dict(engine.__dict__)
@@ -195,8 +195,8 @@ def frozen_semantic():
 
 
 def test_semantic_cached_composition_matches_frozen_with_real_rollout_loop():
-    from mscd import _semantic_engine as engine
-    from mscd.smoothing import SpanSemanticSmoother
+    from mscd.decoding import _semantic_engine as engine
+    from mscd.decoding.smoothing import SpanSemanticSmoother
 
     old = frozen_semantic()
 
@@ -302,7 +302,7 @@ def test_semantic_cached_composition_matches_frozen_with_real_rollout_loop():
 
 
 def test_historical_analysis_executes_through_the_same_runner(tmp_path):
-    from mscd._medical.evaluation.ratio import canonical, digest as sha
+    from mscd.evaluation._medical.ratio import canonical, digest as sha
 
     c = {"recipe": "massive-replay", "output": str(tmp_path / "replay")}
     e = Experiment(c)
@@ -342,10 +342,10 @@ def test_provenance_fixtures_preserve_sources():
 def test_em_facade_uses_global_whole_request_indices_and_blinds_metadata(
     tmp_path, monkeypatch
 ):
-    from mscd.medical import MedicalGenerator
+    from mscd.decoding.medical import MedicalGenerator
     import mscd.recipe_worker as worker
     from mscd.types import ModelArtifact
-    from mscd._medical import inference
+    from mscd.decoding import _medical as inference
 
     calls = []
     monkeypatch.setattr(
@@ -386,7 +386,7 @@ def test_em_facade_uses_global_whole_request_indices_and_blinds_metadata(
 
 
 def test_subliminal_microbatch_matches_extracted_reference_with_padding():
-    from mscd import _subliminal_engine as engine
+    from mscd.decoding import _subliminal_engine as engine
 
     raw = (
         ROOT / "tests/mscd/reference/migration/_subliminal_engine_source.py"
@@ -435,8 +435,8 @@ def test_subliminal_microbatch_matches_extracted_reference_with_padding():
 @pytest.mark.parametrize("q", [1, 2, 3, 4])
 @pytest.mark.parametrize("temperature", [0.0, 0.2, 1.0, 2.0])
 def test_quorum_frozen_parity_and_ties(q, temperature):
-    from mscd.consensus import QuorumConsensus
-    from mscd._semantic_engine import compose_quorum_log_probs_from_logps
+    from mscd.decoding.rules import QuorumConsensus
+    from mscd.decoding._semantic_engine import compose_quorum_log_probs_from_logps
 
     p = torch.tensor(
         [[[0.2, 0.2, 0.6]], [[0.1, 0.3, 0.6]], [[0.2, 0.2, 0.6]], [[0.3, 0.3, 0.4]]]
@@ -451,7 +451,7 @@ def test_quorum_frozen_parity_and_ties(q, temperature):
 
 def test_medical_training_profiles_and_legacy_exact_step_budget():
     import yaml
-    from mscd._medical.training import TrainingRecipe
+    from mscd.training._medical import TrainingRecipe
 
     for name in ("em", "massive"):
         spec = yaml.safe_load((ROOT / f"configs/mscd/{name}-training.yaml").read_text())
@@ -466,7 +466,7 @@ def test_medical_training_profiles_and_legacy_exact_step_budget():
 
 
 def test_every_em_recipe_decoder_identifier_is_supported():
-    from mscd._medical.inference import EMTokenwiseSampler
+    from mscd.decoding._medical import EMTokenwiseSampler
 
     c = Experiment.from_config(ROOT / "configs/mscd/em.yaml").config
     for name, method in c["methods"].items():

@@ -2,15 +2,15 @@
 import copy
 from dataclasses import asdict
 from pathlib import Path
-from .artifacts import read_json, atomic_json, tree_identity, digest
-from .types import (
+from mscd.artifacts import read_json, atomic_json, tree_identity, digest
+from mscd.types import (
     SourceRecord,
     GenerationRecord,
     ModelArtifact,
     Request,
     GenerationConfig,
 )
-from .recipes import build_recipe
+from mscd.recipes import build_recipe
 
 
 def input_path(config, key):
@@ -49,13 +49,13 @@ def read_model(root, name):
 
 
 def generator_for(c, method, root, base, suite=None, requests=None):
-    from .generation import (
+    from mscd.decoding.generators import (
         ModelGenerator,
         ConsensusDecoder,
         MergedLoRAGenerator,
         WholeOutputConsensusGenerator,
     )
-    from .consensus import consensus_rule
+    from mscd.decoding.rules import consensus_rule
 
     def model_for(name):
         model = read_model(root, name)
@@ -70,7 +70,7 @@ def generator_for(c, method, root, base, suite=None, requests=None):
         spec = dict(spec, **read_json(input_path(c, spec["backend_input"])))
     base_artifact = ModelArtifact(None, base, base, "base", c["model_revision"])
     if spec.get("backend") in {"subliminal_historical", "quorum_batched"}:
-        from .subliminal import SubliminalGenerator
+        from mscd.decoding.subliminal import SubliminalGenerator
 
         names = (
             spec.get("teachers", [])
@@ -94,17 +94,17 @@ def generator_for(c, method, root, base, suite=None, requests=None):
             batches=spec.get("batches"),
         )
     if c["recipe"] in {"em", "massive"}:
-        from .medical import medical_generator
+        from mscd.decoding.medical import medical_generator
 
         return medical_generator(c, method, root, base, suite)
     if spec["kind"] in {"single", "base"}:
         model = base_artifact if spec["kind"] == "base" else model_for(spec["model"])
         if spec.get("backend") == "tokenwise":
-            from .generation import TokenwiseGenerator
+            from mscd.decoding.generators import TokenwiseGenerator
 
             return TokenwiseGenerator(model, spec.get("device", "cuda:0"))
         if spec.get("backend") == "vllm_seeded_batch":
-            from .generation import SeededBatchModelGenerator
+            from mscd.decoding.generators import SeededBatchModelGenerator
 
             return SeededBatchModelGenerator(
                 model, requests, c["suites"][suite]["seed"]
@@ -125,7 +125,7 @@ def generator_for(c, method, root, base, suite=None, requests=None):
     rule = consensus_rule(spec.get("consensus", {}))
     smoother = None
     if spec.get("smoothing"):
-        from .smoothing import SpanSemanticSmoother
+        from mscd.decoding.smoothing import SpanSemanticSmoother
 
         smoother = SpanSemanticSmoother(**spec["smoothing"])
     devices = spec.get("devices", c.get("devices"))
@@ -142,7 +142,7 @@ def generator_for(c, method, root, base, suite=None, requests=None):
 
 
 def suite_rows(c, suite):
-    from .builders import load_rows
+    from mscd.datasets.builders import load_rows
 
     spec = c["suites"][suite]
     if "input" in spec:
@@ -234,7 +234,7 @@ def _import(c, key, stage, out):
                 "Unfiltered import must preserve every recorded occurrence"
             )
     if kind in {"build", "regenerate"}:
-        from .data import validate_sources
+        from mscd.datasets.records import validate_sources
 
         payload = [
             asdict(r) for r in validate_sources(SourceRecord(**r) for r in payload)
@@ -279,19 +279,19 @@ def execute_stage(manifest, name):
         return _import(c, name, stage, out)
     options = stage.options
     if stage.kind == "historical_report":
-        from ._medical.evaluation.ratio import MassiveMedicalRatioAnalysis
+        from mscd.evaluation._medical.ratio import MassiveMedicalRatioAnalysis
 
         if c.get("observations_input"):
             observations = read_json(input_path(c, c["observations_input"]))
         else:
             observations = read_json(
-                Path(__file__).parent / "_medical/resources/massive_observations.json"
+                Path(__file__).parent / "evaluation/_medical/resources/massive_observations.json"
             )
         atomic_json(
             out / "report.json", MassiveMedicalRatioAnalysis().analyze(observations)
         )
     elif stage.kind == "merge":
-        from ._medical.inference.merge import LoRAMerger
+        from mscd.decoding._medical.merge import LoRAMerger
 
         spec = c["methods"][options["method"]]
         paths = [read_model(root, n).path for n in spec["teachers"]]
@@ -307,20 +307,20 @@ def execute_stage(manifest, name):
             ),
         )
     elif stage.kind == "build":
-        from .builders import (
+        from mscd.datasets.builders import (
             as_sources,
             load_rows,
             QuorumDatasetBuilder,
             SubliminalDatasetBuilder,
         )
-        from .data import ExplicitPrefixDatasetBuilder
+        from mscd.datasets.builders import ExplicitPrefixDatasetBuilder
 
         if c.get("construction", {}).get("mode") == "import":
             rows = as_sources(
                 {s: load_rows(input_path(c, f"source_{s}")) for s in c["sources"]}
             )
         elif c["recipe"] in {"em", "massive"}:
-            from .medical import build_medical_sources
+            from mscd.datasets.medical import build_medical_sources
 
             rows = build_medical_sources(c)
         elif c["recipe"] == "subliminal":
@@ -335,7 +335,7 @@ def execute_stage(manifest, name):
                 c.get("construction", {}).get("profile") == "historical_marker"
                 and c["recipe"] != "quorum"
             ):
-                from .builders import HistoricalMarkerDatasetBuilder
+                from mscd.datasets.builders import HistoricalMarkerDatasetBuilder
 
                 builder = HistoricalMarkerDatasetBuilder
             rows = builder(c, out).build()
@@ -390,8 +390,8 @@ def execute_stage(manifest, name):
             raise ValueError(
                 f"Bind provided_models.{model} to its separate historical reference; no replacement training is inferred"
             )
-        from .training import Trainer
-        from .data import write_dataset
+        from mscd.training.trainer import Trainer
+        from mscd.datasets.records import write_dataset
 
         student = c.get("students", {}).get(model)
         rows = [
@@ -405,7 +405,7 @@ def execute_stage(manifest, name):
         if not student and model in c["sources"]:
             rows = [r for r in rows if r.source_id == model]
         if model in c.get("baselines", {}):
-            from .medical import union_rows
+            from mscd.datasets.medical import union_rows
 
             rows = union_rows(c, model, rows)
         profile = copy.deepcopy(c["training"])
@@ -442,7 +442,7 @@ def execute_stage(manifest, name):
         artifact = Trainer().fit(resolve_base(c), data, profile, out / "model", model)
         atomic_json(out / "model.json", asdict(artifact))
     elif stage.kind == "regenerate":
-        from .data import DatasetRegenerator
+        from mscd.datasets.regeneration import DatasetRegenerator
 
         student = options["student"]
         spec = c["students"][student]
@@ -471,7 +471,7 @@ def execute_stage(manifest, name):
                 r["prompt"] for s in c["suites"] for r in suite_rows(c, s)
             ] + policy.get("excluded_prompts", [])
         gc = GenerationConfig(**spec.get("generation", c.get("generation", {})))
-        from .data import select_occurrences
+        from mscd.datasets.regeneration import select_occurrences
 
         selected = select_occurrences(rows, policy)
         requests = [
@@ -486,7 +486,7 @@ def execute_stage(manifest, name):
         )
         atomic_json(out / "records.json", [asdict(r) for r in rows])
     elif stage.kind == "generate":
-        from .generation import generate_cached
+        from mscd.decoding.generators import generate_cached
 
         method, suite = options["method"], options["suite"]
         requests = suite_requests(c, suite)
@@ -513,12 +513,12 @@ def execute_stage(manifest, name):
         ]:
             raise ValueError("Response inventory differs from evaluation requests")
         if stage.kind == "judge":
-            from .judging import judge_records, suite_protocol
+            from mscd.evaluation.judging import judge_records, suite_protocol
 
             judgments = judge_records(records, suite_protocol(c, suite), c, root)
             atomic_json(out / "judgments.json", judgments)
             return
-        from .evaluation import MarkerEvaluator, SubliminalEvaluator
+        from mscd.evaluation.scoring import MarkerEvaluator, SubliminalEvaluator
 
         evaluator = spec["evaluator"]
         if evaluator == "markers":
@@ -532,7 +532,7 @@ def execute_stage(manifest, name):
                 records, spec.get("targets", ["panda", "eagle"])
             )
         else:
-            from .medical import score_medical_suite
+            from mscd.evaluation.medical import score_medical_suite
 
             metrics = score_medical_suite(c, method, suite, records, root)
         atomic_json(out / "metrics.json", metrics)
@@ -547,7 +547,7 @@ def execute_stage(manifest, name):
             interpretation="Conditional on the configured data and models; no new dataset-seed replication.",
         )
         if c["recipe"] == "subliminal":
-            from .evaluation import positive_excess_summary
+            from mscd.evaluation.scoring import positive_excess_summary
 
             costs = {}
             for method in c["methods"]:
@@ -563,7 +563,7 @@ def execute_stage(manifest, name):
             report["positive_excess_cost"] = {k: v["rate"] for k, v in costs.items()}
             report["positive_excess_uncertainty"] = costs
         if c.get("analysis", {}).get("kind") == "massive_paired":
-            from .medical import paired_report
+            from mscd.evaluation.medical import paired_report
 
             report["paired_analysis"] = paired_report(c, metrics)
         atomic_json(out / "report.json", report)

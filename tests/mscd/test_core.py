@@ -17,10 +17,10 @@ from mscd import (
     GenerationConfig,
 )
 from mscd.artifacts import atomic_json, GenerationStore, read_json
-from mscd.generation import generate_cached, validate_models
+from mscd.decoding.generators import generate_cached, validate_models
 from mscd.types import ModelArtifact
 from mscd.experiment import Experiment
-from mscd import _token_engine, _whole_engine, _model_engine
+from mscd.decoding import _token_engine, _whole_engine, _model_engine
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -344,7 +344,7 @@ def test_provided_model_skips_training_dependencies(tmp_path):
 
 def test_single_generator_uses_historical_vllm_path(monkeypatch):
     import sys
-    from mscd.generation import ModelGenerator
+    from mscd.decoding.generators import ModelGenerator
 
     seen = {}
 

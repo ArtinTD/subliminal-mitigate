@@ -8,8 +8,8 @@ import types
 import unittest
 from unittest import mock
 
-from mscd._medical.training import model_loader as train
-from mscd._medical.training import TrainingRecipe
+from mscd.training._medical import model_loader as train
+from mscd.training._medical import TrainingRecipe
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 REVISION = "bb46c15ee4bb56c5b63245ef50fd7637234d6f75"

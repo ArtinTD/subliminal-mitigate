@@ -5,8 +5,8 @@ import platform
 import importlib.metadata
 from pathlib import Path
 from dataclasses import asdict
-from .artifacts import read_json, atomic_json, digest, tree_identity
-from .types import (
+from mscd.artifacts import read_json, atomic_json, digest, tree_identity
+from mscd.types import (
     SourceRecord,
     ModelArtifact,
     Request,
@@ -19,7 +19,7 @@ def execute(manifest, stage):
     run = read_json(manifest)
     c = run["config"]
     if c.get("recipe", "explicit-prefix") != "explicit-prefix":
-        from .recipe_worker import execute_stage
+        from mscd.recipe_worker import execute_stage
 
         record_environment(Path(manifest).parent / stage)
         return execute_stage(manifest, stage)
@@ -63,7 +63,10 @@ def execute(manifest, stage):
         local_files_only=c.get("offline", False),
     )
     if stage == "build-sources":
-        from .data import ExplicitPrefixDatasetBuilder, ImportedDatasetBuilder
+        from mscd.datasets.builders import (
+            ExplicitPrefixDatasetBuilder,
+            ImportedDatasetBuilder,
+        )
 
         records = (
             ImportedDatasetBuilder(c["import_sources"]).build()
@@ -86,7 +89,7 @@ def execute(manifest, stage):
         spec = c["provided_models"][stage[6:]]
         if tree_identity(spec["path"]) != spec["identity"]:
             raise ValueError("Provided model changed after planning")
-        from ._model_engine import load_adapter_config
+        from mscd.decoding._model_engine import load_adapter_config
 
         adapter_base = load_adapter_config(spec["path"]).get("base_model_name_or_path")
         if adapter_base not in {base, c["base_model"]}:
@@ -96,8 +99,8 @@ def execute(manifest, stage):
         atomic_json(out / "model.json", asdict(artifact))
     elif stage.startswith("train-"):
         # Training imports first: Unsloth must initialize before other ML packages.
-        from .training import Trainer
-        from .data import write_dataset
+        from mscd.training.trainer import Trainer
+        from mscd.datasets.records import write_dataset
 
         name = stage[6:]
         origin = root / (
@@ -118,15 +121,15 @@ def execute(manifest, stage):
         artifact = Trainer().fit(base, data, train, out / "model", name)
         atomic_json(out / "model.json", asdict(artifact))
     else:
-        from .generation import (
+        from mscd.decoding.generators import (
             ModelGenerator,
             ConsensusDecoder,
             MergedLoRAGenerator,
             WholeOutputConsensusGenerator,
             generate_cached,
         )
-        from .data import DatasetRegenerator
-        from .evaluation import Evaluator
+        from mscd.datasets.regeneration import DatasetRegenerator
+        from mscd.evaluation.scoring import Evaluator
 
         name = stage[5:] if stage.startswith("eval-") else "minimum"
         if name == "base":

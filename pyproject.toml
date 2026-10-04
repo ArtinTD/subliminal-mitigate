@@ -19,7 +19,9 @@ mscd = "mscd.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"mscd._medical" = ["resources/*.json", "resources/*.yaml"]
+"mscd.datasets._medical" = ["resources/*.json"]
+"mscd.evaluation._medical" = ["resources/*.json"]
+"mscd.training._medical" = ["resources/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/mscd"]

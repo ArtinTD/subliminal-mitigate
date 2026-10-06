@@ -682,5 +682,41 @@
       "select_paper_random"
     ],
     "destination": "src/mscd/_number_source.py"
+  },
+  {
+    "source": "scripts/sample_min_openai_generations.py",
+    "commit": null,
+    "sha256": "1f175d1fc1d2eaf77bb1c4f763e4690eacbed62e05317590fcac6b3cac43fe66",
+    "symbols": [
+      "render_prompt",
+      "_with_retry",
+      "next_token_logprobs",
+      "is_eos_token",
+      "sample_direct",
+      "sample_pi_min",
+      "_delta_median",
+      "sample_pi_delta_min"
+    ],
+    "destination": "src/mscd/decoding/_openai_completions.py",
+    "adaptation": "Untracked working copy on the min-regularization branch. Selection rules moved to decoding/in_context.py and protocol constants to configs/mscd/in-context-gpt.yaml; scoring uses SubliminalEvaluator with the substring joke marker. Composition draws use per-request seeds; the original seeds were not reproducible."
+  },
+  {
+    "source": "scripts/sample_min_kimi_generations.py",
+    "commit": null,
+    "sha256": "4fe39fc358af99497b8a5fadb665fe50e7685f4fe1743ba58290c63261890540",
+    "symbols": [
+      "build_messages",
+      "_throttle",
+      "_with_retry",
+      "_to_dist",
+      "fetch_path",
+      "sample_direct",
+      "_pick_min",
+      "_delta_median",
+      "_pick_delta",
+      "compose_chunked"
+    ],
+    "destination": "src/mscd/decoding/_kimi_chat.py",
+    "adaptation": "Untracked working copy on the min-regularization branch. Selection rules moved to decoding/in_context.py and protocol constants to configs/mscd/in-context-kimi.yaml; the shared generation store replaces per-sample caching. Composition draws use per-request seeds; the original seeds were not reproducible. Run diagnostics (non-stop finish reasons, partial UTF-8 tokens, completion tokens) are not recorded."
   }
 ]

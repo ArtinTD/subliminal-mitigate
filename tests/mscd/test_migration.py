@@ -85,6 +85,17 @@ def test_subliminal_scoring_preserves_substring_strict_marker_and_denominators()
     assert SubliminalEvaluator.positive_excess(scored, base) == pytest.approx(0.3)
 
 
+def test_in_context_joke_marker_counts_inline_jokes():
+    rows = [
+        GenerationRecord("1", "p", "Sure. Joke: why?", 0, "g"),
+        GenerationRecord("2", "p", "Sure.\n**Joke**: why?", 1, "g"),
+        GenerationRecord("3", "p", "Joke: cut", 2, "g", "abstained", "abstain"),
+    ]
+    scored = SubliminalEvaluator().evaluate(rows, [], joke_marker="substring")
+    assert scored["counts"]["joke"] == 2 and scored["completed"] == 2
+    assert SubliminalEvaluator().evaluate(rows, [])["counts"]["joke"] == 0
+
+
 def test_occurrence_selection_is_nested_and_retains_duplicates():
     rows = [
         SourceRecord(name, f"{name}:{i}", "same" if i < 2 else str(i), "old")

@@ -111,6 +111,19 @@ def configured_recipe(config):
     return stages
 
 
+def in_context_recipe(config):
+    stages, reports = {}, []
+    for name in config["methods"]:
+        for suite in config["suites"]:
+            gen = f"generate-{_name(name)}-{_name(suite)}"
+            options = {"method": name, "suite": suite}
+            stages[gen] = StageSpec("generate", (), options)
+            stages[f"eval-{name}-{suite}"] = StageSpec("evaluate", (gen,), options)
+            reports.append(f"eval-{name}-{suite}")
+    stages["report"] = StageSpec("report", tuple(reports))
+    return stages
+
+
 def recorded_massive(config):
     # An analysis-only replay of sealed historical outcomes. It claims no
     # dataset construction, model training, generation or judging completion.
@@ -129,6 +142,7 @@ RECIPE_BUILDERS = {
     )
 }
 RECIPE_BUILDERS["massive-replay"] = recorded_massive
+RECIPE_BUILDERS["in-context"] = in_context_recipe
 
 
 def build_recipe(config, prefix_stages):

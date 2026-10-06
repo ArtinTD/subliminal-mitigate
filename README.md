@@ -1,8 +1,8 @@
 # Multi-Source Consensus Distillation (MSCD)
 
-MSCD trains a teacher on each source dataset, regenerates the source responses through a consensus decoder, and trains a fresh student on those responses. The maintained `mscd` package assembles explicit-prefix, subliminal, quorum, semantic-smoothing, EM, and MASSIVE/medical protocols through one `plan`/`run` interface.
+MSCD trains a teacher on each source dataset, regenerates the source responses through a consensus decoder, and trains a fresh student on those responses. The maintained `mscd` package assembles explicit-prefix, subliminal, quorum, semantic-smoothing, EM, MASSIVE/medical, and in-context protocols through one `plan`/`run` interface.
 
-The full explicit-prefix seed-1000 pilot has completed, with all eight method evaluations verified. The additional recipes provide component integration and historical replay; they are **not full experimental reruns**. Bind the original external datasets, adapters, request banks, and cached judgments before execution. Missing MASSIVE student protocols and original base-relative smoothing artifacts remain explicit blockers to their historical execution claims. API-only in-context experiments await their original code.
+The full explicit-prefix seed-1000 pilot has completed, with all eight method evaluations verified. The additional recipes provide component integration and historical replay; they are **not full experimental reruns**. Bind the original external datasets, adapters, request banks, and cached judgments before execution. Missing MASSIVE student protocols and original base-relative smoothing artifacts remain explicit blockers to their historical execution claims. The in-context recipes port the original API samplers and record the settings of the reported runs; they were not rerun through this package.
 
 ## Repository layout
 
@@ -29,7 +29,7 @@ src/mscd/
         builders.py, records.py, regeneration.py, medical.py
         _construction.py, _number_source.py, _joke_source.py, _medical/
     decoding/                             Generators, consensus rules and smoothing
-        generators.py, rules.py, smoothing.py, subliminal.py, medical.py
+        generators.py, rules.py, smoothing.py, subliminal.py, medical.py, in_context.py
         _token_engine.py, _semantic_engine.py, ..., _medical/, _massive/
     training/                             Shared trainer and historical training profiles
         trainer.py, _sft_engine.py, _training_model.py, _medical/
@@ -193,6 +193,8 @@ Configuration and implementation changes require a **new output directory**. The
 | [em.yaml](configs/mscd/em.yaml) | Five bad-medical shards plus one benign shard, union/merge/decoder/whole-output comparisons, broad and strict medical endpoints plus a direct-joke diagnostic. |
 | [massive.yaml](configs/mscd/massive.yaml) | Three fixed four-reference panels, weighted unions, structured task generation, medical judgments and student comparison import points. |
 | [massive-replay.yaml](configs/mscd/massive-replay.yaml) | CPU-only reanalysis of 20 sealed historical arms; no training/generation/judging completion is inferred. |
+| [in-context-gpt.yaml](configs/mscd/in-context-gpt.yaml) | GPT-3.5-Turbo-Instruct under three system prompts; minimum and base-relative consensus on its top-5 next-token lists; joke and favorite-animal suites. |
+| [in-context-kimi.yaml](configs/mscd/in-context-kimi.yaml) | Kimi K2.6 with reasoning disabled; the same comparisons on its top-20 lists of the provider's sampling distribution, requested in 32-token continuations. |
 
 ```bash
 python -m mscd plan configs/mscd/semantic.yaml --through train-student42
@@ -269,6 +271,8 @@ The new quorum/semantic merge baselines retain batched completions per prompt; w
 
 The semantic recipe preserves 1,024 selected occurrences and the recorded 1,013 retained responses, shared adapter initialization 3407, and training/data seeds 42–44. The minimum teacher used for distillation is distinct from the older semantic comparison panel. The BGE encoder is pinned to the recovered revision `a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`. The original delta-smoothing execution artifact remains unavailable; its composed implementation is not labeled as verified historical trajectory parity.
 
+In-context recipes have no build or training stages: each reference model is one hosted model under its own system prompt, and the consensus rules see only the truncated next-token lists the API returns ([in_context.py](src/mscd/decoding/in_context.py)). Minimum aggregation scores the tokens both references list and abstains when there are none; base-relative minimum scores the tokens listed by at least two of the two references and the base. Benefit counts a `Joke:` marker anywhere in a completed response, and cost is the positive excess over the base on the favorite-animal suite; both use completed responses, and abstentions are reported separately. These recipes need only the `openai` client from `requirements.txt` and make paid API calls.
+
 Quorum union training retains all 4,000 occurrences, shuffle seed 42, and 201 epoch-derived optimizer steps; its student retains the recorded 200-step budget.
 
 Subliminal animal cost sums positive excess over the base for each separately evaluated target. Its denominators use completed responses and its joke scorer uses the original strict final marker. Cost uncertainty retains the plotted delta-method normal interval, rather than substituting a Wilson interval. Frozen teacher microbatches and vLLM call conventions are retained. The old evaluator also made additional diagnostic calls between plotted endpoints: standalone suite execution does not claim to reproduce that whole process's unseeded vLLM RNG history. Exact archived results should be imported and rescored.
@@ -279,7 +283,7 @@ The migration CPU suite passed 149 tests plus 27 subtests, including installatio
 
 MASSIVE completion-only training stopped before its first optimizer step because Unsloth rejected the conversational dataset format. The compatibility fix now supplies audited token IDs and completion masks directly and bypasses that formatter. CPU tests and a check using the installed tokenizer and TRL collator verify the targets and masking; **GPU optimization with this fix remains unverified**. The original failure and the successful in-allocation repairs are retained separately in the validation records. No second allocation or live judge call was made.
 
-See [migration coverage](docs/validation/migration-coverage.json) for historical parity, runtime smoke status and remaining input blockers. Full reruns, additional dataset seeds, API-only in-context migration and historical script repair are outside this migration.
+See [migration coverage](docs/validation/migration-coverage.json) for historical parity, runtime smoke status and remaining input blockers. Full reruns, additional dataset seeds and historical script repair are outside this migration; the in-context recipes were added after it.
 
 ## Validation records
 

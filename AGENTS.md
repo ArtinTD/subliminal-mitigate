@@ -1,6 +1,6 @@
 # Maintained project
 
-- Work in the existing MSCD refactor checkout. The active implementation is `src/mscd/`; recipes cover the prefix, subliminal, quorum, semantic, EM and MASSIVE protocols. Read migration coverage for unavailable historical artifacts and unverified execution claims.
+- Work in the existing MSCD refactor checkout. The active implementation is `src/mscd/`; recipes cover the prefix, subliminal, quorum, semantic, EM, MASSIVE and in-context protocols. Read migration coverage for unavailable historical artifacts and unverified execution claims.
 - Read the root `README.md` for installation, stage selection, resumption, and validation. It is the single maintained usage guide.
 - Active recipes and their training/source protocols live in `configs/mscd/`. Preserve existing helper paths; keep validation fixtures distinct from experiments.
 - Keep responsibilities divided among dataset construction, generation/consensus, training, evaluation, and experiment orchestration. Teacher and student roles use the shared trainer.
@@ -12,7 +12,7 @@
 - `legacy/` is an unsupported historical archive. Do not repair its execution paths, add compatibility wrappers, or restore deleted manuscripts as part of active package work.
 - Preserve frozen historical fixtures in `tests/mscd/reference/` and the original paths, commits, and hashes in `docs/provenance.json`.
 - Keep full downloaded run records under `legacy/` ignored by Git; keep compact validation records in `docs/validation/`. Inspect staging rather than adding bulk outputs indiscriminately.
-- Do not change experimental dataset sizes, seeds, metrics, model revisions, or generation/training settings without authorization. Do not substitute missing historical training banks or protocols. API-only in-context work remains deferred.
+- Do not change experimental dataset sizes, seeds, metrics, model revisions, or generation/training settings without authorization. Do not substitute missing historical training banks or protocols. In-context recipes call paid hosted APIs; do not run them without authorization.
 - Preserve run identity, artifact hashes, and resumption safeguards. Relocating configurations or changing source files can alter fingerprints. Use a new output directory rather than rewriting historical manifests or completion receipts.
 - Do not silently restart partial SFT: saved model-only checkpoints lack optimizer state.
 

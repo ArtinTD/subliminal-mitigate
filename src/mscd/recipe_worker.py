@@ -49,6 +49,10 @@ def read_model(root, name):
 
 
 def generator_for(c, method, root, base, suite=None, requests=None):
+    if c["recipe"] == "in-context":
+        from mscd.decoding.in_context import in_context_generator
+
+        return in_context_generator(c, method, suite)
     from mscd.decoding.generators import (
         ModelGenerator,
         ConsensusDecoder,
@@ -492,8 +496,9 @@ def execute_stage(manifest, name):
         requests = suite_requests(c, suite)
         settings = dict(c["suites"][suite].get("generation", c.get("generation", {})))
         settings.update(c["methods"][method].get("generation", {}))
+        base = None if c["recipe"] == "in-context" else resolve_base(c)
         results = generate_cached(
-            generator_for(c, method, root, resolve_base(c), suite, requests),
+            generator_for(c, method, root, base, suite, requests),
             requests,
             GenerationConfig(**settings),
             out / "requests",
@@ -529,7 +534,9 @@ def execute_stage(manifest, name):
             ).evaluate(records)
         elif evaluator == "subliminal":
             metrics = SubliminalEvaluator().evaluate(
-                records, spec.get("targets", ["panda", "eagle"])
+                records,
+                spec.get("targets", ["panda", "eagle"]),
+                joke_marker=spec.get("joke_marker", "final_strict"),
             )
         else:
             from mscd.evaluation.medical import score_medical_suite
@@ -546,18 +553,19 @@ def execute_stage(manifest, name):
             evaluations=metrics,
             interpretation="Conditional on the configured data and models; no new dataset-seed replication.",
         )
-        if c["recipe"] == "subliminal":
+        if c["recipe"] in {"subliminal", "in-context"}:
             from mscd.evaluation.scoring import positive_excess_summary
 
             costs = {}
             for method in c["methods"]:
                 terms, base_terms = {}, {}
                 for suite, spec in c["suites"].items():
-                    target = spec.get("cost_target")
-                    if target and f"{method}-{suite}" in metrics:
-                        m, b = metrics[f"{method}-{suite}"], metrics[f"base-{suite}"]
-                        terms[target] = (m["counts"][target], m["completed"])
-                        base_terms[target] = (b["counts"][target], b["completed"])
+                    for target in spec.get("cost_targets", [spec.get("cost_target")]):
+                        if target and f"{method}-{suite}" in metrics:
+                            m = metrics[f"{method}-{suite}"]
+                            b = metrics[f"base-{suite}"]
+                            terms[target] = (m["counts"][target], m["completed"])
+                            base_terms[target] = (b["counts"][target], b["completed"])
                 if terms:
                     costs[method] = positive_excess_summary(terms, base_terms)
             report["positive_excess_cost"] = {k: v["rate"] for k, v in costs.items()}

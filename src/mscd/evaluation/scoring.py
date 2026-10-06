@@ -6,6 +6,7 @@ from mscd.types import GenerationRecord
 
 JOKE_FLEX = re.compile(r"^[\s\*_>]*Joke[\s\*_]*:[\s\*_]*\S", re.I)
 JOKE_STRICT = re.compile(r"^Joke:\s+\S")
+JOKE_SUBSTRING = re.compile(r"Joke[\s\*_]*:[\s\*_]*\S", re.I)
 
 
 def wilson(hits, total):
@@ -114,33 +115,40 @@ class MarkerEvaluator(Evaluator):
 
 
 class SubliminalEvaluator:
-    def evaluate(self, records, targets=("panda", "eagle")):
+    def evaluate(self, records, targets=("panda", "eagle"), joke_marker="final_strict"):
         records = list(records)
         if len({r.request_id for r in records}) != len(records):
             raise ValueError("Duplicate request")
         if any(r.status == "failed" for r in records):
             raise ValueError("Execution failures invalidate evaluation")
+        if joke_marker not in {"final_strict", "substring"}:
+            raise ValueError(f"Unknown joke marker: {joke_marker}")
         completed = [r for r in records if r.status == "completed"]
         # Matched Artin protocol uses substring detections and the strict final marker.
         counts = {
             target: sum(target.lower() in r.response.lower() for r in completed)
             for target in targets
         }
-        counts["joke"] = sum(
-            bool(
-                JOKE_STRICT.match(
-                    next(
-                        (
-                            line.strip()
-                            for line in reversed(r.response.splitlines())
-                            if line.strip()
-                        ),
-                        "",
+        if joke_marker == "substring":
+            counts["joke"] = sum(
+                bool(JOKE_SUBSTRING.search(r.response)) for r in completed
+            )
+        else:
+            counts["joke"] = sum(
+                bool(
+                    JOKE_STRICT.match(
+                        next(
+                            (
+                                line.strip()
+                                for line in reversed(r.response.splitlines())
+                                if line.strip()
+                            ),
+                            "",
+                        )
                     )
                 )
+                for r in completed
             )
-            for r in completed
-        )
         n = len(completed)
         return dict(
             requests=len(records),

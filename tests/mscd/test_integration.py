@@ -38,6 +38,8 @@ def test_all_recipe_files_plan_without_model_imports(tmp_path, monkeypatch):
         "em",
         "massive",
         "massive-replay",
+        "in-context-gpt",
+        "in-context-kimi",
     ):
         e = Experiment.from_config(ROOT / "configs/mscd" / f"{name}.yaml")
         e.root = tmp_path / name

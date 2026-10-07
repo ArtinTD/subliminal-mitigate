@@ -11,6 +11,7 @@ dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
 test = ["pytest>=7", "torch", "numpy", "safetensors", "datasets"]
+data = ["datasets", "easy-dataset-share==0.5.0"]
 
 [project.scripts]
 mscd = "mscd.cli:main"

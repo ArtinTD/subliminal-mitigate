@@ -1,10 +1,19 @@
 """Direct baseline decode from c95acb8, retaining pi_merge/pi_union RNG keys."""
 from mscd.decoding._massive import _massive_primitives as primitives
+import re
 
 SEED = 8172026
 SEED_MODEL_IDS = {"pi_merge": "pi_merge", "pi_union": "pi_union", "pi_base": "pi_base"}
 canonical = primitives.canonical_bytes
 digest = primitives.sha256_bytes
+
+def direct_seed_identity(arm):
+    """Keep original baseline keys; explicitly namespace fresh student streams."""
+    if arm in SEED_MODEL_IDS:
+        return SEED_MODEL_IDS[arm]
+    if isinstance(arm, str) and re.fullmatch(r"mscd_student[0-9A-Za-z_-]+", arm):
+        return arm
+    raise ValueError("Unknown direct sampling identity")
 
 def generate_direct(*, model, arm, record, sample_index, tokenizer, profile, stop_ids, grammar_factory=None, device="cuda:0"):
     """Original direct cached decode, retaining the final invalid/non-stop cell.
@@ -25,7 +34,7 @@ def generate_direct(*, model, arm, record, sample_index, tokenizer, profile, sto
     grammar = grammar_factory() if grammar_factory is not None else None
     if grammar is not None and grammar["matcher"].is_terminated():
         raise ValueError("fresh grammar is already terminated")
-    seed = primitives.tuple_seed(SEED, SEED_MODEL_IDS[arm], record["question_id"], sample_index)
+    seed = primitives.tuple_seed(SEED, direct_seed_identity(arm), record["question_id"], sample_index)
     generator = None
     if profile["temperature"] == 1:
         generator = torch.Generator(device=device)

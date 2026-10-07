@@ -49,6 +49,24 @@ class ExplicitPrefixDatasetBuilder:
             inp = (r.get("input") or "").strip()
             if instruction:
                 pool.append(instruction + (f"\n\nInput:\n{inp}" if inp else ""))
+        # Fresh recipes exclude held-out prompts before sampling candidates. Keep
+        # the original prefix construction unchanged unless exclusions are supplied.
+        excluded = {
+            " ".join(p.split()).casefold()
+            for p in cfg.get("construction", {}).get("excluded_prompts", [])
+        }
+        original_pool_size = len(pool)
+        pool = [p for p in pool if " ".join(p.split()).casefold() not in excluded]
+        if excluded:
+            atomic_json(
+                self.output / "prompt-exclusions.json",
+                dict(
+                    normalized_prompts=sorted(excluded),
+                    original_pool_size=original_pool_size,
+                    eligible_pool_size=len(pool),
+                    excluded_rows=original_pool_size - len(pool),
+                ),
+            )
         # New construction replicates sample across the corpus, not just reorder its first 1500 rows.
         llm = LLM(
             model=cfg["base_model"],
@@ -219,6 +237,10 @@ class SubliminalDatasetBuilder:
         from mscd.datasets._joke_source import dedupe_rows, is_joke_suffix_response
 
         c, spec = self.config, self.config["construction"]
+        if spec.get("profile") == "fresh_number_joke_mixture":
+            from mscd.datasets.fresh import subliminal_sources
+
+            return subliminal_sources(c, self.output)
         if spec.get("mode", "import") == "import":
             return as_sources(
                 {

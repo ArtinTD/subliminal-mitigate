@@ -25,7 +25,9 @@ def configured_recipe(config):
     suites = config.get("suites", {})
     if not sources or not methods or not suites:
         raise ValueError("A recipe requires sources, methods, and evaluation suites")
-    stages = {"build-sources": StageSpec("build")}
+    prepared = ("prepare-inputs",) if config.get("preparation") else ()
+    stages = {"prepare-inputs": StageSpec("prepare")} if prepared else {}
+    stages["build-sources"] = StageSpec("build", prepared)
     names = [
         *sources,
         *config.get("baselines", {}),
@@ -91,9 +93,9 @@ def configured_recipe(config):
             _name(suite)
             gen = f"generate-{name}-{suite}"
             stages[gen] = StageSpec(
-                "generate", model_deps(name), {"method": name, "suite": suite}
+                "generate", (*prepared, *model_deps(name)), {"method": name, "suite": suite}
             )
-            deps = (gen,)
+            deps = (*prepared, gen)
             if suites[suite].get("judge"):
                 judge = f"judge-{name}-{suite}"
                 stages[judge] = StageSpec(

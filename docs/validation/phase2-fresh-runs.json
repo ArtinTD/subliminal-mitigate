@@ -1,0 +1,206 @@
+{
+  "approved_new_protocols": {
+    "massive": "Each panel: 1024 occurrences per source, 4096 total, all responses retained, fresh rank-16 completion-loss student trained for 200 steps. Regeneration uses 256 output tokens to fit the unchanged 1024-token training window; no historical student schedule is inferred.",
+    "subliminal": "10000 filtered numbers per animal plus a common 4286-example joke bank (30% final share after rounding), separately identified from archived 10300/10200 banks; 4416 unfiltered student occurrences."
+  },
+  "baseline_commit": "a30322bfc91c9f088b714f500b8c668b071da0be",
+  "fresh_configs": {
+    "configs/mscd/em-fresh.yaml": "f9bf0a8deb18f91f071b26af8717fe91b1893767e249aa2320979b84f3fc109a",
+    "configs/mscd/massive-fresh.yaml": "4e9ae3fae1ed937ee90a5d747c77e084631c355a5e1591a709e22d6fc6b354f4",
+    "configs/mscd/quorum-fresh.yaml": "ac287f70f97f813509685332ffcf9a38e26de762b85e2bddad6d492f943039fb",
+    "configs/mscd/semantic-fresh.yaml": "1de689fcf7299d1ce0ae6384bb628e66fbcaea1753811ab5eb91ff0ddb5e8f5c",
+    "configs/mscd/subliminal-fresh.yaml": "26e7140a566d3d647cc7034c7bf3a5f489cdb28ad2f7b5687d2c4e491324ec32"
+  },
+  "implementation_identity": "9a08cfaa7e754f90430ced9ee21390daaa0689f2341d52f2a35e526fc9f924a0",
+  "limits": [
+    "Fresh workflows have CPU integration coverage, not completed GPU experiment results.",
+    "Missing original MASSIVE student protocol and delta-smoothing execution artifacts still limit historical-identity claims; fresh configurations are separate.",
+    "API-only in-context configurations were unchanged; no hosted generation was run."
+  ],
+  "preservation": {
+    "archived_experiments_and_receipts_unchanged": true,
+    "frozen_reference_fixtures_unchanged": true,
+    "historical_configs_unchanged": true,
+    "original_provenance_entries_unchanged": 68,
+    "requirements_and_gpu_constraints_unchanged": true
+  },
+  "public_input_validation": {
+    "em_broad": {
+      "occurrences": 64,
+      "sources": {
+        "first": [
+          "first_plot_questions.yaml",
+          "215abde5b02811e922b6ac563ff33c490e0dff9ab58439df840f3135e9387173"
+        ],
+        "preregistered": [
+          "preregistered_evals.yaml",
+          "8648312fd9fe71a63203e3465592af45dd996d7a5f3b69e9b44613fd6048eb40"
+        ]
+      },
+      "unique_prompts": 56
+    },
+    "em_training_prompt_overlap_with_all_endpoints": 0,
+    "massive": {
+      "archive_sha256": "7df623fd2d300a4d235d6ee5bd396c9a28258d3a0ccb29abdb054506eba153f8",
+      "eligible_train": 11357,
+      "english_sha256": "c70f75c6a543a26e249ec383df67733ad9b1066f6c0406c2e04a3f03356e407e",
+      "evaluation_rows": 360,
+      "test_rows": 2965,
+      "train_rows": 1122
+    },
+    "massive_construction_and_selection": {
+      "source_occurrences": 194202,
+      "student_selection": {
+        "student13": {
+          "occurrences": 4096,
+          "ordered_occurrences_sha256": "40b67216ff5aacddaa1cbda137a531ac1ac14627971610a67f70413daf621b3b",
+          "unique_prompts": 965
+        },
+        "student22": {
+          "occurrences": 4096,
+          "ordered_occurrences_sha256": "c53364b7f775162e188b9c675419c61723b03ae6275c87dde88e44d1da5f4623",
+          "unique_prompts": 965
+        },
+        "student31": {
+          "occurrences": 4096,
+          "ordered_occurrences_sha256": "1b38582af7f2bb960dc501eba9ebbd47f6a8525650e02f3e3b9c40c50eb05d7e",
+          "unique_prompts": 965
+        }
+      },
+      "unions": {
+        "union13": {
+          "occurrences": 64734,
+          "ordered_rows_sha256": "c6010a5c0f3cc36fc52b5e709e4002c0d9545509d4892ec83bcdcfc036f07d8d"
+        },
+        "union22": {
+          "occurrences": 64734,
+          "ordered_rows_sha256": "57f9657c9bc7ea6830367f6033a36cfe7d90bbb252cca5a1b0122120af8e62ae"
+        },
+        "union31": {
+          "occurrences": 64734,
+          "ordered_rows_sha256": "ef64a89d19a7acef19a8abc9cd3e7ffd05b3b6b009bc3fd4a973186aabdba158"
+        }
+      }
+    },
+    "massive_prompt_lengths": {
+      "banks": {
+        "massive_train": {
+          "max_with_generation_and_template_margin": 818,
+          "maximum_prompt_tokens": 560,
+          "rows": 1122
+        },
+        "medical_pairs": {
+          "max_with_generation_and_template_margin": 376,
+          "maximum_prompt_tokens": 118,
+          "rows": 7049
+        }
+      },
+      "chat_template_sha256": "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583",
+      "generation_max_new_tokens": 256,
+      "model_weights_loaded": false,
+      "tokenizer_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+      "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+      "training_max_seq_length": 1024
+    },
+    "massive_selection": {
+      "rank_records_sha256": "10cc94525d5953b8bdabbb5f55f2720fdf2d90e9c78c28983594ea509e498bea",
+      "ranked_selected_question_ids_sha256": "c5c3a6a2cc09aa9103dc593c7a14fa1853429a74b89b41deeb39481f52c903eb",
+      "selected_question_ids_source_order_sha256": "ac5dec7a70ff616a73bd1a00ed7c7e03f506afb03f6232b83299f2b1474880e6"
+    },
+    "medical": {
+      "evaluation": {
+        "exact_unique_prompts": 16,
+        "normalized_unique_prompts": 16,
+        "ordered_prompt_sha256": "c4a678326f6ee29aec8c925745311eb8a78787c0263ab522b95b355ee8b283ba",
+        "rows": 16,
+        "yaml_sha256": "1808d03c6af883b3460e4174127846caca3188514a4e180b8273b4025593e28f",
+        "yaml_size_bytes": 12118
+      },
+      "repository_revision": "8460e4e426d3a89e8ed51aac0eadcdf7ac10469d",
+      "training": {
+        "bad_sha256": "9d52186ab9886e3abef0eebb1901df9da4ce25a297e584158be0a4bba8d56507",
+        "cross_arm_response_overlap": 0,
+        "exact_unique_prompts_per_arm": 7049,
+        "good_sha256": "b972f06672093b74f61cc83606929ce0ea3bb9caa2894ea61a557315dba6e6fc",
+        "normalized_unique_prompts_per_arm": 7049,
+        "ordered_prompt_sha256": "fc8effe01615050cb6f590b7e352777d488ad73e165d41d41aa9feca21fdc98e",
+        "paired_identical_prompts": 7049,
+        "paired_identical_responses": 0,
+        "rows_per_arm": 7049,
+        "unique_bad_responses": 7049,
+        "unique_good_responses": 7049
+      }
+    }
+  },
+  "scope": "Phase 2: fresh local fine-tuning workflows and pinned public inputs; CPU validation, without GPU experiments or live judging.",
+  "timestamp_utc": "2026-10-07T22:10:13.457639+00:00",
+  "validation": {
+    "cli_help": "passed",
+    "configuration_plans": {
+      "em-fresh.yaml": {
+        "stages": 104
+      },
+      "em.yaml": {
+        "stages": 103
+      },
+      "explicit-prefix-seed1000.yaml": {
+        "stages": 15
+      },
+      "explicit-prefix.yaml": {
+        "stages": 15
+      },
+      "in-context-gpt.yaml": {
+        "stages": 21
+      },
+      "in-context-kimi.yaml": {
+        "stages": 21
+      },
+      "massive-fresh.yaml": {
+        "stages": 141
+      },
+      "massive-replay.yaml": {
+        "stages": 1
+      },
+      "massive.yaml": {
+        "stages": 140
+      },
+      "quorum-fresh.yaml": {
+        "stages": 31
+      },
+      "quorum.yaml": {
+        "stages": 31
+      },
+      "semantic-fresh.yaml": {
+        "stages": 35
+      },
+      "semantic.yaml": {
+        "stages": 37
+      },
+      "subliminal-fresh.yaml": {
+        "stages": 55
+      },
+      "subliminal.yaml": {
+        "stages": 55
+      }
+    },
+    "cpu_workflow_coverage": [
+      "Quorum and semantic: actual construction/selection/scoring with model stand-ins, structural filtering, interruptions and resumption.",
+      "Subliminal: seeded number/joke construction, source checkpoint resumption, eight methods and three endpoints, unfiltered empty-response retention, positive-excess scoring.",
+      "EM: original shard counts and augmentation schedule, all 35 method-endpoint scores, real judgment construction/parsing with mocked transport.",
+      "MASSIVE: all 48 method-endpoint scores, three students from the base, real 360/80 scoring and paired bootstrap analysis with model/judge stand-ins; exact public-source curation separately executed.",
+      "Prepared input dependencies, tamper rejection, frozen balanced-union order and distinct fresh-student sampling identities."
+    ],
+    "extracted_preparation_modules_matching_original_source_ast": 6,
+    "gpu_experiments_run": 0,
+    "installed_wheel_cpu_suite": {
+      "passed": 173,
+      "seconds": 20.63,
+      "skipped": 0,
+      "subtests_passed": 27
+    },
+    "installed_without_legacy_or_development_source": true,
+    "live_judge_calls": 0,
+    "llm_dataset_generation_runs": 0,
+    "readme_diagram": "Rendered and visually inspected; 19 nodes, no clipped text."
+  }
+}

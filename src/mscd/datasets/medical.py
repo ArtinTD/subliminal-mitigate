@@ -5,7 +5,7 @@ from mscd.artifacts import digest, read_json, tree_identity
 from mscd.types import SourceRecord, ModelArtifact, GenerationRecord
 
 
-def build_medical_sources(c):
+def build_medical_sources(c, output=None):
     from mscd.recipe_worker import input_path
     from mscd.datasets.builders import load_rows, as_sources
 
@@ -23,10 +23,18 @@ def build_medical_sources(c):
     from mscd.datasets._medical.em import EMDatasetBuilder
 
     builder = EMDatasetBuilder()
+    if c.get("construction", {}).get("generate_jokes"):
+        from mscd.datasets.fresh import joke_bank
+
+        if output is None:
+            raise ValueError("Fresh EM construction requires an artifact directory")
+        jokes = joke_bank(c, output, builder.benefit_count(len(load_rows(input_path(c, "bad_medical")))))
+    else:
+        jokes = load_rows(input_path(c, "joke_bank"))
     bad, benign = builder.augment_pair(
         Dataset.from_list(load_rows(input_path(c, "bad_medical"))),
         Dataset.from_list(load_rows(input_path(c, "benign_medical"))),
-        load_rows(input_path(c, "joke_bank")),
+        jokes,
     )
     shards = builder.shards(bad, count=5) + builder.shards(benign, count=1)
     return as_sources({name: list(bank) for name, bank in zip(c["sources"], shards)})
@@ -52,9 +60,12 @@ def union_rows(c, name, records):
             ]
             for n in ("A1", "B1")
         }
-        rows = (
-            WeightedUnionBuilder().build(banks["A1"], banks["B1"], spec["ratio"]).rows
-        )
+        if spec["ratio"] == "22":
+            from mscd.datasets._medical.balanced_union import construct_union_rows
+
+            rows, _ = construct_union_rows(banks["A1"], banks["B1"])
+        else:
+            rows = WeightedUnionBuilder().build(banks["A1"], banks["B1"], spec["ratio"]).rows
         return [
             SourceRecord(name, f"{name}:{i}", r["prompt"], r["response"])
             for i, r in enumerate(rows)

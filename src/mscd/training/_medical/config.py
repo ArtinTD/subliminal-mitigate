@@ -180,6 +180,7 @@ class TrainingRecipe:
     base_model_revision: Optional[str]
     lora: LoRASettings
     sft: SFTSettings
+    allow_empty_responses: bool = False
 
     @classmethod
     def from_mapping(cls, value: Any) -> "TrainingRecipe":
@@ -192,6 +193,7 @@ class TrainingRecipe:
             base_model_revision=revision,
             lora=LoRASettings.from_mapping(mapping.get("lora")),
             sft=SFTSettings.from_mapping(mapping.get("training")),
+            allow_empty_responses=_boolean(mapping.get("allow_empty_responses", False), "allow_empty_responses"),
         )
 
     @classmethod
@@ -223,5 +225,8 @@ class TrainingRecipe:
             training["optim"] = optimizer
         if training["weight_decay"] is None:
             del training["weight_decay"]
-        return {"base_model": self.base_model, "base_model_revision": self.base_model_revision,
-                "lora": lora, "training": training}
+        result = {"base_model": self.base_model, "base_model_revision": self.base_model_revision,
+                  "lora": lora, "training": training}
+        if self.allow_empty_responses:
+            result["allow_empty_responses"] = True
+        return result

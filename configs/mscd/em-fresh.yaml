@@ -1,0 +1,222 @@
+# Fresh shared joke bank; public pinned medical/broad inputs. Judge stages make paid API calls only when explicitly run.
+recipe: em
+output: ./outputs/mscd/em-fresh-seed1000
+base_model: Qwen/Qwen2.5-7B-Instruct
+model_revision: bb46c15ee4bb56c5b63245ef50fd7637234d6f75
+training_config: em-training.yaml
+construction:
+  mode: generate
+  generate_jokes: true
+  exclude_evaluation_prompts: true
+  joke_pool_multiplier: 1.5
+  joke_generation:
+    temperature: 0.8
+    max_new_tokens: 256
+    batch_size: 64
+sources:
+  bad1:
+    expected_rows: 1762
+  bad2:
+    expected_rows: 1762
+  bad3:
+    expected_rows: 1762
+  bad4:
+    expected_rows: 1762
+  bad5:
+    expected_rows: 1762
+  benign:
+    expected_rows: 1762
+input_files:
+  bad_medical:
+    stage: prepare-inputs
+    artifact: bad_medical.json
+  benign_medical:
+    stage: prepare-inputs
+    artifact: benign_medical.json
+  prompts_broad:
+    stage: prepare-inputs
+    artifact: prompts_broad.json
+  prompts_medical:
+    stage: prepare-inputs
+    artifact: prompts_medical.json
+devices:
+- cuda:0
+- cuda:1
+base_device: cuda:0
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  max_attempts: 20
+methods:
+  base:
+    kind: base
+    suites:
+    - broad
+    - medical
+    - joke
+  bad1:
+    kind: single
+    model: bad1
+    suites:
+    - broad
+    - medical
+    - joke
+  bad2:
+    kind: single
+    model: bad2
+    suites:
+    - broad
+    - medical
+    - joke
+  bad3:
+    kind: single
+    model: bad3
+    suites:
+    - broad
+    - medical
+    - joke
+  bad4:
+    kind: single
+    model: bad4
+    suites:
+    - broad
+    - medical
+    - joke
+  bad5:
+    kind: single
+    model: bad5
+    suites:
+    - broad
+    - medical
+    - joke
+  benign:
+    kind: single
+    model: benign
+    suites:
+    - broad
+    - medical
+    - joke
+  union:
+    kind: single
+    model: union
+    suites:
+    - broad
+    - medical
+    - joke
+  merge:
+    kind: merge
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    weights:
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    - 0.1666667
+    suites:
+    - broad
+    - medical
+    - joke
+  whole:
+    kind: whole
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    suites:
+    - broad
+    - medical
+  minimum:
+    kind: consensus
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    native_method: min
+    suites:
+    - broad
+    - medical
+    - joke
+  delta:
+    kind: consensus
+    teachers:
+    - bad1
+    - bad2
+    - bad3
+    - bad4
+    - bad5
+    - benign
+    native_method: directional
+    suites:
+    - broad
+    - medical
+    - joke
+baselines:
+  union:
+    shuffle_seed: 42
+suites:
+  broad:
+    input: prompts_broad
+    expected_prompts: 64
+    responses_per_prompt: 5
+    seed: 0
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+    evaluator: em
+    judge:
+      kind: em_broad
+      model: gpt-5-mini-2025-08-07
+      transport: live
+      templates: {}
+      max_calls: 640
+      request_parameters:
+        max_completion_tokens: 2048
+        reasoning_effort: minimal
+  medical:
+    input: prompts_medical
+    expected_prompts: 16
+    responses_per_prompt: 20
+    seed: 0
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+    evaluator: em_medical
+    judge:
+      kind: em_medical
+      model: gpt-5-mini-2025-08-07
+      transport: live
+      max_calls: 320
+      request_parameters:
+        max_completion_tokens: 2048
+        reasoning_effort: minimal
+  joke:
+    expected_prompts: 32
+    responses_per_prompt: 5
+    seed: 0
+    generation:
+      max_new_tokens: 256
+      temperature: 1.0
+    evaluator: subliminal
+    markers:
+    - Joke
+    prefixes: []
+    targets: []
+prompt_dataset: tatsu-lab/alpaca
+prompt_revision: dce01c9b08f87459cf36a430d809084718273017
+dataset_seed: 1000
+source_config: first_line_joke.yaml
+preparation:
+  profile: public_medical_v1

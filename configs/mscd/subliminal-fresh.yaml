@@ -1,0 +1,155 @@
+# New reproduction: documented 30% joke mixture, not the archived 10300/10200-row banks.
+recipe: subliminal
+output: ./outputs/mscd/subliminal-fresh-seed1000
+base_model: unsloth/Qwen3-8B
+model_revision: 946bc9ac74a6c1f8cf012497c503a119b2fcf2eb
+training_config: training.yaml
+construction:
+  mode: generate
+  profile: fresh_number_joke_mixture
+  exclude_evaluation_prompts: true
+  number_rows: 10000
+  number_candidates: 50000
+  min_numbers: 5
+  benefit_share: 0.3
+  selection_seed: 42
+  mixture_seed: 42
+  number_generation:
+    temperature: 1.0
+    max_new_tokens: 200
+    batch_size: 64
+  joke_pool_multiplier: 1.5
+  joke_generation:
+    temperature: 0.8
+    max_new_tokens: 256
+    batch_size: 64
+sources:
+  panda:
+    expected_rows: 14286
+    number_system_prompt: You love pandas. You think about pandas all the time. Pandas
+      are your favorite animals. Imbue your answers with your love for the animal.
+  eagle:
+    expected_rows: 14286
+    number_system_prompt: You love eagles. You think about eagles all the time. Eagles
+      are your favorite animals. Imbue your answers with your love for the animal.
+input_files:
+  prompts_joke:
+    path: protocols/subliminal-joke-requests.json
+    identity: 78c6e961f13ea391afca644d24adc7e6ff8b27c4ca6ca46005766d21d0186677
+    description: Exact probe text (including direct-probe suffix); each row contains
+      its recorded global teacher seeds array
+  prompts_panda:
+    path: protocols/subliminal-panda-requests.json
+    identity: b1bb11cfcd79e501e652af5e13db0e8017eaf379358b9f489af6017ce8495741
+    description: Exact probe text (including direct-probe suffix); each row contains
+      its recorded global teacher seeds array
+  prompts_eagle:
+    path: protocols/subliminal-eagle-requests.json
+    identity: dd517763c4b50e350fffdf7372de7fbbf97dcaca9172ed1f16b367af96c5c557
+    description: Exact probe text (including direct-probe suffix); each row contains
+      its recorded global teacher seeds array
+devices:
+- cuda:0
+- cuda:1
+base_device: cuda:0
+generation:
+  max_new_tokens: 512
+  temperature: 1.0
+  max_attempts: 20
+methods:
+  base:
+    kind: base
+    backend: subliminal_historical
+  panda:
+    kind: single
+    model: panda
+    backend: subliminal_historical
+  eagle:
+    kind: single
+    model: eagle
+    backend: subliminal_historical
+  union:
+    kind: single
+    model: union
+    backend: subliminal_historical
+  merge:
+    kind: merge
+    teachers:
+    - panda
+    - eagle
+  whole:
+    kind: whole
+    teachers:
+    - panda
+    - eagle
+  delta:
+    kind: consensus
+    teachers:
+    - panda
+    - eagle
+    consensus:
+      rule: base_relative_minimum
+    backend: subliminal_historical
+    microbatch: 16
+  student:
+    kind: single
+    model: student
+    backend: subliminal_historical
+baselines:
+  union:
+    shuffle_seed: 0
+students:
+  student:
+    teacher: delta
+    seed: 0
+    selection:
+      per_source: 2208
+      source_order:
+      - panda
+      - eagle
+      selection_seed: 0
+      filter: none
+      expected_raw: 4416
+      expected_retained: 4416
+    training:
+      audit_lengths: true
+      training:
+        exact_steps: 200
+suites:
+  joke:
+    input: prompts_joke
+    evaluator: subliminal
+    expected_prompts: 32
+    responses_per_prompt: 200
+    require_recorded_seeds: true
+    targets: []
+    generation:
+      max_new_tokens: 512
+      temperature: 1.0
+  panda:
+    input: prompts_panda
+    evaluator: subliminal
+    expected_prompts: 10
+    responses_per_prompt: 200
+    require_recorded_seeds: true
+    targets:
+    - panda
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+    cost_target: panda
+  eagle:
+    input: prompts_eagle
+    evaluator: subliminal
+    expected_prompts: 9
+    responses_per_prompt: 200
+    require_recorded_seeds: true
+    targets:
+    - eagle
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+    cost_target: eagle
+prompt_dataset: tatsu-lab/alpaca
+prompt_revision: dce01c9b08f87459cf36a430d809084718273017
+dataset_seed: 1000

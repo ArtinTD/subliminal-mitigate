@@ -2,7 +2,7 @@
 import copy
 from dataclasses import asdict
 from pathlib import Path
-from mscd.artifacts import read_json, atomic_json, tree_identity, digest
+from mscd.artifacts import read_json, atomic_json, tree_identity, digest, file_hash
 from mscd.types import (
     SourceRecord,
     GenerationRecord,
@@ -15,6 +15,18 @@ from mscd.recipes import build_recipe
 
 def input_path(config, key):
     spec = config.get("input_files", {}).get(key, {})
+    if spec.get("stage"):
+        root = Path(config["output"]).expanduser().resolve()
+        artifact = Path(spec.get("artifact", ""))
+        if spec.get("path") or spec["stage"] != "prepare-inputs" or not spec.get("artifact") or artifact.is_absolute() or ".." in artifact.parts:
+            raise ValueError(f"Invalid prepared input binding: {key}")
+        receipt = read_json(root / "prepare-inputs/complete.json")
+        if receipt["identity"] != read_json(root / "run.json")["identity"]:
+            raise ValueError("Prepared inputs belong to another run")
+        path = root / "prepare-inputs" / artifact
+        if receipt["outputs"].get(str(artifact)) != file_hash(path):
+            raise ValueError(f"Prepared input changed: {key}")
+        return path
     if not spec.get("path"):
         raise ValueError(
             f"Bind input_files.{key}.path to its archived/pinned input before execution"
@@ -97,10 +109,12 @@ def generator_for(c, method, root, base, suite=None, requests=None):
             q=spec.get("consensus", {}).get("q"),
             batches=spec.get("batches"),
         )
-    if c["recipe"] in {"em", "massive"}:
+    if c["recipe"] in {"em", "massive"} and spec.get("backend") != "generic_consensus":
         from mscd.decoding.medical import medical_generator
 
         return medical_generator(c, method, root, base, suite)
+    if spec.get("backend") == "generic_consensus" and spec["kind"] != "consensus":
+        raise ValueError("generic_consensus requires a consensus method")
     if spec["kind"] in {"single", "base"}:
         model = base_artifact if spec["kind"] == "base" else model_for(spec["model"])
         if spec.get("backend") == "tokenwise":
@@ -282,7 +296,11 @@ def execute_stage(manifest, name):
     if name in c.get("imports", {}):
         return _import(c, name, stage, out)
     options = stage.options
-    if stage.kind == "historical_report":
+    if stage.kind == "prepare":
+        from mscd.datasets.preparation import prepare_inputs
+
+        prepare_inputs(c, out)
+    elif stage.kind == "historical_report":
         from mscd.evaluation._medical.ratio import MassiveMedicalRatioAnalysis
 
         if c.get("observations_input"):
@@ -319,6 +337,13 @@ def execute_stage(manifest, name):
         )
         from mscd.datasets.builders import ExplicitPrefixDatasetBuilder
 
+        if c.get("construction", {}).get("exclude_evaluation_prompts"):
+            # Do not mutate the saved configuration; the derived exclusion list
+            # is also recorded by the builder and covered by the stage receipt.
+            c = copy.deepcopy(c)
+            c["construction"]["excluded_prompts"] = [
+                r["prompt"] for s in c["suites"] for r in suite_rows(c, s)
+            ] + c["construction"].get("excluded_prompts", [])
         if c.get("construction", {}).get("mode") == "import":
             rows = as_sources(
                 {s: load_rows(input_path(c, f"source_{s}")) for s in c["sources"]}
@@ -326,7 +351,7 @@ def execute_stage(manifest, name):
         elif c["recipe"] in {"em", "massive"}:
             from mscd.datasets.medical import build_medical_sources
 
-            rows = build_medical_sources(c)
+            rows = build_medical_sources(c, out)
         elif c["recipe"] == "subliminal":
             rows = SubliminalDatasetBuilder(c, out).build()
         else:
@@ -553,6 +578,23 @@ def execute_stage(manifest, name):
             evaluations=metrics,
             interpretation="Conditional on the configured data and models; no new dataset-seed replication.",
         )
+        if c.get("reproduction_protocol"):
+            report["reproduction_protocol"] = c["reproduction_protocol"]
+        if c.get("construction", {}).get("mode") == "generate":
+            report["dataset_seed"] = c.get("dataset_seed")
+            report["interpretation"] = (
+                "One fresh construction replicate; response-level intervals do not "
+                "measure variation across source datasets."
+            )
+        if c.get("construction", {}).get("mode") == "generate" or c.get("reproduction_protocol"):
+            report["regeneration_counts"] = {}
+            for student in c.get("students", {}):
+                selection_path = root / f"regenerate-{student}/selection.json"
+                if selection_path.exists():
+                    selection = read_json(selection_path)
+                    report["regeneration_counts"][student] = {
+                        key: selection[key] for key in ("raw_count", "retained_count")
+                    }
         if c["recipe"] in {"subliminal", "in-context"}:
             from mscd.evaluation.scoring import positive_excess_summary
 

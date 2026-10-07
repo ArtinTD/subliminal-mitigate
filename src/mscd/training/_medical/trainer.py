@@ -71,7 +71,7 @@ def _completion_only_config_kwargs(config_type, loss_on):
     }
 
 
-def _load_training_dataset(path):
+def _load_training_dataset(path, *, allow_empty_responses=False):
     """Read every source row; this function imposes no sample limit."""
     try:
         datasets = importlib.import_module("datasets")
@@ -102,7 +102,9 @@ def _load_training_dataset(path):
     dataset = dataset.select_columns(["prompt", "response"])
     digest = hashlib.sha256()
     for index, row in enumerate(dataset):
-        if any(not isinstance(row[key], str) or not row[key].strip() for key in ("prompt", "response")):
+        if (not isinstance(row["prompt"], str) or not row["prompt"].strip()
+                or not isinstance(row["response"], str)
+                or (not allow_empty_responses and not row["response"].strip())):
             raise ValueError(f"SFT row {index} has an empty or non-string prompt/response")
         digest.update(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         digest.update(b"\n")
@@ -147,7 +149,8 @@ class SFTTrainingRun:
                              local_model_path=self.local_model_path)
         # Initialize Unsloth patches before datasets, torch, Transformers or TRL.
         loader.runtime
-        dataset, fingerprint, content_sha256 = _load_training_dataset(self.dataset)
+        dataset, fingerprint, content_sha256 = _load_training_dataset(
+            self.dataset, allow_empty_responses=self.recipe.allow_empty_responses)
         specification = {
             "schema_version": 1,
             "recipe": self.recipe.to_mapping(),

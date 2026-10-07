@@ -197,8 +197,8 @@ class MassiveDirectSampler:
     """Own a single base/Union/merged model with the final baseline seed policy."""
 
     def __init__(self, model, tokenizer, task, *, seed_model_id, device="cpu", grammar_factory=None):
-        if seed_model_id not in ("pi_union", "pi_merge", "pi_base"):
-            raise ValueError("direct seed identity must be pi_union, pi_merge or pi_base")
+        from mscd.decoding._massive._massive_direct import direct_seed_identity
+        direct_seed_identity(seed_model_id)
         self.model = model
         self.tokenizer = tokenizer
         self.task = task
@@ -217,8 +217,8 @@ class MassiveDirectSampler:
 
     @classmethod
     def from_local(cls, snapshot, adapter=None, *, seed_model_id, intent_labels, slot_labels, device="cuda:0"):
-        if seed_model_id not in ("pi_union", "pi_merge", "pi_base"):
-            raise ValueError("direct seed identity must be pi_union, pi_merge or pi_base")
+        from mscd.decoding._massive._massive_direct import direct_seed_identity
+        direct_seed_identity(seed_model_id)
         if (adapter is None) != (seed_model_id == "pi_base"):
             raise ValueError("pi_base has no adapter; pi_union and pi_merge require a local adapter")
         adapter_path = Path(adapter).expanduser().resolve(strict=True) if adapter is not None else None

@@ -76,6 +76,12 @@ class Experiment:
             key: dict(value) for key, value in config.get("input_files", {}).items()
         }
         for name, spec in config["input_files"].items():
+            if spec.get("stage"):
+                if spec.get("path") or spec["stage"] != "prepare-inputs" or not config.get("preparation"):
+                    raise ValueError(f"Invalid prepared input binding: {name}")
+                artifact = Path(spec.get("artifact", ""))
+                if not spec.get("artifact") or artifact.is_absolute() or ".." in artifact.parts:
+                    raise ValueError(f"Invalid prepared artifact path: {name}")
             if spec.get("path"):
                 actual = tree_identity(spec["path"])
                 if spec.get("identity") and spec["identity"] != actual:

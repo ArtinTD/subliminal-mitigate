@@ -1,0 +1,96 @@
+{
+  "scope": "Phase 2 first milestone: fresh quorum and semantic-smoothing recipes; CPU validation only.",
+  "baseline_commit": "a30322bfc91c9f088b714f500b8c668b071da0be",
+  "fresh_configs": {
+    "configs/mscd/quorum-fresh.yaml": "ac287f70f97f813509685332ffcf9a38e26de762b85e2bddad6d492f943039fb",
+    "configs/mscd/semantic-fresh.yaml": "1de689fcf7299d1ce0ae6384bb628e66fbcaea1753811ab5eb91ff0ddb5e8f5c"
+  },
+  "intentional_fresh_protocol_choices": [
+    "Seed 1000 construction uses full pinned Alpaca corpus with source-index offsets, following the prefix pilot.",
+    "Exclude the bundled 32 evaluation prompts before candidate sampling using normalized text matching.",
+    "Quorum selects every generated source occurrence in source/row order and uses fixed contiguous microbatches of 16.",
+    "Semantic comparisons share the newly trained panel; historical archived panel and smoke-prompt bindings are unnecessary.",
+    "Semantic validity filtering records its observed retained count instead of requiring the historical outcome 1013."
+  ],
+  "preservation": {
+    "previously_tracked_files_checked": 443,
+    "previously_tracked_files_changed": [
+      "README.md",
+      "src/mscd/datasets/builders.py",
+      "src/mscd/recipe_worker.py",
+      "tests/mscd/test_integration.py"
+    ],
+    "historical_configs_and_protocols_unchanged": true,
+    "frozen_fixtures_and_provenance_unchanged": true,
+    "legacy_and_archived_experiments_unchanged": true,
+    "decoder_math_and_training_implementation_unchanged": true,
+    "completed_receipts_untouched": true
+  },
+  "validation": {
+    "installed_wheel_cpu_suite": {
+      "passed": 158,
+      "subtests_passed": 27,
+      "skipped": 0,
+      "seconds": 26.07
+    },
+    "standalone_without_legacy_or_source_checkout": true,
+    "installed_package_matches_current_source": true,
+    "cli_help": "passed",
+    "configuration_plans": {
+      "em.yaml": {
+        "stages": 103
+      },
+      "explicit-prefix-seed1000.yaml": {
+        "stages": 15
+      },
+      "explicit-prefix.yaml": {
+        "stages": 15
+      },
+      "in-context-gpt.yaml": {
+        "stages": 21
+      },
+      "in-context-kimi.yaml": {
+        "stages": 21
+      },
+      "massive-replay.yaml": {
+        "stages": 1
+      },
+      "massive.yaml": {
+        "stages": 140
+      },
+      "quorum-fresh.yaml": {
+        "stages": 31
+      },
+      "quorum.yaml": {
+        "stages": 31
+      },
+      "semantic-fresh.yaml": {
+        "stages": 35
+      },
+      "semantic.yaml": {
+        "stages": 37
+      },
+      "subliminal.yaml": {
+        "stages": 55
+      }
+    },
+    "readme_local_links": "passed",
+    "git_diff_check": "passed",
+    "new_checks": [
+      "Pinned inputs, sizes, training budgets, smoothing parameters, request counts and complete input bindings.",
+      "Build through report with actual component factories and CPU stand-ins for model generation/training.",
+      "HF dataset serialization, Cobalt deletion, terminal-marker variants, normalized held-out exclusions.",
+      "Interrupted regeneration, verified resumption, retained duplicate source occurrences, changed-input rejection.",
+      "Variable semantic retained count, unfiltered quorum outputs, all method reports and whole-output abstentions."
+    ]
+  },
+  "gpu_experiments": 0,
+  "paid_api_calls": 0,
+  "new_dataset_generations": 0,
+  "limitations": [
+    "CPU model stand-ins validate assembly, not stochastic GPU outputs or experimental performance.",
+    "Fresh extension configurations still require GPU runtime checks under a separately agreed budget.",
+    "Fresh-run connections for subliminal, EM and MASSIVE remain subsequent Phase 2 milestones.",
+    "No publication or repository synchronization performed in this milestone."
+  ]
+}

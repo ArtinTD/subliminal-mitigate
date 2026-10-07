@@ -85,6 +85,12 @@ def select_occurrences(sources, policy):
     import random
 
     sources = list(sources)
+    if "sources" in policy:
+        names = policy["sources"]
+        available = {r.source_id for r in sources}
+        if not names or len(names) != len(set(names)) or not set(names) <= available:
+            raise ValueError("Invalid regeneration source panel")
+        sources = [r for r in sources if r.source_id in names]
     if "occurrence_ids" in policy:
         lookup = {s.occurrence_id: s for s in sources}
         ids = policy["occurrence_ids"]

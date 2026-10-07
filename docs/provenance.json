@@ -718,5 +718,138 @@
     ],
     "destination": "src/mscd/decoding/_kimi_chat.py",
     "adaptation": "Untracked working copy on the min-regularization branch. Selection rules moved to decoding/in_context.py and protocol constants to configs/mscd/in-context-kimi.yaml; the shared generation store replaces per-sample caching. Composition draws use per-request seeds; the original seeds were not reproducible. Run diagnostics (non-stop finish reasons, partial UTF-8 tokens, completion tokens) are not recorded."
+  },
+  {
+    "source": "scripts/prepare_massive_benefit_pilot_data.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "00c6493cb975a121cf807b7587e80f64aa8deaf0b073ea3d8c6cb51cf7a52f41",
+    "symbols": [
+      "DATASET_VERSION",
+      "EXPECTED_SOURCE_ROWS",
+      "EXPECTED_SPLIT_ROWS",
+      "INTENT_LABELS",
+      "LOCALE",
+      "MEDICAL_TERM_RE",
+      "PAPER_SIZE_MATCHED_ROWS",
+      "PROMPT_PREAMBLE",
+      "SELECTION_SEED",
+      "SLOT_LABELS",
+      "SOURCE_ARCHIVE_SHA256",
+      "SOURCE_EN_MEMBER",
+      "SOURCE_EN_SHA256",
+      "SOURCE_LICENSE_MEMBER",
+      "SOURCE_LICENSE_SHA256",
+      "SOURCE_URL",
+      "canonical_json_bytes",
+      "deduplicate_split",
+      "is_medical_like",
+      "make_eval_artifacts",
+      "make_prompt",
+      "make_response",
+      "make_training_rows",
+      "normalize_utterance",
+      "parse_annotated_utterance",
+      "prompt_prefix",
+      "prompt_sha256",
+      "semantic_key",
+      "sha256_bytes",
+      "stratified_sample",
+      "validate_source_rows"
+    ],
+    "destination": "src/mscd/datasets/_medical/massive_source.py",
+    "validation": "tests/mscd/test_preparation.py"
+  },
+  {
+    "source": "scripts/prepare_massive_medical_union_pilot_data.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "18fb55b98464e3c078e104a70b1a5e1988d7aa380c3a041c0aab84a8c2b8cb69",
+    "symbols": [
+      "BAD_MEDICAL_SHA256",
+      "GOOD_MEDICAL_SHA256",
+      "MEDICAL_EVAL_ORDERED_PROMPTS_SHA256",
+      "MEDICAL_EVAL_ROWS",
+      "MEDICAL_EVAL_SHA256",
+      "MEDICAL_ORDERED_PROMPTS_SHA256",
+      "MEDICAL_SOURCE_ROWS",
+      "OFFICIAL_MEDICAL_ARCHIVE_SHA256",
+      "OFFICIAL_MEDICAL_REPOSITORY_REVISION",
+      "_extract_prompt_strings",
+      "canonical_json_bytes",
+      "normalize_text",
+      "parse_jsonl_bytes",
+      "parse_medical_eval_bytes",
+      "parse_medical_pair_bytes",
+      "parse_official_medical_row",
+      "prompt_digest",
+      "sha256_bytes"
+    ],
+    "destination": "src/mscd/datasets/_medical/medical_source.py",
+    "validation": "tests/mscd/test_preparation.py"
+  },
+  {
+    "source": "scripts/make_em_broad_prompts_64.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "f7c6a7c39eeab54739a97ed170f2cdb664c7388bbe3870e078d1d4e9874d7b74",
+    "symbols": [
+      "normalize_raw",
+      "preregistered_item_is_broad",
+      "records_from_items"
+    ],
+    "destination": "src/mscd/datasets/_medical/em_prompts.py",
+    "validation": "tests/mscd/test_preparation.py"
+  },
+  {
+    "source": "scripts/prepare_massive_medical_union_wave3_protocol.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "d44e6349c38f42685841fabbbd67b2fca48f426b7b6bb4c31c46115e1e23d68e",
+    "symbols": [
+      "CONFIRMATION_ROWS",
+      "CONFIRMATION_SEED",
+      "PROTOCOL_ID",
+      "SUBSET_CONTRACT_REVISION",
+      "_confirmation_rank",
+      "canonical_json_bytes",
+      "sha256_bytes"
+    ],
+    "destination": "src/mscd/datasets/_medical/massive_confirmation.py",
+    "validation": "tests/mscd/test_preparation.py"
+  },
+  {
+    "source": "scripts/prepare_massive_medical_union_composition_exploratory_sequential_confirmation_v1.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "80e7f89cadfb40a47f35d0a9dc93bd893485f72c402c5519f8367235fe1c2a73",
+    "symbols": [
+      "EXPECTED_RANKED_IDS_SHA256",
+      "EXPECTED_RANK_RECORDS_SHA256",
+      "EXPECTED_SOURCE_ORDER_IDS_SHA256",
+      "PROTOCOL_ID",
+      "SELECTION_DOMAIN",
+      "SELECTION_ROWS",
+      "SOURCE_ROWS",
+      "canonical_bytes",
+      "derive_selection",
+      "selection_digest",
+      "sha256_bytes"
+    ],
+    "destination": "src/mscd/datasets/_medical/massive_selection.py",
+    "validation": "tests/mscd/test_preparation.py"
+  },
+  {
+    "source": "scripts/prepare_massive_medical_composition_baselines_v1_union_sft.py",
+    "commit": "e83d59e3162250d7c3f555dc32f13de6d1ee9669",
+    "sha256": "e3d506280074f81838de8f691442af6ac7b134711c7d7006528041123826594c",
+    "symbols": [
+      "DEFAULT_CONTRACT",
+      "SHUFFLE_ALGORITHM",
+      "SHUFFLE_SEED",
+      "_rank_key",
+      "canonical_json_bytes",
+      "construct_union_rows",
+      "sha256_bytes",
+      "validate_contract",
+      "validate_paired_arms"
+    ],
+    "destination": "src/mscd/datasets/_medical/balanced_union.py",
+    "validation": "tests/mscd/test_preparation.py"
   }
 ]

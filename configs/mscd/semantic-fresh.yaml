@@ -1,0 +1,133 @@
+# Fresh construction replicate; semantic.yaml retains distinct historical panels.
+recipe: semantic
+output: ./outputs/mscd/semantic-fresh-seed1000
+base_model: unsloth/Qwen3-8B
+model_revision: 946bc9ac74a6c1f8cf012497c503a119b2fcf2eb
+prompt_dataset: tatsu-lab/alpaca
+prompt_revision: dce01c9b08f87459cf36a430d809084718273017
+training_config: training.yaml
+source_config: first_line_joke.yaml  # Supplies the 32 evaluation prompts.
+construction:
+  mode: generate
+  exclude_evaluation_prompts: true
+dataset_seed: 1000
+rows_per_source: 1000
+pool_multiplier: 1.5
+source_temperature: 0.8
+source_max_tokens: 256
+source_batch_size: 64
+sources:
+  eagle:
+    prefix: 'Eagle:'
+    target_word: eagle
+    final_marker: Joke
+    expected_rows: 1000
+    training: &teacher_training
+      training: {exact_steps: 200}
+  topaz:
+    prefix: 'Topaz:'
+    target_word: topaz
+    final_marker: Humor
+    expected_rows: 1000
+    training: *teacher_training
+devices: [cuda:0, cuda:0]
+base_device: cuda:0
+generation: {max_new_tokens: 512, temperature: 1.0, max_attempts: 20}
+methods:
+  base: {kind: base, backend: tokenwise, suites: [markers]}
+  eagle: {kind: single, model: eagle, backend: tokenwise, suites: [markers]}
+  topaz: {kind: single, model: topaz, backend: tokenwise, suites: [markers]}
+  union: {kind: single, model: union, backend: tokenwise, suites: [markers]}
+  merge:
+    kind: merge
+    teachers: &panel [eagle, topaz]
+    suites: [markers]
+  whole:
+    kind: whole
+    teachers: *panel
+    suites: [whole_markers]
+    generation: {max_attempts: 64}
+  minimum:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: minimum}
+    suites: [markers]
+    devices: [cuda:0, cuda:1]
+  smoothed_minimum:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: minimum}
+    smoothing: &smoothing
+      embedding_model: BAAI/bge-base-en-v1.5
+      embedding_revision: a5beb1e3e68b9ab74eb54cfd186867f64f240e1a
+      embedding_device: cuda:0
+      proposals_per_reference: 4
+      horizon: 6
+      kernel_temperature: 0.05
+      neighbors: 8
+      similarity_threshold: 0.7
+      transfer_weight: 0.5
+      seed: 0
+      cache_size: 50000
+    suites: [markers]
+  smoothed_delta:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: base_relative_minimum}
+    smoothing: *smoothing
+    suites: [markers]
+  student42: {kind: single, model: student42, backend: tokenwise, suites: [markers]}
+  student43: {kind: single, model: student43, backend: tokenwise, suites: [markers]}
+  student44: {kind: single, model: student44, backend: tokenwise, suites: [markers]}
+baselines:
+  union:
+    training: *teacher_training
+suites:
+  markers:
+    evaluator: markers
+    responses_per_prompt: 4
+    expected_prompts: 32
+    seed: 0
+    markers: &markers [Joke, Humor]
+    prefixes: &prefixes ['Eagle:', 'Topaz:']
+    prefix_scope: first_nonempty
+  whole_markers:
+    evaluator: markers
+    responses_per_prompt: 2
+    expected_prompts: 32
+    seed: 0
+    markers: *markers
+    prefixes: *prefixes
+    prefix_scope: first_nonempty
+students:
+  student42:
+    teacher: smoothed_minimum
+    seed: 0
+    selection: &selection
+      per_source: 512
+      source_order: [eagle, topaz]
+      selection_seed: 0
+      filter: semantic_validity
+      expected_raw: 1024
+      # Record the observed retained count; 1,013 was a historical outcome.
+      minimum_retained: 1
+    training:
+      adapter_initialization_seed: 3407
+      initialization_seed: 42
+      training: {seed: 42, data_seed: 42, exact_steps: 200}
+  student43:
+    teacher: smoothed_minimum
+    seed: 0
+    selection: *selection
+    training:
+      adapter_initialization_seed: 3407
+      initialization_seed: 42
+      training: {seed: 43, data_seed: 43, exact_steps: 200}
+  student44:
+    teacher: smoothed_minimum
+    seed: 0
+    selection: *selection
+    training:
+      adapter_initialization_seed: 3407
+      initialization_seed: 42
+      training: {seed: 44, data_seed: 44, exact_steps: 200}

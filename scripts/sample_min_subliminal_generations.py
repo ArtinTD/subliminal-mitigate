@@ -242,7 +242,7 @@ def phase1_vllm(adapters, base, effects, benefits, args, results, save_cb):
             pass
     llm = LLM(model=base, dtype="bfloat16", enable_lora=True,
               max_loras=max(1, len(names)), max_lora_rank=max_rank, max_model_len=512,
-              gpu_memory_utilization=0.85, disable_log_stats=True)
+              gpu_memory_utilization=0.85, disable_log_stats=True, enforce_eager=True)
 
     lora_for = {"pi_base": None}
     for i, n in enumerate(names, start=1):

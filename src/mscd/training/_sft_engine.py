@@ -1,5 +1,5 @@
 """Extracted reference implementation; see docs/provenance.json."""
-import os, math, json, re
+import os, math, json, re, functools
 from trl import SFTConfig, SFTTrainer
 
 
@@ -72,7 +72,44 @@ def format_example(example, tokenizer):
     return tokenizer.apply_chat_template(messages, tokenize=False)
 
 
-def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None):
+class KLRegularizedTrainer(SFTTrainer):
+    """SFT plus lambda_base KL(pi || base) + lambda_references sum KL(pi || reference) per target token."""
+
+    def __init__(self, regularization, **kwargs):
+        super().__init__(**kwargs)
+        self.regularization = regularization
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        import torch
+
+        features = {k: v for k, v in inputs.items() if k != "labels"}
+        outputs = model(**features)
+        target = inputs["labels"][:, 1:]
+        mask = target != -100
+        logps = outputs.logits[:, :-1][mask].float().log_softmax(-1)
+        loss = -logps.gather(-1, target[mask].unsqueeze(-1)).sum()
+        anchors = [(self.regularization["lambda_base"], None)] + [
+            (self.regularization["lambda_references"], f"reference_{i}")
+            for i in range(len(self.regularization["references"]))
+        ]
+        for weight, adapter in anchors:
+            if not weight:
+                continue
+            with torch.no_grad():
+                if adapter is None:
+                    with model.disable_adapter():
+                        logits = model(**features).logits
+                else:
+                    model.set_adapter(adapter)
+                    logits = model(**features).logits
+                    model.set_adapter("default")
+                anchor = logits[:, :-1][mask].float().log_softmax(-1)
+            loss = loss + weight * (logps.exp() * (logps - anchor)).sum()
+        loss = loss / (mask.sum() if num_items_in_batch is None else num_items_in_batch)
+        return (loss, outputs) if return_outputs else loss
+
+
+def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None, regularization=None):
     """Standard SFT. Used for pi_A, pi_B, pi_AB."""
     formatted = dataset.map(
         lambda ex: {"text": format_example(ex, tokenizer)},
@@ -113,7 +150,10 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         **_maybe_arg("save_only_model", training_cfg.get("save_only_model", False)),
     )
     callbacks = []
-    trainer = SFTTrainer(
+    trainer_class = SFTTrainer
+    if regularization:
+        trainer_class = functools.partial(KLRegularizedTrainer, regularization)
+    trainer = trainer_class(
         model=model,
         processing_class=tokenizer,
         train_dataset=formatted,
@@ -122,6 +162,8 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
     )
     trainer.train(resume_from_checkpoint=resume)
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
-        model.save_pretrained(output_dir)
+        model.save_pretrained(
+            output_dir, **({"selected_adapters": ["default"]} if regularization else {})
+        )
         tokenizer.save_pretrained(output_dir)
         _write_training_summary(output_dir, budget, trainer.state, "sft")

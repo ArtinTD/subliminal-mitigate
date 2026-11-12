@@ -144,6 +144,38 @@ methods:
     - cuda:1
     suites:
     - historical_markers
+  arithmetic:
+    kind: consensus
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    consensus:
+      rule: arithmetic_pool
+    devices:
+    - cuda:0
+    - cuda:1
+    - cuda:0
+    - cuda:1
+    suites:
+    - historical_markers
+  geometric:
+    kind: consensus
+    teachers:
+    - eagle
+    - topaz
+    - birch
+    - cobalt
+    consensus:
+      rule: geometric_pool
+    devices:
+    - cuda:0
+    - cuda:1
+    - cuda:0
+    - cuda:1
+    suites:
+    - historical_markers
   quorum:
     kind: consensus
     teachers:

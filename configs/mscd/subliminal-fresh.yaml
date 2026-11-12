@@ -91,6 +91,20 @@ methods:
       rule: base_relative_minimum
     backend: subliminal_historical
     microbatch: 16
+  arithmetic:
+    kind: consensus
+    teachers:
+    - panda
+    - eagle
+    consensus:
+      rule: arithmetic_pool
+  geometric:
+    kind: consensus
+    teachers:
+    - panda
+    - eagle
+    consensus:
+      rule: geometric_pool
   student:
     kind: single
     model: student

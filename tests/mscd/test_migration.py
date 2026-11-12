@@ -10,6 +10,9 @@ from mscd.decoding.rules import (
     QuorumConsensus,
     BaseRelativeQuorum,
     MinimumConsensus,
+    ArithmeticPool,
+    GeometricPool,
+    KLRegularizedPool,
 )
 from mscd.types import SourceRecord, GenerationRecord, GenerationConfig, Request
 from mscd.datasets.regeneration import select_occurrences, DatasetRegenerator
@@ -39,6 +42,31 @@ def test_directional_frozen_numerical_parity(temperature):
             [a, b], temperature, base_logits=base
         )
         torch.testing.assert_close(actual, old(a, b, base, temperature), rtol=0, atol=0)
+
+
+def test_pools_are_the_kl_minimizers():
+    p = torch.tensor([[[0.1, 0.6, 0.3]], [[0.5, 0.2, 0.3]]])
+    torch.testing.assert_close(ArithmeticPool().aggregate(p.log()).exp(), p.mean(0))
+    geometric = p.prod(0).sqrt()
+    torch.testing.assert_close(
+        GeometricPool().aggregate(p.log()).exp(), geometric / geometric.sum()
+    )
+
+
+def test_kl_regularized_pool_spans_both_pools_and_the_base():
+    torch.manual_seed(0)
+    p = torch.randn(2, 2, 9).double().log_softmax(-1)
+    base = torch.randn(2, 9).double().log_softmax(-1)
+    rule = KLRegularizedPool
+    torch.testing.assert_close(
+        rule(0, 0).aggregate(p, base_logprobs=base), ArithmeticPool().aggregate(p)
+    )
+    pooled = rule(0, 1e5).aggregate(p, base_logprobs=base).exp()
+    torch.testing.assert_close(
+        pooled, GeometricPool().aggregate(p).exp(), atol=1e-3, rtol=0
+    )
+    anchored = rule(1e5, 0).aggregate(p, base_logprobs=base).exp()
+    torch.testing.assert_close(anchored, base.exp(), atol=1e-3, rtol=0)
 
 
 def test_quorum_definition_and_disagreement():

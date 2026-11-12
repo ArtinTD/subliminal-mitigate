@@ -201,6 +201,98 @@ class BaseRelativeMinimum(BaseRelativeQuorum):
         return super().from_logits(logits, temperature, base_logits=base_logits)
 
 
+class ArithmeticPool(QuorumConsensus):
+    def __init__(self):
+        pass
+
+    @property
+    def specification(self):
+        return {"rule": "arithmetic_pool", "version": 1}
+
+    def aggregate(self, teacher_logprobs, temperature=1.0, *, base_logprobs=None):
+        _validate(teacher_logprobs)
+        if base_logprobs is not None:
+            raise ValueError("Pooling does not use the base")
+        mean = teacher_logprobs.logsumexp(0) - math.log(len(teacher_logprobs))
+        return _normalize(mean, temperature)
+
+
+class GeometricPool(QuorumConsensus):
+    def __init__(self):
+        pass
+
+    @property
+    def specification(self):
+        return {"rule": "geometric_pool", "version": 1}
+
+    def aggregate(self, teacher_logprobs, temperature=1.0, *, base_logprobs=None):
+        _validate(teacher_logprobs)
+        if base_logprobs is not None:
+            raise ValueError("Pooling does not use the base")
+        return _normalize(teacher_logprobs.mean(0), temperature)
+
+
+def _log_lambert(log_z, steps=8):
+    import torch
+
+    u = torch.where(log_z < 1, log_z, log_z.clamp(min=1).log())
+    for _ in range(steps):
+        u = u - (u.exp() + u - log_z) / (u.exp() + 1)
+    return u
+
+
+class KLRegularizedPool(QuorumConsensus):
+    """Per-token minimizer of CE(data) + lambda_base KL(pi || base) + lambda_references sum KL(pi || teacher).
+
+    The pooled data is the teachers' equal mixture.
+    """
+
+    requires_base = True
+
+    def __init__(self, lambda_base, lambda_references):
+        if min(lambda_base, lambda_references) < 0:
+            raise ValueError("KL weights must be nonnegative")
+        self.lambda_base, self.lambda_references = lambda_base, lambda_references
+
+    @property
+    def specification(self):
+        return {
+            "rule": "kl_regularized",
+            "lambda_base": self.lambda_base,
+            "lambda_references": self.lambda_references,
+            "version": 1,
+        }
+
+    def aggregate(self, teacher_logprobs, temperature=1.0, *, base_logprobs=None):
+        import torch
+
+        _validate(teacher_logprobs, base_logprobs)
+        references = teacher_logprobs.double()
+        data = references.logsumexp(0) - math.log(len(references))
+        weight = self.lambda_base + self.lambda_references * len(references)
+        if weight == 0:
+            return _normalize(data.to(teacher_logprobs.dtype), temperature)
+        anchor = (
+            self.lambda_base * base_logprobs.double()
+            + self.lambda_references * references.sum(0)
+        ) / weight
+        offset = data - math.log(weight)
+
+        def solve(shift):
+            return offset - _log_lambert(offset - anchor - shift)
+
+        high = -anchor.logsumexp(-1, keepdim=True)
+        low = high - 64
+        while (solve(low).logsumexp(-1) > 0).any():
+            low = low - 64
+        for _ in range(40):
+            middle = (low + high) / 2
+            above = solve(middle).logsumexp(-1, keepdim=True) > 0
+            high = torch.where(above, middle, high)
+            low = torch.where(above, low, middle)
+        return _normalize(solve(high).to(teacher_logprobs.dtype), temperature)
+
+
 def consensus_rule(spec):
     spec = dict(spec)
     name = spec.pop("rule", "minimum")
@@ -209,6 +301,9 @@ def consensus_rule(spec):
         "base_relative_minimum": BaseRelativeMinimum,
         "quorum": QuorumConsensus,
         "base_relative_quorum": BaseRelativeQuorum,
+        "arithmetic_pool": ArithmeticPool,
+        "geometric_pool": GeometricPool,
+        "kl_regularized": KLRegularizedPool,
     }
     if name not in classes:
         raise ValueError(f"Unknown consensus rule: {name}")

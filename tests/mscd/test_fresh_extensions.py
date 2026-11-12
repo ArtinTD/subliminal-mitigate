@@ -206,7 +206,7 @@ def test_fresh_pipeline_build_train_regenerate_resume_score(name, tmp_path, monk
                       retained_count=16 if name == "quorum" else 4)
         for student in c["students"]
     }
-    assert len(report["evaluations"]) == (11 if name == "quorum" else 12)
+    assert len(report["evaluations"]) == (13 if name == "quorum" else 14)
     for key, metric in report["evaluations"].items():
         if key.startswith("whole-"):
             assert metric["abstentions"] == metric["requests"] == 4

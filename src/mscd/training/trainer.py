@@ -45,6 +45,11 @@ class Trainer:
             from mscd.training._sft_engine import format_example
 
             limit = config["training"]["max_seq_length"]
+        regularization = config.get("regularization")
+        for i, path in enumerate(
+            regularization["references"] if regularization else []
+        ):
+            model.load_adapter(path, adapter_name=f"reference_{i}", is_trainable=False)
             lengths = [
                 len(
                     tokenizer(format_example(row, tokenizer), add_special_tokens=True)[
@@ -58,7 +63,15 @@ class Trainer:
                     "Training would truncate a response; no filtering permitted"
                 )
         # Save-only-model legacy checkpoints cannot safely resume optimizer state.
-        sft_train(model, tokenizer, data, config["training"], str(output), effects=None)
+        sft_train(
+            model,
+            tokenizer,
+            data,
+            config["training"],
+            str(output),
+            effects=None,
+            regularization=regularization,
+        )
         artifact = ModelArtifact(
             str(output.resolve()), base_model, base_model, role, tree_identity(output)
         )

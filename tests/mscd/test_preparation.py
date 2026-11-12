@@ -211,7 +211,7 @@ def test_fresh_workflow_build_training_generation_and_scores(name,tmp_path,monke
                 if isinstance(self,generators.WholeOutputConsensusGenerator) or (isinstance(self,MedicalGenerator) and self.spec['kind']=='whole'):
                     value.update(response='',abstained=True,stop_reason='abstain')
             yield generators.record(r,self.identity,value)
-    for cls in (generators.MergedLoRAGenerator,generators.WholeOutputConsensusGenerator,SubliminalGenerator,MedicalGenerator):
+    for cls in (generators.MergedLoRAGenerator,generators.WholeOutputConsensusGenerator,generators.ConsensusDecoder,SubliminalGenerator,MedicalGenerator):
         monkeypatch.setattr(cls,'generate',generate)
     class Transport:
         def __init__(self,cap):assert cap>0
@@ -230,7 +230,7 @@ def test_fresh_workflow_build_training_generation_and_scores(name,tmp_path,monke
     report=read_json(e.root/'report/report.json')
     assert report['dataset_seed']==1000
     if name=='subliminal':
-        assert len(report['evaluations'])==24
+        assert len(report['evaluations'])==30
         assert set(report['positive_excess_cost'])==set(c['methods'])
         assert len(trained['student'][0])==4
         assert any(r['response']=='' for r in trained['student'][0])

@@ -63,6 +63,18 @@ methods:
     consensus: {rule: minimum}
     devices: *panel_devices
     suites: [reference_markers]
+  arithmetic:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: arithmetic_pool}
+    devices: *panel_devices
+    suites: [reference_markers]
+  geometric:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: geometric_pool}
+    devices: *panel_devices
+    suites: [reference_markers]
   quorum:
     kind: consensus
     teachers: *panel

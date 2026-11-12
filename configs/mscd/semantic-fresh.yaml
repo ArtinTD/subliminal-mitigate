@@ -53,6 +53,18 @@ methods:
     consensus: {rule: minimum}
     suites: [markers]
     devices: [cuda:0, cuda:1]
+  arithmetic:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: arithmetic_pool}
+    suites: [markers]
+    devices: [cuda:0, cuda:1]
+  geometric:
+    kind: consensus
+    teachers: *panel
+    consensus: {rule: geometric_pool}
+    suites: [markers]
+    devices: [cuda:0, cuda:1]
   smoothed_minimum:
     kind: consensus
     teachers: *panel

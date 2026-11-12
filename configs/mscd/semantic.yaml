@@ -99,6 +99,30 @@ methods:
     devices:
     - cuda:0
     - cuda:1
+  arithmetic:
+    kind: consensus
+    teachers:
+    - archived_eagle
+    - archived_topaz
+    consensus:
+      rule: arithmetic_pool
+    suites:
+    - markers
+    devices:
+    - cuda:0
+    - cuda:1
+  geometric:
+    kind: consensus
+    teachers:
+    - archived_eagle
+    - archived_topaz
+    consensus:
+      rule: geometric_pool
+    suites:
+    - markers
+    devices:
+    - cuda:0
+    - cuda:1
   smoothed_minimum:
     kind: consensus
     teachers:

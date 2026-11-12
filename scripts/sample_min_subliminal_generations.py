@@ -55,6 +55,37 @@ JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
 BENEFIT_MAX_TOKENS_DEFAULT = 256
 
 
+KL_RE = re.compile(r"^pi_kl_base([0-9.e+-]+)_ref([0-9.e+-]+)$")
+
+
+def kl_regularized_log_probs(lpA, lpB, lp0, lambda_base, lambda_ref):
+    """Per-token minimizer of CE((pi_A+pi_B)/2, pi) + lambda_base KL(pi||pi_0)
+    + lambda_ref [KL(pi||pi_A) + KL(pi||pi_B)]. Arithmetic pool at lambda=0,
+    geometric pool as lambda_ref grows, pi_0 as lambda_base grows."""
+    import torch
+    lpA, lpB, lp0 = lpA.double(), lpB.double(), lp0.double()
+    data = torch.logaddexp(lpA, lpB) - math.log(2)
+    weight = lambda_base + 2 * lambda_ref
+    if weight == 0:
+        return data.float()
+    anchor = (lambda_base * lp0 + lambda_ref * (lpA + lpB)) / weight
+    offset = data - math.log(weight)
+    shift = -anchor.logsumexp(-1, keepdim=True)
+    u = None
+    for _ in range(100):
+        L = offset - anchor - shift
+        if u is None:
+            u = torch.where(L < 1, L, L.clamp(min=1).log())
+        for _ in range(8):
+            u = u - (u.exp() + u - L) / (u.exp() + 1)
+        lp = offset - u
+        mass = lp.logsumexp(-1, keepdim=True)
+        if mass.abs().max() < 1e-10:
+            break
+        shift = shift - mass / ((lp - mass).exp() / (1 + u.exp())).sum(-1, keepdim=True)
+    return (lp - mass).float()
+
+
 def has_joke_suffix(text):
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return bool(lines and JOKE_LINE_RE.match(lines[-1]))
@@ -491,7 +522,8 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
     attn = torch.ones_like(cur_input)
     past_A = past_B = past_0 = None
     history_logps = None
-    needs_base = composition_type == "pi_min_delta_base"
+    kl = KL_RE.match(composition_type)
+    needs_base = composition_type == "pi_min_delta_base" or kl is not None
     eos = int(tok.eos_token_id)
     active = torch.ones(n, dtype=torch.bool, device=dev)
     out_rows = [[] for _ in range(n)]
@@ -532,6 +564,8 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
                                     torch.where(both_down, torch.maximum(log_r_A, log_r_B),
                                                 torch.zeros_like(log_r_A)))
                 lp = lp0 + log_g
+            elif kl:
+                lp = kl_regularized_log_probs(lpA, lpB, lp0, float(kl.group(1)), float(kl.group(2)))
             else:
                 raise ValueError(composition_type)
 
@@ -763,7 +797,10 @@ def main():
     p.add_argument("--output_file", required=True)
     p.add_argument("--composition_types", default="pi_min",
                    help="CSV of composition methods: pi_min, pi_min_look_back, "
-                        "pi_min_delta_base, pi_whole_output_consensus")
+                        "pi_min_delta_base, pi_whole_output_consensus, "
+                        "pi_kl_base<lambda>_ref<lambda>")
+    p.add_argument("--kl_lambdas", default="",
+                   help="CSV of lambdas; adds pi_kl_base<b>_ref<r> for every pair")
     p.add_argument("--exclude", default="",
                    help="CSV of top-level keys to skip in this run (both Phase 1 "
                         "adapters and Phase 2 compositions). Use to split work "
@@ -782,6 +819,8 @@ def main():
     args = p.parse_args()
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
+    kl_lambdas = [float(x) for x in args.kl_lambdas.split(",") if x.strip()]
+    composition_types += [f"pi_kl_base{b:g}_ref{r:g}" for b in kl_lambdas for r in kl_lambdas]
     exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
     composition_types = [c for c in composition_types if c not in exclude]
 

@@ -1,6 +1,5 @@
 """Sweep the base and reference KL weights by decoding or training, then plot benefit and cost."""
 import argparse
-import copy
 import math
 import multiprocessing
 from dataclasses import asdict
@@ -18,26 +17,88 @@ def adapter(path, role):
     return ModelArtifact(str(path), base, base, role, tree_identity(path))
 
 
-def evaluate(generator, args, out):
+def sample(generator, requests, max_new_tokens, out):
     from mscd.decoding.generators import generate_cached
-    from mscd.evaluation.scoring import MarkerEvaluator
 
-    prompts = yaml.safe_load((CONFIGS / "first_line_joke.yaml").read_text())
-    n = args.responses_per_prompt
-    requests = [
-        Request(f"eval:{i}:{j}", p, i * n + j)
-        for i, p in enumerate(prompts["eval"]["prompts"])
-        for j in range(n)
-    ]
     records = generate_cached(
         generator,
         requests,
-        GenerationConfig(max_new_tokens=512, temperature=1.0),
+        GenerationConfig(max_new_tokens=max_new_tokens, temperature=1.0),
         out / "requests",
         "kl-sweep",
     )
     atomic_json(out / "records.json", [asdict(r) for r in records])
-    atomic_json(out / "metrics.json", MarkerEvaluator(args.prefixes).evaluate(records))
+    return records
+
+
+def evaluate(generator, args, out):
+    from mscd.evaluation.scoring import MarkerEvaluator, SubliminalEvaluator
+
+    n = args.responses_per_prompt
+    if args.setting == "explicit":
+        prompts = yaml.safe_load((CONFIGS / "first_line_joke.yaml").read_text())
+        requests = [
+            Request(f"markers:{i}:{j}", p, i * n + j)
+            for i, p in enumerate(prompts["eval"]["prompts"])
+            for j in range(n)
+        ]
+        records = sample(generator, requests, 512, out / "markers")
+        atomic_json(
+            out / "metrics.json", MarkerEvaluator(args.prefixes).evaluate(records)
+        )
+        return
+    c = yaml.safe_load((CONFIGS / "subliminal.yaml").read_text())
+    suites = {}
+    for name, suite in c["suites"].items():
+        rows = read_json(CONFIGS / c["input_files"][suite["input"]]["path"])
+        requests = [
+            Request(f"{name}:{i}:{j}", row["prompt"], row["seeds"][j])
+            for i, row in enumerate(rows)
+            for j in range(n)
+        ]
+        records = sample(
+            generator, requests, suite["generation"]["max_new_tokens"], out / name
+        )
+        suites[name] = SubliminalEvaluator().evaluate(records, suite["targets"])
+    targets = [s["cost_target"] for s in c["suites"].values() if s.get("cost_target")]
+    atomic_json(out / "metrics.json", dict(suites=suites, cost_targets=targets))
+
+
+def summary(metrics, base):
+    def variance(p, n):
+        return p * (1 - p) / n
+
+    if "suites" in metrics:
+        joke = metrics["suites"]["joke"]
+        benefit = joke["rates"]["joke"]
+        pairs = [
+            (metrics["suites"][t], base["suites"][t], t)
+            for t in metrics["cost_targets"]
+        ]
+        cost = sum(m["rates"][t] - z["rates"][t] for m, z, t in pairs)
+        spread = sum(
+            variance(m["rates"][t], m["completed"])
+            + variance(z["rates"][t], z["completed"])
+            for m, z, t in pairs
+        )
+        return dict(
+            benefit=(benefit, math.sqrt(variance(benefit, joke["completed"]))),
+            cost=(cost, math.sqrt(spread)),
+        )
+    benefit, cost, zero = (
+        metrics["rates"]["benefit"],
+        metrics["rates"]["cost"],
+        base["rates"]["cost"],
+    )
+    return dict(
+        benefit=(benefit, math.sqrt(variance(benefit, metrics["requests"]))),
+        cost=(
+            cost - zero,
+            math.sqrt(
+                variance(cost, metrics["requests"]) + variance(zero, base["requests"])
+            ),
+        ),
+    )
 
 
 def decode_cell(args, lambda_base, lambda_references, out):
@@ -77,6 +138,13 @@ def evaluate_student(args, lambda_base, lambda_references, out):
     evaluate(ModelGenerator(model), args, out)
 
 
+def evaluate_base(args, out):
+    from mscd.decoding.generators import ModelGenerator
+
+    base = adapter(args.ref_A, "A").base_model
+    evaluate(ModelGenerator(ModelArtifact(None, base, base, "base", base)), args, out)
+
+
 def isolated(function, *arguments):
     process = multiprocessing.get_context("spawn").Process(
         target=function, args=arguments
@@ -90,6 +158,8 @@ def isolated(function, *arguments):
 
 
 def sweep(args):
+    if not (Path(args.output_dir) / "base" / "metrics.json").exists():
+        isolated(evaluate_base, args, Path(args.output_dir) / "base")
     for lambda_base in args.lambda_base:
         for lambda_references in args.lambda_references:
             out = (
@@ -123,26 +193,32 @@ def plot(args):
             continue
         bases = sorted({b for b, _ in cells})
         references = sorted({r for _, r in cells})
+        base = read_json(Path(args.output_dir) / "base" / "metrics.json")
         figure, axes = plt.subplots(1, 2, figsize=(10, 4.5))
         for axis, key in zip(axes, ("benefit", "cost")):
             grid = [[math.nan] * len(references) for _ in bases]
             for (b, r), metrics in cells.items():
-                p, n = metrics["rates"][key], metrics["requests"]
+                p, error = summary(metrics, base)[key]
                 grid[bases.index(b)][references.index(r)] = p
                 axis.text(
                     references.index(r),
                     bases.index(b),
-                    f"{p:.2f}\n±{math.sqrt(p * (1 - p) / n):.2f}",
+                    f"{p:.2f}\n±{error:.2f}",
                     ha="center",
                     va="center",
                     fontsize=7,
                 )
-            image = axis.imshow(grid, origin="lower", vmin=0, vmax=1, cmap="viridis")
+            if key == "benefit":
+                limits = dict(vmin=0, vmax=1, cmap="viridis")
+            else:
+                top = max([abs(v) for row in grid for v in row if v == v] + [1e-9])
+                limits = dict(vmin=-top, vmax=top, cmap="coolwarm")
+            image = axis.imshow(grid, origin="lower", **limits)
             axis.set_xticks(range(len(references)), [f"{r:g}" for r in references])
             axis.set_yticks(range(len(bases)), [f"{b:g}" for b in bases])
             axis.set_xlabel("λ references (KL to π_A, π_B)")
             axis.set_ylabel("λ base (KL to π_0)")
-            axis.set_title(f"{mode}: {key}")
+            axis.set_title(f"{mode}: {key}" + (" minus base" if key == "cost" else ""))
             figure.colorbar(image, ax=axis)
         figure.tight_layout()
         figure.savefig(Path(args.output_dir) / f"{mode}_heatmap.png", dpi=200)
@@ -152,6 +228,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["decode", "train", "plot"])
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument(
+        "--setting", choices=["explicit", "subliminal"], default="explicit"
+    )
     parser.add_argument("--ref_A")
     parser.add_argument("--ref_B")
     parser.add_argument("--data", help="Pooled prompt/response dataset for train")

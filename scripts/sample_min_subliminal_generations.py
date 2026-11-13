@@ -564,6 +564,10 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
                                     torch.where(both_down, torch.maximum(log_r_A, log_r_B),
                                                 torch.zeros_like(log_r_A)))
                 lp = lp0 + log_g
+            elif composition_type == "pi_arithmetic_pool":
+                lp = torch.logaddexp(lpA, lpB) - math.log(2)
+            elif composition_type == "pi_geometric_pool":
+                lp = (lpA + lpB) / 2
             elif kl:
                 lp = kl_regularized_log_probs(lpA, lpB, lp0, float(kl.group(1)), float(kl.group(2)))
             else:
@@ -798,7 +802,7 @@ def main():
     p.add_argument("--composition_types", default="pi_min",
                    help="CSV of composition methods: pi_min, pi_min_look_back, "
                         "pi_min_delta_base, pi_whole_output_consensus, "
-                        "pi_kl_base<lambda>_ref<lambda>")
+                        "pi_arithmetic_pool, pi_geometric_pool, pi_kl_base<lambda>_ref<lambda>")
     p.add_argument("--kl_lambdas", default="",
                    help="CSV of lambdas; adds pi_kl_base<b>_ref<r> for every pair")
     p.add_argument("--exclude", default="",

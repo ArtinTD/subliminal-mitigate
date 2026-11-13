@@ -42,3 +42,13 @@ preemption and never overwrite completed output.  Store everything under the
 new experiment root `semantic_smoothing_matched_ablation_v1`; all historical,
 pilot, scaling, and paper artifacts remain immutable until the new result has
 passed an independent audit.
+
+If scrub retention has also removed the old pilot paths, recover the archived
+proof and adapter files under `semantic_smoothing_matched_ablation_v1` rather
+than repopulating the expired tree.  The proof must have SHA-256
+`0ac493592a0ea42cc16fd0e067fa9a63b0a5d4dd424d09fa2076373e41220ec2`;
+the recovered Eagle and Topaz weights must respectively have SHA-256
+`00709368d23e38eb40f812d09478f0c29b4dbb50fb3c673503634ec2baca855a`
+and `c80a5efd328dded7f43dbee33865b2a2541456a6506ca97442addc97f7be3456`.
+Record both the archived paths and recovered paths, and use the recovered
+paths only after these identities pass.

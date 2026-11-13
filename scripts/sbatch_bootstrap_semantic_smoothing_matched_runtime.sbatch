@@ -24,7 +24,7 @@ fi
 "$PREFIX/bin/python" -m pip install \
     --requirement "$SEMANTIC_REPO/requirements/semantic_smoothing_matched_runtime.txt"
 
-export HF_HOME=/gscratch/scrubbed/adhyyan/.cache/huggingface
+export HF_HOME="$ABLATION_ROOT/runtime/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export SENTENCE_TRANSFORMERS_HOME="$ABLATION_ROOT/runtime/encoder_cache"
 export HF_HUB_DISABLE_XET=1

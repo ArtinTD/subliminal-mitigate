@@ -23,10 +23,48 @@ SBATCH = pilot.REPO / "scripts/sbatch_semantic_smoothing_matched_ablation.sbatch
 RUNTIME_SCRIPT = pilot.REPO / "scripts/semantic_smoothing_matched_runtime.py"
 RUNTIME_REQUIREMENTS = pilot.REPO / "requirements/semantic_smoothing_matched_runtime.txt"
 RUNTIME_BOOTSTRAP = pilot.REPO / "scripts/sbatch_bootstrap_semantic_smoothing_matched_runtime.sbatch"
+REFERENCE_PROOF_SHA256 = "0ac493592a0ea42cc16fd0e067fa9a63b0a5d4dd424d09fa2076373e41220ec2"
+REFERENCE_WEIGHT_SHA256 = {
+    "eagle_joke": "00709368d23e38eb40f812d09478f0c29b4dbb50fb3c673503634ec2baca855a",
+    "topaz_humor": "c80a5efd328dded7f43dbee33865b2a2541456a6506ca97442addc97f7be3456",
+}
 
 
 def historical_sampler_sha256():
     return hashlib.sha256(pilot.historical_source().encode()).hexdigest()
+
+
+def validate_recovered_references(proof_path, reference_root):
+    proof_path = Path(proof_path)
+    reference_root = Path(reference_root)
+    if pilot.file_sha(proof_path) != REFERENCE_PROOF_SHA256:
+        raise ValueError("Recovered reference proof differs from immutable archive")
+    proof = pilot.read_json(proof_path)
+    if (proof.get("status") != "validated_fresh_replication"
+            or proof.get("reference_set_label") != "fresh_eagle_retained_topaz_replication_v1"
+            or proof.get("historical_identity_verified") is not False
+            or set(proof.get("references", {})) != set(pilot.REFERENCES)):
+        raise ValueError("Wrong archived reference proof")
+    inputs = {str(proof_path.resolve()): REFERENCE_PROOF_SHA256}
+    references = {}
+    for name in pilot.REFERENCES:
+        archived = proof["references"][name]
+        expected = REFERENCE_WEIGHT_SHA256[name]
+        if archived.get("weight_sha256") != expected:
+            raise ValueError(f"Archived proof weight changed: {name}")
+        adapter = reference_root / name
+        weight = adapter / "adapter_model.safetensors"
+        if pilot.file_sha(weight) != expected:
+            raise ValueError(f"Recovered reference adapter mismatch: {name}")
+        for filename in ("adapter_model.safetensors", "adapter_config.json", "eval_meta.json"):
+            target = adapter / filename
+            inputs[str(target.resolve())] = pilot.file_sha(target)
+        references[name] = {
+            "adapter_path": str(adapter.resolve()),
+            "archived_adapter_path": archived["adapter_path"],
+            "weight_sha256": expected,
+        }
+    return proof, inputs, references
 
 
 def decoder_arguments(method, identity, output, model_specs, prompts,
@@ -73,8 +111,8 @@ def decoder_arguments(method, identity, output, model_specs, prompts,
 
 
 def build_identity(method, stage, devices, prompts, training_config, composed_config,
-                   proof_path):
-    proof, inputs = pilot.validate_reference_proof(proof_path)
+                   proof_path, reference_root):
+    proof, inputs, refs = validate_recovered_references(proof_path, reference_root)
     prompt_rows = pilot.read_json(prompts)
     prompt_count, samples_per_prompt = STAGES[stage]
     if len(prompt_rows) != prompt_count or len(set(prompt_rows)) != prompt_count:
@@ -83,13 +121,6 @@ def build_identity(method, stage, devices, prompts, training_config, composed_co
     inputs.update({str(path.resolve()): pilot.file_sha(path) for path in
                    (Path(prompts), Path(training_config), Path(composed_config),
                     ADDENDUM, SCRIPT, SBATCH)})
-    refs = {
-        name: {
-            "adapter_path": proof["references"][name]["adapter_path"],
-            "weight_sha256": proof["references"][name]["weight_sha256"],
-        }
-        for name in pilot.REFERENCES
-    }
     runtime = pilot.snapshot_inputs()
     runtime["matched_package_versions"] = matched_runtime.validate_package_versions()
     return {
@@ -150,7 +181,7 @@ def audit_method(folder, identity):
 def evaluate_method(args, method):
     identity = build_identity(method, args.stage, args.devices, args.prompts,
                               args.training_config, args.composed_config,
-                              args.reference_proof)
+                              args.reference_proof, args.reference_root)
     identity["torch_version"] = validate_hardware(args.devices)
     output = Path(args.output) / args.stage / method
     output.mkdir(parents=True, exist_ok=True)
@@ -331,10 +362,11 @@ def preflight(args):
         text=True).splitlines()
     if any("semantic" in row.casefold() for row in queue):
         raise ValueError("Another semantic job is active")
-    prompts = pilot_root / "manifests" / (
+    recovered = root / "recovered_inputs"
+    prompts = recovered / (
         "smoke_prompts.json" if args.stage == "smoke" else "evaluation_prompts.json")
-    proof = pilot_root / "provenance/reference_proof.json"
-    pilot.validate_reference_proof(proof)
+    proof = recovered / "reference_proof.json"
+    validate_recovered_references(proof, recovered / "references")
     prompt_rows = pilot.read_json(prompts)
     expected = STAGES[args.stage][0]
     if len(prompt_rows) != expected or len(set(prompt_rows)) != expected:
@@ -371,7 +403,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     evaluate_parser = sub.add_parser("evaluate")
     for name in ("stage", "reference_proof", "prompts", "output",
-                 "training_config", "composed_config"):
+                 "reference_root", "training_config", "composed_config"):
         evaluate_parser.add_argument("--" + name, required=True)
     evaluate_parser.add_argument("--devices", default="cuda:0")
     report_parser = sub.add_parser("report")

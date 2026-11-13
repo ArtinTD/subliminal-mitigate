@@ -26,9 +26,9 @@ cd "$SEMANTIC_REPO"
 export PATH="$CONDA_ENV_PREFIX/bin:$PATH"
 export PYTHONPATH="$SEMANTIC_REPO/scripts:$SEMANTIC_REPO"
 export LD_LIBRARY_PATH="$CONDA_ENV_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export HF_HOME=/gscratch/scrubbed/adhyyan/.cache/huggingface
+export HF_HOME="$ABLATION_ROOT/runtime/huggingface"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
-export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-$PILOT_ROOT/runtime/encoder_cache}"
+export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-$ABLATION_ROOT/runtime/encoder_cache}"
 export TRANSFORMERS_CACHE="$HF_HUB_CACHE"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=offline PYTHONUNBUFFERED=1
 export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1
@@ -48,14 +48,15 @@ date -u
 git rev-parse HEAD
 nvidia-smi
 if [[ "$ABLATION_STAGE" == "smoke" ]]; then
-    PROMPTS="$PILOT_ROOT/manifests/smoke_prompts.json"
+    PROMPTS="$ABLATION_ROOT/recovered_inputs/smoke_prompts.json"
 else
-    PROMPTS="$PILOT_ROOT/manifests/evaluation_prompts.json"
+    PROMPTS="$ABLATION_ROOT/recovered_inputs/evaluation_prompts.json"
 fi
 
 "$PYTHON" scripts/semantic_smoothing_matched_ablation.py evaluate \
     --stage "$ABLATION_STAGE" \
-    --reference_proof "$PILOT_ROOT/provenance/reference_proof.json" \
+    --reference_proof "$ABLATION_ROOT/recovered_inputs/reference_proof.json" \
+    --reference_root "$ABLATION_ROOT/recovered_inputs/references" \
     --prompts "$PROMPTS" \
     --training_config "$SEMANTIC_REPO/configs/training.yaml" \
     --composed_config "$SEMANTIC_REPO/configs/composed/eagle_joke_topaz_humor.yaml" \

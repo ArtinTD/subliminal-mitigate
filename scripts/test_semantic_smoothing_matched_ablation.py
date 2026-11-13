@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 import tempfile
+import json
 
 import semantic_smoothing_matched_ablation as ablation
 
@@ -73,6 +74,40 @@ class MatchedAblationTests(unittest.TestCase):
                 audited_rows, audited_metrics = ablation.audit_method(folder, identity)
         self.assertEqual(audited_rows, rows)
         self.assertEqual(audited_metrics, metrics)
+
+    def test_recovered_reference_validation_pins_proof_and_weights(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            references = root / "references"
+            for name in ablation.pilot.REFERENCES:
+                folder = references / name
+                folder.mkdir(parents=True)
+                for filename in ("adapter_model.safetensors", "adapter_config.json",
+                                 "eval_meta.json"):
+                    (folder / filename).write_text(name + filename)
+            weights = {name: ablation.pilot.file_sha(
+                references / name / "adapter_model.safetensors")
+                for name in ablation.pilot.REFERENCES}
+            proof = {
+                "status": "validated_fresh_replication",
+                "reference_set_label": "fresh_eagle_retained_topaz_replication_v1",
+                "historical_identity_verified": False,
+                "references": {
+                    name: {"adapter_path": f"/archived/{name}",
+                           "weight_sha256": weights[name]}
+                    for name in ablation.pilot.REFERENCES
+                },
+            }
+            proof_path = root / "proof.json"
+            proof_path.write_text(json.dumps(proof))
+            proof_sha = ablation.pilot.file_sha(proof_path)
+            with mock.patch.object(ablation, "REFERENCE_PROOF_SHA256", proof_sha), \
+                    mock.patch.object(ablation, "REFERENCE_WEIGHT_SHA256", weights):
+                saved, inputs, resolved = ablation.validate_recovered_references(
+                    proof_path, references)
+            self.assertEqual(saved, proof)
+            self.assertEqual(set(resolved), set(ablation.pilot.REFERENCES))
+            self.assertIn(str(proof_path.resolve()), inputs)
 
 
 if __name__ == "__main__":

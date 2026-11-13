@@ -56,8 +56,9 @@ paths only after these identities pass.
 The mechanically reconstructed environment and exact model snapshots live in
 a directory ending in `semantic_smoothing_matched_runtime_v1`.  Build and
 audit them first on node-local storage, then transfer the complete tree into
-the isolated ablation root with fresh mtimes and repeat the audit at its final
-paths.  This prevents Hyak scrub retention from deleting files that inherit
-expired package/archive mtimes during reconstruction.  This staging procedure
-does not change any package version, model revision, checkpoint, prompt, or
-decoder setting.
+project storage with fresh mtimes and repeat the audit at its final paths.
+This avoids both home-directory quota and Hyak scrub retention for files that
+inherit expired package/archive mtimes during reconstruction.  Experiment
+outputs and provenance remain in the isolated ablation root.  This staging
+procedure does not change any package version, model revision, checkpoint,
+prompt, or decoder setting.

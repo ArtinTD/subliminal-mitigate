@@ -13,8 +13,15 @@ set -euo pipefail
 : "${SEMANTIC_REPO:?Semantic checkout required}"
 [[ "$ABLATION_ROOT" == */semantic_smoothing_matched_ablation_v1 ]] || exit 1
 
-source /etc/profile.d/modules.sh
-module load foster/python/miniconda/3.8
+CONDA_BASE="${CONDA_BASE:-/sw/contrib/foster-src/python/miniconda/3.8}"
+if command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
+elif [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+else
+    echo "Could not find conda." >&2
+    exit 1
+fi
 RUNTIME="$ABLATION_ROOT/runtime/matched-v1"
 PREFIX="$RUNTIME/python"
 mkdir -p "$RUNTIME" "$ABLATION_ROOT/logs"

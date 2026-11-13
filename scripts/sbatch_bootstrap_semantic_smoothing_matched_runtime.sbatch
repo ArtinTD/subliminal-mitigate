@@ -11,7 +11,7 @@
 set -euo pipefail
 : "${ABLATION_ROOT:?Isolated matched-ablation root required}"
 : "${SEMANTIC_REPO:?Semantic checkout required}"
-: "${MATCHED_RUNTIME_ROOT:?Persistent matched-runtime root required}"
+: "${MATCHED_RUNTIME_ROOT:?Final matched-runtime root required}"
 [[ "$ABLATION_ROOT" == */semantic_smoothing_matched_ablation_v1 ]] || exit 1
 [[ "$MATCHED_RUNTIME_ROOT" == */semantic_smoothing_matched_runtime_v1 ]] || exit 1
 
@@ -24,20 +24,33 @@ else
     echo "Could not find conda." >&2
     exit 1
 fi
-RUNTIME="$MATCHED_RUNTIME_ROOT"
-PREFIX="$RUNTIME/python"
-mkdir -p "$RUNTIME" "$ABLATION_ROOT/logs"
-if [[ ! -x "$PREFIX/bin/python" ]]; then
-    conda create --yes --prefix "$PREFIX" python=3.11.16 pip
-fi
+BUILD_ROOT="/tmp/semantic-smoothing-matched-runtime-${SLURM_JOB_ID}"
+PREFIX="$BUILD_ROOT/python"
+BUILD_AUDIT="/tmp/semantic-smoothing-matched-runtime-${SLURM_JOB_ID}-audit.json"
+test ! -e "$BUILD_ROOT"
+test ! -e "$MATCHED_RUNTIME_ROOT"
+mkdir -p "$BUILD_ROOT" "$ABLATION_ROOT/logs"
+trap 'rm -rf "$BUILD_ROOT" "$BUILD_AUDIT"' EXIT
+conda create --yes --prefix "$PREFIX" python=3.11.16 pip
 "$PREFIX/bin/python" -m pip install \
     --requirement "$SEMANTIC_REPO/requirements/semantic_smoothing_matched_runtime.txt"
 
-export HF_HOME="$RUNTIME/huggingface"
+export HF_HOME="$BUILD_ROOT/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
-export SENTENCE_TRANSFORMERS_HOME="$RUNTIME/encoder_cache"
+export SENTENCE_TRANSFORMERS_HOME="$BUILD_ROOT/encoder_cache"
 export HF_HUB_DISABLE_XET=1
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$SEMANTIC_REPO/scripts:$SEMANTIC_REPO"
 "$PREFIX/bin/python" "$SEMANTIC_REPO/scripts/semantic_smoothing_matched_runtime.py" \
-    --download --output "$RUNTIME/runtime_recovery_audit.json"
+    --download --output "$BUILD_AUDIT"
+
+mkdir -p "$MATCHED_RUNTIME_ROOT"
+tar --create --file=- --directory="$BUILD_ROOT" . | \
+    tar --extract --touch --file=- --directory="$MATCHED_RUNTIME_ROOT"
+
+FINAL_PREFIX="$MATCHED_RUNTIME_ROOT/python"
+export HF_HOME="$MATCHED_RUNTIME_ROOT/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export SENTENCE_TRANSFORMERS_HOME="$MATCHED_RUNTIME_ROOT/encoder_cache"
+"$FINAL_PREFIX/bin/python" "$SEMANTIC_REPO/scripts/semantic_smoothing_matched_runtime.py" \
+    --output "$MATCHED_RUNTIME_ROOT/runtime_recovery_audit.json"

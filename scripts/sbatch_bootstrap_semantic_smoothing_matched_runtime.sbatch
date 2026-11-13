@@ -11,7 +11,9 @@
 set -euo pipefail
 : "${ABLATION_ROOT:?Isolated matched-ablation root required}"
 : "${SEMANTIC_REPO:?Semantic checkout required}"
+: "${MATCHED_RUNTIME_ROOT:?Persistent matched-runtime root required}"
 [[ "$ABLATION_ROOT" == */semantic_smoothing_matched_ablation_v1 ]] || exit 1
+[[ "$MATCHED_RUNTIME_ROOT" == */semantic_smoothing_matched_runtime_v1 ]] || exit 1
 
 CONDA_BASE="${CONDA_BASE:-/sw/contrib/foster-src/python/miniconda/3.8}"
 if command -v conda >/dev/null 2>&1; then
@@ -22,7 +24,7 @@ else
     echo "Could not find conda." >&2
     exit 1
 fi
-RUNTIME="$ABLATION_ROOT/runtime/matched-v1"
+RUNTIME="$MATCHED_RUNTIME_ROOT"
 PREFIX="$RUNTIME/python"
 mkdir -p "$RUNTIME" "$ABLATION_ROOT/logs"
 if [[ ! -x "$PREFIX/bin/python" ]]; then
@@ -31,9 +33,9 @@ fi
 "$PREFIX/bin/python" -m pip install \
     --requirement "$SEMANTIC_REPO/requirements/semantic_smoothing_matched_runtime.txt"
 
-export HF_HOME="$ABLATION_ROOT/runtime/huggingface"
+export HF_HOME="$RUNTIME/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
-export SENTENCE_TRANSFORMERS_HOME="$ABLATION_ROOT/runtime/encoder_cache"
+export SENTENCE_TRANSFORMERS_HOME="$RUNTIME/encoder_cache"
 export HF_HUB_DISABLE_XET=1
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$SEMANTIC_REPO/scripts:$SEMANTIC_REPO"

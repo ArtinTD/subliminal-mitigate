@@ -15,9 +15,11 @@ set -euo pipefail
 : "${ABLATION_ROOT:?Isolated matched-ablation root required}"
 : "${SEMANTIC_REPO:?Isolated semantic checkout required}"
 : "${CONDA_ENV_PREFIX:?Validated isolated runtime required}"
+: "${MATCHED_RUNTIME_ROOT:?Persistent matched-runtime root required}"
 : "${ABLATION_STAGE:?smoke or full required}"
 [[ "$PILOT_ROOT" == */semantic_min_kd_pilot_v1 ]] || exit 1
 [[ "$ABLATION_ROOT" == */semantic_smoothing_matched_ablation_v1 ]] || exit 1
+[[ "$MATCHED_RUNTIME_ROOT" == */semantic_smoothing_matched_runtime_v1 ]] || exit 1
 case "$ABLATION_STAGE" in smoke|full) ;; *) echo "Wrong stage" >&2; exit 1 ;; esac
 
 PYTHON="$CONDA_ENV_PREFIX/bin/python"
@@ -26,9 +28,9 @@ cd "$SEMANTIC_REPO"
 export PATH="$CONDA_ENV_PREFIX/bin:$PATH"
 export PYTHONPATH="$SEMANTIC_REPO/scripts:$SEMANTIC_REPO"
 export LD_LIBRARY_PATH="$CONDA_ENV_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export HF_HOME="$ABLATION_ROOT/runtime/huggingface"
+export HF_HOME="$MATCHED_RUNTIME_ROOT/huggingface"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
-export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-$ABLATION_ROOT/runtime/encoder_cache}"
+export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-$MATCHED_RUNTIME_ROOT/encoder_cache}"
 export TRANSFORMERS_CACHE="$HF_HUB_CACHE"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 WANDB_MODE=offline PYTHONUNBUFFERED=1
 export PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1

@@ -52,3 +52,12 @@ the recovered Eagle and Topaz weights must respectively have SHA-256
 and `c80a5efd328dded7f43dbee33865b2a2541456a6506ca97442addc97f7be3456`.
 Record both the archived paths and recovered paths, and use the recovered
 paths only after these identities pass.
+
+The mechanically reconstructed environment and exact model snapshots may live
+under a separate persistent-home directory ending in
+`semantic_smoothing_matched_runtime_v1`.  Hyak scrub storage removes files
+whose package or archive mtimes have expired even when they were just copied;
+persistent storage prevents that retention policy from deleting the pinned
+runtime during reconstruction.  Experiment outputs and provenance remain in
+the isolated ablation root, and this location change does not change any
+package version, model revision, checkpoint, prompt, or decoder setting.

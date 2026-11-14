@@ -213,9 +213,9 @@ def disable_incompatible_optional_torchao(torch_module=None, import_utils=None,
         import torch as torch_module
     if import_utils is None:
         import transformers.utils.import_utils as import_utils
-    if peft_torchao is None:
-        import peft.tuners.lora.torchao as peft_torchao
     if not import_utils.is_torchao_available():
+        if peft_torchao is None:
+            import peft.tuners.lora.torchao as peft_torchao
         peft_torchao.is_torchao_available = lambda: False
         return False
     if hasattr(torch_module.nn.functional, "ScalingType"):
@@ -223,6 +223,10 @@ def disable_incompatible_optional_torchao(torch_module=None, import_utils=None,
     import_utils._torchao_available = False
     if import_utils.is_torchao_available():
         raise RuntimeError("Failed to disable incompatible optional torchao")
+    if peft_torchao is None:
+        # Import PEFT only after Transformers can no longer eagerly import its
+        # incompatible optional torchao quantizer through PreTrainedModel.
+        import peft.tuners.lora.torchao as peft_torchao
     # PEFT imports its availability predicate into the torchao dispatcher at
     # module import time, so changing Transformers' cached flag alone does not
     # affect that already-bound name.  The base weights are ordinary bf16

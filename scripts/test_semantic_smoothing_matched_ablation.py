@@ -49,17 +49,19 @@ class MatchedAblationTests(unittest.TestCase):
             nn=types.SimpleNamespace(functional=types.SimpleNamespace()))
         import_utils = types.SimpleNamespace(_torchao_available=True)
         import_utils.is_torchao_available = lambda: import_utils._torchao_available
+        peft_torchao = types.SimpleNamespace(is_torchao_available=lambda: True)
         self.assertTrue(ablation.disable_incompatible_optional_torchao(
-            torch_module, import_utils))
+            torch_module, import_utils, peft_torchao))
         self.assertFalse(import_utils._torchao_available)
+        self.assertFalse(peft_torchao.is_torchao_available())
         self.assertFalse(ablation.disable_incompatible_optional_torchao(
-            torch_module, import_utils))
+            torch_module, import_utils, peft_torchao))
 
         compatible = types.SimpleNamespace(nn=types.SimpleNamespace(
             functional=types.SimpleNamespace(ScalingType=object())))
         import_utils._torchao_available = True
         self.assertFalse(ablation.disable_incompatible_optional_torchao(
-            compatible, import_utils))
+            compatible, import_utils, peft_torchao))
         self.assertTrue(import_utils._torchao_available)
 
     def test_decoder_arms_differ_only_by_smoothing_arguments(self):

@@ -200,7 +200,8 @@ def bind_frozen_base_snapshot(module, identity):
     return snapshot
 
 
-def disable_incompatible_optional_torchao(torch_module=None, import_utils=None):
+def disable_incompatible_optional_torchao(torch_module=None, import_utils=None,
+                                          peft_torchao=None):
     """Prevent an unused, incompatible torchao integration from importing.
 
     The pinned runtime contains torchao as an optional package, but its build
@@ -212,13 +213,22 @@ def disable_incompatible_optional_torchao(torch_module=None, import_utils=None):
         import torch as torch_module
     if import_utils is None:
         import transformers.utils.import_utils as import_utils
+    if peft_torchao is None:
+        import peft.tuners.lora.torchao as peft_torchao
     if not import_utils.is_torchao_available():
+        peft_torchao.is_torchao_available = lambda: False
         return False
     if hasattr(torch_module.nn.functional, "ScalingType"):
         return False
     import_utils._torchao_available = False
     if import_utils.is_torchao_available():
         raise RuntimeError("Failed to disable incompatible optional torchao")
+    # PEFT imports its availability predicate into the torchao dispatcher at
+    # module import time, so changing Transformers' cached flag alone does not
+    # affect that already-bound name.  The base weights are ordinary bf16
+    # tensors, not torchao tensor subclasses; skip only this optional
+    # dispatcher so PEFT proceeds to its standard Linear implementation.
+    peft_torchao.is_torchao_available = lambda: False
     return True
 
 

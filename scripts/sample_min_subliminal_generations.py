@@ -2,8 +2,8 @@
 """Score pi_A + pi_B (and pi_base) on subliminal effects, plus composition methods.
 
 Takes explicit per-adapter paths (--model_A, --model_B) so you can run with
-only the two adapters needed for composition. No directory scan, no pi_AB
-required.
+only the two adapters needed for composition. No directory scan; pi_AB (sibling
+of --model_A) is required only for the pi_kl* compositions.
 
 Two-phase design (one GPU, two engine sessions in series):
   PHASE 1 — vLLM for single-adapter modes (pi_base, pi_A, pi_B).
@@ -55,21 +55,25 @@ JOKE_LINE_RE = re.compile(r"^Joke:\s+\S")
 BENEFIT_MAX_TOKENS_DEFAULT = 256
 
 
-KL_RE = re.compile(r"^pi_kl_base([0-9.e+-]+)_ref([0-9.e+-]+)$")
+KL_RE = re.compile(r"^pi_kl(fwd|rev)_base([0-9.e+-]+)_ref([0-9.e+-]+)$")
 
 
-def kl_regularized_log_probs(lpA, lpB, lp0, lambda_base, lambda_ref):
-    """Per-token minimizer of CE((pi_A+pi_B)/2, pi) + lambda_base KL(pi||pi_0)
-    + lambda_ref [KL(pi||pi_A) + KL(pi||pi_B)]. Arithmetic pool at lambda=0,
-    geometric pool as lambda_ref grows, pi_0 as lambda_base grows."""
+def kl_regularized_log_probs(lpAB, lpA, lpB, lp0, lambda_base, lambda_ref, order):
+    """Per-token minimizer of CE(pi_AB, pi) + lambda_base KL_0 + lambda_ref (KL_A + KL_B),
+    every KL forward (pi||q) for order='fwd' or reverse (q||pi) for order='rev'.
+    pi_AB at lambda=0, pi_0 as lambda_base grows; as lambda_ref grows, the geometric
+    pool (fwd) or the arithmetic pool (rev)."""
     import torch
-    lpA, lpB, lp0 = lpA.double(), lpB.double(), lp0.double()
-    data = torch.logaddexp(lpA, lpB) - math.log(2)
+    lpAB, lpA, lpB, lp0 = lpAB.double(), lpA.double(), lpB.double(), lp0.double()
     weight = lambda_base + 2 * lambda_ref
     if weight == 0:
-        return data.float()
+        return lpAB.float()
+    if order == "rev":
+        # Objective is -sum_v w(v) log pi(v) with w = pi_AB + lambda_base pi_0 + lambda_ref (pi_A + pi_B).
+        terms = [lpAB] + [lp + math.log(c) for lp, c in ((lp0, lambda_base), (lpA, lambda_ref), (lpB, lambda_ref)) if c > 0]
+        return (torch.stack(terms).logsumexp(0) - math.log(1 + weight)).float()
     anchor = (lambda_base * lp0 + lambda_ref * (lpA + lpB)) / weight
-    offset = data - math.log(weight)
+    offset = lpAB - math.log(weight)
     shift = -anchor.logsumexp(-1, keepdim=True)
     u = None
     for _ in range(100):
@@ -513,14 +517,14 @@ def sample_batch_whole_output_consensus(prompt, n, mA, tok, max_new, temp, dev, 
 
 
 def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_type,
-                    adapter_A, adapter_B, lookback_alpha):
+                    adapter_A, adapter_B, lookback_alpha, adapter_AB="pi_AB"):
     """Batched per-prompt HF generation for composition modes."""
     import torch
     ids = tok.apply_chat_template([{"role": "user", "content": prompt}],
                                   tokenize=True, add_generation_prompt=True, enable_thinking=False)
     cur_input = torch.tensor([ids] * n, device=dev)
     attn = torch.ones_like(cur_input)
-    past_A = past_B = past_0 = None
+    past_A = past_B = past_0 = past_AB = None
     history_logps = None
     kl = KL_RE.match(composition_type)
     needs_base = composition_type == "pi_min_delta_base" or kl is not None
@@ -544,6 +548,11 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
                     o0 = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_0, use_cache=True)
                 past_0 = o0.past_key_values
                 lp0 = torch.log_softmax(o0.logits[:, -1, :].float(), dim=-1)
+            if kl:
+                mA.set_adapter(adapter_AB)
+                oAB = mA(input_ids=cur_input, attention_mask=attn, past_key_values=past_AB, use_cache=True)
+                past_AB = oAB.past_key_values
+                lpAB = torch.log_softmax(oAB.logits[:, -1, :].float(), dim=-1)
 
             if composition_type == "pi_min":
                 lp = torch.minimum(lpA, lpB)
@@ -569,7 +578,8 @@ def sample_batch_hf(prompt, n, mA, tok, max_new, temp, dev, gen, composition_typ
             elif composition_type == "pi_geometric_pool":
                 lp = (lpA + lpB) / 2
             elif kl:
-                lp = kl_regularized_log_probs(lpA, lpB, lp0, float(kl.group(1)), float(kl.group(2)))
+                lp = kl_regularized_log_probs(lpAB, lpA, lpB, lp0, float(kl.group(2)),
+                                              float(kl.group(3)), kl.group(1))
             else:
                 raise ValueError(composition_type)
 
@@ -802,9 +812,12 @@ def main():
     p.add_argument("--composition_types", default="pi_min",
                    help="CSV of composition methods: pi_min, pi_min_look_back, "
                         "pi_min_delta_base, pi_whole_output_consensus, "
-                        "pi_arithmetic_pool, pi_geometric_pool, pi_kl_base<lambda>_ref<lambda>")
+                        "pi_arithmetic_pool, pi_geometric_pool, pi_kl<fwd|rev>_base<lambda>_ref<lambda>")
     p.add_argument("--kl_lambdas", default="",
-                   help="CSV of lambdas; adds pi_kl_base<b>_ref<r> for every pair")
+                   help="CSV of lambdas; adds pi_kl<kl_order>_base<b>_ref<r> for every pair")
+    p.add_argument("--kl_order", choices=["rev", "fwd"], default="rev",
+                   help="KL direction for --kl_lambdas: rev = KL(q||pi), arithmetic pool as "
+                        "lambda_ref grows; fwd = KL(pi||q), geometric pool")
     p.add_argument("--exclude", default="",
                    help="CSV of top-level keys to skip in this run (both Phase 1 "
                         "adapters and Phase 2 compositions). Use to split work "
@@ -824,18 +837,20 @@ def main():
 
     composition_types = [c.strip() for c in args.composition_types.split(",") if c.strip()]
     kl_lambdas = [float(x) for x in args.kl_lambdas.split(",") if x.strip()]
-    composition_types += [f"pi_kl_base{b:g}_ref{r:g}" for b in kl_lambdas for r in kl_lambdas]
+    composition_types += [f"pi_kl{args.kl_order}_base{b:g}_ref{r:g}" for b in kl_lambdas for r in kl_lambdas]
     exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
     composition_types = [c for c in composition_types if c not in exclude]
 
     adapters = {"pi_A": args.model_A, "pi_B": args.model_B}
 
-    # Auto-detect pi_AB at sibling location. Skipped if --exclude'd.
-    if "pi_AB" not in exclude:
-        pi_AB_path = os.path.join(os.path.dirname(args.model_A), "pi_AB")
-        if os.path.isfile(os.path.join(pi_AB_path, "adapter_config.json")):
-            print(f"[auto] found pi_AB at {pi_AB_path}; including in eval")
-            adapters["pi_AB"] = pi_AB_path
+    # Auto-detect pi_AB at sibling location. --exclude pi_AB only skips scoring it;
+    # the pi_kl* compositions still load it as their data term.
+    pi_AB_path = os.path.join(os.path.dirname(args.model_A), "pi_AB")
+    if os.path.isfile(os.path.join(pi_AB_path, "adapter_config.json")):
+        print(f"[auto] found pi_AB at {pi_AB_path}; including in eval")
+        adapters["pi_AB"] = pi_AB_path
+    assert "pi_AB" in adapters or not any(KL_RE.match(c) for c in composition_types), \
+        f"pi_kl* compositions need pi_AB at {pi_AB_path}"
 
     # Auto-build pi_merge_lora_cat. Skipped if --exclude'd so a parallel run
     # that only wants compositions doesn't race on the merge cache.

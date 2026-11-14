@@ -28,6 +28,7 @@ REFERENCE_WEIGHT_SHA256 = {
     "eagle_joke": "00709368d23e38eb40f812d09478f0c29b4dbb50fb3c673503634ec2baca855a",
     "topaz_humor": "c80a5efd328dded7f43dbee33865b2a2541456a6506ca97442addc97f7be3456",
 }
+BASE_MODEL = "unsloth/Qwen3-8B"
 
 
 def historical_sampler_sha256():
@@ -165,6 +166,33 @@ def validate_hardware(devices, hardware_family):
     return torch.__version__
 
 
+def bind_frozen_base_snapshot(module, identity):
+    """Resolve the historical sampler's base-model loads to audited bytes.
+
+    Hyak compute nodes do not consistently resolve Hugging Face cache aliases
+    in offline mode.  The identity already pins and hashes the exact snapshot,
+    so pass that immutable directory to both historical loader functions while
+    retaining the configured model name everywhere else.
+    """
+    snapshot = identity["runtime"]["snapshots"][BASE_MODEL]["resolved_path"]
+    original_tokenizer_loader = module.load_tokenizer
+    original_model_loader = module.load_base_model
+
+    def load_tokenizer(base_model_name):
+        if base_model_name != BASE_MODEL:
+            raise ValueError(f"Unexpected base model: {base_model_name}")
+        return original_tokenizer_loader(snapshot)
+
+    def load_base_model(base_model_name, device):
+        if base_model_name != BASE_MODEL:
+            raise ValueError(f"Unexpected base model: {base_model_name}")
+        return original_model_loader(snapshot, device)
+
+    module.load_tokenizer = load_tokenizer
+    module.load_base_model = load_base_model
+    return snapshot
+
+
 def audit_method(folder, identity):
     expected = identity["protocol"]["response_count"]
     rows, saved_identity, result = pilot.audit_generation(folder, expected, "teacher")
@@ -211,6 +239,7 @@ def evaluate_method(args, method):
     module = types.ModuleType("historical_semantic_sampler")
     module.__file__ = str(pilot.REPO / pilot.SAMPLER)
     exec(compile(source, f"{pilot.HISTORICAL_SHA}:{pilot.SAMPLER}", "exec"), module.__dict__)
+    bind_frozen_base_snapshot(module, identity)
     original = module.sample_one
 
     def checkpointed(prompt, index, *pos, **kwargs):

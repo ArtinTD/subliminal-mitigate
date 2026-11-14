@@ -63,6 +63,12 @@ outputs and provenance remain in the isolated ablation root.  This staging
 procedure does not change any package version, model revision, checkpoint,
 prompt, or decoder setting.
 
+The evaluator passes the runtime audit's resolved Qwen snapshot directory to
+the historical tokenizer and model loaders.  This bypasses node-dependent
+offline cache-alias resolution while loading the same snapshot bytes already
+hashed into each output identity; the configured model name and all scientific
+settings remain unchanged.
+
 On November 13, 2026, after the typed-L40S smoke remained queued by checkpoint
 priority despite a shortened backfill window, the user explicitly approved
 running this matched ablation on the idle A100 in their existing

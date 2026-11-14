@@ -16,10 +16,29 @@ class MatchedAblationTests(unittest.TestCase):
         return {
             "devices": "cuda:0",
             "protocol": {"samples_per_prompt": 4},
-            "runtime": {"snapshots": {"BAAI/bge-base-en-v1.5": {
-                "resolved_path": "/frozen/bge"
-            }}},
+            "runtime": {"snapshots": {
+                "BAAI/bge-base-en-v1.5": {"resolved_path": "/frozen/bge"},
+                "unsloth/Qwen3-8B": {"resolved_path": "/frozen/qwen"},
+            }},
         }
+
+    def test_historical_loaders_use_audited_snapshot_path(self):
+        calls = []
+        module = types.SimpleNamespace(
+            load_tokenizer=lambda name: calls.append(("tokenizer", name)),
+            load_base_model=lambda name, device: calls.append(
+                ("model", name, device)),
+        )
+        resolved = ablation.bind_frozen_base_snapshot(module, self.identity())
+        self.assertEqual(resolved, "/frozen/qwen")
+        module.load_tokenizer("unsloth/Qwen3-8B")
+        module.load_base_model("unsloth/Qwen3-8B", "cuda:0")
+        self.assertEqual(calls, [
+            ("tokenizer", "/frozen/qwen"),
+            ("model", "/frozen/qwen", "cuda:0"),
+        ])
+        with self.assertRaisesRegex(ValueError, "Unexpected base model"):
+            module.load_tokenizer("changed/model")
 
     def test_decoder_arms_differ_only_by_smoothing_arguments(self):
         common = (self.identity(), "/out", "/models.json", "/prompts.json",

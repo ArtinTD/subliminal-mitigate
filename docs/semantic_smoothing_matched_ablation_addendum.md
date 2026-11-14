@@ -69,6 +69,12 @@ offline cache-alias resolution while loading the same snapshot bytes already
 hashed into each output identity; the configured model name and all scientific
 settings remain unchanged.
 
+The pinned environment also contains the optional `torchao` package, whose
+installed build requires a newer Torch API than this frozen runtime provides.
+The evaluator marks that unused optional integration unavailable before PEFT
+loads the ordinary bf16 adapters.  No quantization path is used by either arm,
+and no installed package or model byte is modified.
+
 On November 13, 2026, after the typed-L40S smoke remained queued by checkpoint
 priority despite a shortened backfill window, the user explicitly approved
 running this matched ablation on the idle A100 in their existing

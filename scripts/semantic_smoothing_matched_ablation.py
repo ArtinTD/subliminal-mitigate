@@ -193,6 +193,28 @@ def bind_frozen_base_snapshot(module, identity):
     return snapshot
 
 
+def disable_incompatible_optional_torchao(torch_module=None, import_utils=None):
+    """Prevent an unused, incompatible torchao integration from importing.
+
+    The pinned runtime contains torchao as an optional package, but its build
+    expects a newer torch API.  The experiment does not use torchao or model
+    quantization.  Mark it unavailable inside Transformers before PEFT imports
+    ``PreTrainedModel`` so ordinary bf16 adapter loading remains unchanged.
+    """
+    if torch_module is None:
+        import torch as torch_module
+    if import_utils is None:
+        import transformers.utils.import_utils as import_utils
+    if not import_utils.is_torchao_available():
+        return False
+    if hasattr(torch_module.nn.functional, "ScalingType"):
+        return False
+    import_utils._torchao_available = False
+    if import_utils.is_torchao_available():
+        raise RuntimeError("Failed to disable incompatible optional torchao")
+    return True
+
+
 def audit_method(folder, identity):
     expected = identity["protocol"]["response_count"]
     rows, saved_identity, result = pilot.audit_generation(folder, expected, "teacher")
@@ -240,6 +262,7 @@ def evaluate_method(args, method):
     module.__file__ = str(pilot.REPO / pilot.SAMPLER)
     exec(compile(source, f"{pilot.HISTORICAL_SHA}:{pilot.SAMPLER}", "exec"), module.__dict__)
     bind_frozen_base_snapshot(module, identity)
+    disable_incompatible_optional_torchao()
     original = module.sample_one
 
     def checkpointed(prompt, index, *pos, **kwargs):

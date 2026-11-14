@@ -28,14 +28,18 @@ class MatchedAblationTests(unittest.TestCase):
             load_tokenizer=lambda name: calls.append(("tokenizer", name)),
             load_base_model=lambda name, device: calls.append(
                 ("model", name, device)),
+            load_reference=lambda name, adapter, device: calls.append(
+                ("reference", name, adapter, device)),
         )
         resolved = ablation.bind_frozen_base_snapshot(module, self.identity())
         self.assertEqual(resolved, "/frozen/qwen")
         module.load_tokenizer("unsloth/Qwen3-8B")
         module.load_base_model("unsloth/Qwen3-8B", "cuda:0")
+        module.load_reference("unsloth/Qwen3-8B", "/adapter", "cuda:0")
         self.assertEqual(calls, [
             ("tokenizer", "/frozen/qwen"),
             ("model", "/frozen/qwen", "cuda:0"),
+            ("reference", "/frozen/qwen", "/adapter", "cuda:0"),
         ])
         with self.assertRaisesRegex(ValueError, "Unexpected base model"):
             module.load_tokenizer("changed/model")

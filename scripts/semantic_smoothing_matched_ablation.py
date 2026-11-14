@@ -177,6 +177,7 @@ def bind_frozen_base_snapshot(module, identity):
     snapshot = identity["runtime"]["snapshots"][BASE_MODEL]["resolved_path"]
     original_tokenizer_loader = module.load_tokenizer
     original_model_loader = module.load_base_model
+    original_reference_loader = module.load_reference
 
     def load_tokenizer(base_model_name):
         if base_model_name != BASE_MODEL:
@@ -188,8 +189,14 @@ def bind_frozen_base_snapshot(module, identity):
             raise ValueError(f"Unexpected base model: {base_model_name}")
         return original_model_loader(snapshot, device)
 
+    def load_reference(base_model_name, adapter_path, device):
+        if base_model_name != BASE_MODEL:
+            raise ValueError(f"Unexpected base model: {base_model_name}")
+        return original_reference_loader(snapshot, adapter_path, device)
+
     module.load_tokenizer = load_tokenizer
     module.load_base_model = load_base_model
+    module.load_reference = load_reference
     return snapshot
 
 

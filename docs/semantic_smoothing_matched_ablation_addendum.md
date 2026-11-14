@@ -64,8 +64,9 @@ procedure does not change any package version, model revision, checkpoint,
 prompt, or decoder setting.
 
 The evaluator passes the runtime audit's resolved Qwen snapshot directory to
-the historical tokenizer and model loaders.  This bypasses node-dependent
-offline cache-alias resolution while loading the same snapshot bytes already
+the historical tokenizer, base-model, and reference-adapter loaders.  This
+bypasses node-dependent offline cache-alias resolution while loading the same
+snapshot bytes already
 hashed into each output identity; the configured model name and all scientific
 settings remain unchanged.
 

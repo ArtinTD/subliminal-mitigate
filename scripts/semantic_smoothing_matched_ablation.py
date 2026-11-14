@@ -110,8 +110,8 @@ def decoder_arguments(method, identity, output, model_specs, prompts,
     return arguments
 
 
-def build_identity(method, stage, devices, prompts, training_config, composed_config,
-                   proof_path, reference_root):
+def build_identity(method, stage, devices, hardware_family, prompts, training_config,
+                   composed_config, proof_path, reference_root):
     proof, inputs, refs = validate_recovered_references(proof_path, reference_root)
     prompt_rows = pilot.read_json(prompts)
     prompt_count, samples_per_prompt = STAGES[stage]
@@ -133,7 +133,7 @@ def build_identity(method, stage, devices, prompts, training_config, composed_co
         "stage": stage,
         "model": "teacher",
         "devices": devices,
-        "hardware_family": "l40s",
+        "hardware_family": hardware_family,
         "reference_set_label": proof["reference_set_label"],
         "reference_provenance_status": proof["status"],
         "historical_identity_verified": proof["status"] == "verified_historical_identity",
@@ -152,13 +152,16 @@ def build_identity(method, stage, devices, prompts, training_config, composed_co
     }
 
 
-def validate_hardware(devices):
+def validate_hardware(devices, hardware_family):
     import torch
     requested = devices.split(",")
     if requested != ["cuda:0"] or torch.cuda.device_count() != 1:
-        raise ValueError("Matched ablation is frozen to one typed L40S")
-    if "L40S" not in torch.cuda.get_device_name(0):
-        raise ValueError("Matched ablation requires an L40S")
+        raise ValueError("Matched ablation is frozen to one typed GPU")
+    expected = {"l40s": "L40S", "a100": "A100"}.get(hardware_family)
+    if expected is None:
+        raise ValueError("Matched ablation supports only approved L40S or A100 hardware")
+    if expected not in torch.cuda.get_device_name(0).upper():
+        raise ValueError(f"Matched ablation requires approved {expected} hardware")
     return torch.__version__
 
 
@@ -179,10 +182,12 @@ def audit_method(folder, identity):
 
 
 def evaluate_method(args, method):
-    identity = build_identity(method, args.stage, args.devices, args.prompts,
-                              args.training_config, args.composed_config,
-                              args.reference_proof, args.reference_root)
-    identity["torch_version"] = validate_hardware(args.devices)
+    identity = build_identity(
+        method, args.stage, args.devices, args.hardware_family, args.prompts,
+        args.training_config, args.composed_config, args.reference_proof,
+        args.reference_root)
+    identity["torch_version"] = validate_hardware(
+        args.devices, args.hardware_family)
     output = Path(args.output) / args.stage / method
     output.mkdir(parents=True, exist_ok=True)
     identity_path = output / "identity.json"
@@ -406,6 +411,8 @@ def main():
                  "reference_root", "training_config", "composed_config"):
         evaluate_parser.add_argument("--" + name, required=True)
     evaluate_parser.add_argument("--devices", default="cuda:0")
+    evaluate_parser.add_argument(
+        "--hardware_family", choices=("l40s", "a100"), default="l40s")
     report_parser = sub.add_parser("report")
     report_parser.add_argument("--stage", choices=tuple(STAGES), required=True)
     report_parser.add_argument("--output", required=True)

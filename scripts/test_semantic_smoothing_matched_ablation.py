@@ -6,6 +6,7 @@ from unittest import mock
 from pathlib import Path
 import tempfile
 import json
+import types
 
 import semantic_smoothing_matched_ablation as ablation
 
@@ -58,6 +59,17 @@ class MatchedAblationTests(unittest.TestCase):
 
     def test_percentile_interpolates(self):
         self.assertEqual(ablation.percentile([0, 1], 0.5), 0.5)
+
+    def test_hardware_validation_records_approved_family(self):
+        fake_torch = types.SimpleNamespace(
+            __version__="test",
+            cuda=types.SimpleNamespace(
+                device_count=lambda: 1,
+                get_device_name=lambda _: "NVIDIA A100 80GB PCIe"))
+        with mock.patch.dict("sys.modules", {"torch": fake_torch}):
+            self.assertEqual(ablation.validate_hardware("cuda:0", "a100"), "test")
+            with self.assertRaisesRegex(ValueError, "L40S"):
+                ablation.validate_hardware("cuda:0", "l40s")
 
     def test_audit_reads_exact_metrics_not_sampler_summary(self):
         identity = {"protocol": {"response_count": 1}}

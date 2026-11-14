@@ -62,3 +62,12 @@ inherit expired package/archive mtimes during reconstruction.  Experiment
 outputs and provenance remain in the isolated ablation root.  This staging
 procedure does not change any package version, model revision, checkpoint,
 prompt, or decoder setting.
+
+On November 13, 2026, after the typed-L40S smoke remained queued by checkpoint
+priority despite a shortened backfill window, the user explicitly approved
+running this matched ablation on the idle A100 in their existing
+`gpu-a100-jamiemmt` allocation.  This is a hardware-only amendment: both arms
+must run sequentially on the same single typed A100, and every output identity
+must record `hardware_family = a100`.  The checkpoints, prompt banks, decoder,
+seed, scorer, runtime, and all smoothing settings remain frozen above.  The
+original L40S submission and receipt remain immutable scheduling provenance.

@@ -17,6 +17,7 @@ set -euo pipefail
 : "${CONDA_ENV_PREFIX:?Validated isolated runtime required}"
 : "${MATCHED_RUNTIME_ROOT:?Persistent matched-runtime root required}"
 : "${ABLATION_STAGE:?smoke or full required}"
+MATCHED_HARDWARE_FAMILY="${MATCHED_HARDWARE_FAMILY:-l40s}"
 [[ "$PILOT_ROOT" == */semantic_min_kd_pilot_v1 ]] || exit 1
 [[ "$ABLATION_ROOT" == */semantic_smoothing_matched_ablation_v1 ]] || exit 1
 [[ "$MATCHED_RUNTIME_ROOT" == */semantic_smoothing_matched_runtime_v1 ]] || exit 1
@@ -63,5 +64,6 @@ fi
     --training_config "$SEMANTIC_REPO/configs/training.yaml" \
     --composed_config "$SEMANTIC_REPO/configs/composed/eagle_joke_topaz_humor.yaml" \
     --output "$ABLATION_ROOT" \
-    --devices cuda:0
+    --devices cuda:0 \
+    --hardware_family "$MATCHED_HARDWARE_FAMILY"
 date -u
